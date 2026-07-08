@@ -37,7 +37,7 @@ class Agent:
         modified_files = set()
         self._fable_tested = False
         while iteration < self.max_iterations:
-            # Twarde żądanie użytkownika: kompresja wyłącznie co 6000 tokenów wolnej historii
+                                                                                             
             base_tokens = len(self.context.get_system_message("", "auto", "").get("content", "")) // 2 + 2000
             max_allowed = base_tokens + 6000
                 
@@ -62,11 +62,11 @@ class Agent:
             elif level_idx == 4:
                 thinking_desc = "IF you generate thoughts, you MUST wrap them inside <think> and </think> tags.\nTHINKING BEHAVIOR - EXTREME:\nAt the beginning of EACH turn, analyze the entire project. Generate an exhaustive THINK strictly inside <think> and </think> tags:\n<think>\n  |_ UNDERSTAND: <what the task is about on a project scale>\n  |_ CONTEXT: <conclusions from logs, file structures, and architecture>\n  |_ OPTIONS: <extensive list of options and paths>\n  |_ CHOICE: <final choice + impact on other modules>\n  |_ RISK: <detailed list of edge cases, security, and performance>\n  |_ PLAN: <very detailed list of steps>\n\nFor EACH PLAN point, you must write a multi-level sub-tree. In the first iteration, you MUST use the 'submit_plan' tool.\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nAfter EACH action, perform a deep evaluation:\n<think>\n  |_ EVALUATION: <detailed analysis of the returned result, error diagnosis, plan corrections>\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nForced actions: ALWAYS search all dependencies. ALWAYS run build and unit tests after EACH file edit. Perform a re-validation procedure at the end.\nCRITICAL: ALWAYS respond to the user in their own language (e.g., Polish)."
 
-            thinking_desc += f"\n\nCRITICAL: For THIS CURRENT TURN, your THINKING TOKEN BUDGET is exactly {level_info[1]} tokens. If you feel you have only 10% of your thinking capacity left, you MUST IMMEDIATELY stop planning, close the <think> block, and output the JSON tool call! Never run out of tokens before generating the tool.\nCRITICAL: NEVER write 'TOOL: None' unless you are absolutely 100% finished with the user's task and have no code left to write. If the user asks for code, you MUST use a tool (e.g. write_file)!\nCRITICAL: Writing 'TOOL: <name>' in your thought block is NOT enough. You MUST actually trigger the native JSON function calling mechanism immediately after closing the <think> block!"
+            thinking_desc += f"\n\nCRITICAL: For THIS CURRENT TURN, your THINKING TOKEN BUDGET is exactly {level_info[1]} tokens. If you feel you have only 10% of your thinking capacity left, you MUST IMMEDIATELY stop planning, close the <think> block, and output the JSON tool call! Never run out of tokens before generating the tool.\nCRITICAL: NEVER write 'TOOL: None' unless you are absolutely 100% finished with the user's task and have no code left to write. If the user asks for code, you MUST use a tool (e.g. write_file)!\nCRITICAL: Writing 'TOOL: <name>' in your thought block is NOT enough. You MUST actually trigger the native JSON function calling mechanism immediately after closing the <think> block!\nCRITICAL: IF YOU DO NOT KNOW something (a function name, file path, how a library works, how to fix a specific error), DO NOT GUESS! ALWAYS search before taking action.\nCRITICAL Tool Usage Guide:\n1) 'read_file': use ONLY to read the content of a specific file.\n2) 'glob': use to search for FILE PATHS by name or pattern.\n3) 'code_search': use ONLY to search for text/symbols/functions INSIDE files.\nDO NOT pass file paths as the query into 'code_search'! It searches file contents, not paths.\n4) 'bugs': use to scan the project for syntax errors and retrieve line numbers for broken files marked with a red dot.\n5) 'replace_lines': use to precisely edit fragments by providing start_line and end_line. ALWAYS use this instead of write_file for editing existing files!\n6) 'append_file': use to quickly add new code to the very end of a file.\nNEVER use write_file to modify an existing file! write_file is ONLY for completely new files.\n7) NEVER add any comments (e.g., lines starting with #) to the code you write or edit. The code MUST be completely clean and free of any annotations or comments."
             
             messages = self.context.get_messages(self.get_tool_desc(), thinking_desc=thinking_desc)
             
-            # Filtrowanie narzędzi
+                                  
             if mode == "plan":
                 allowed_tools = ["read_file", "list_dir", "grep", "search_web", "save_plan"]
                 filtered_tools = [t for t in TOOLS_DEFINITIONS if t["function"]["name"] in allowed_tools]
@@ -88,11 +88,21 @@ class Agent:
                 passed_tools = filtered_tools
                 
             try:
+                grammar_path = None
+                if use_native_tools and passed_tools:
+                    import os
+                    grammar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grammars", "tool_call.gbnf")
+                    
                 if hasattr(self.model, "llm"):
                     _ = self.model.llm
-                stream = self.model.stream_chat(messages, tools=passed_tools, reasoning_budget=level_info[1])
+                    
+                kwargs = {}
+                if grammar_path and type(self.model).__name__ == "LlamaModel":
+                    kwargs["grammar_path"] = grammar_path
+                    
+                stream = self.model.stream_chat(messages, tools=passed_tools, reasoning_budget=level_info[1], **kwargs)
             except Exception as e:
-                console.print(f"\n[red bold]Błąd ładowania modelu: {e}[/red bold]\n[yellow]Wpisz /model aby zmienić na poprawny model![/yellow]")
+                console.print(f"\n[red bold]Model loading error: {e}[/red bold]\n[yellow]Type /model to switch to a valid model![/yellow]")
                 return
                 
             full_content = ""
@@ -146,7 +156,7 @@ class Agent:
                                     json_start_idx = full_content.find(raw[0])
                                     
                             if json_start_idx != -1:
-                                # Wykryto początek JSON - drukujemy tylko to co przed nim, a resztę do spinnera
+                                                                                                               
                                 chunk_to_print = full_content[printed_idx:json_start_idx]
                                 if chunk_to_print:
                                     if tree.live.is_started:
@@ -167,18 +177,20 @@ class Agent:
                                 if json_spinner:
                                     json_spinner.update(full_content[json_start_idx:])
                             else:
-                                # Brak JSON - normalne drukowanie tekstu konwersacyjnego
+                                                                                        
                                 if json_spinner:
                                     json_spinner.stop()
                                     json_spinner = None
                                 chunk = full_content[printed_idx:]
                                 if chunk:
-                                    if tree.live.is_started:
-                                        tree.stop()
-                                        console.print() # nowa linia po drzewie
-                                    import sys
-                                    console.print(chunk, end="")
-                                    sys.stdout.flush()
+                                    should_hide = bool(modified_files) and not self._fable_tested
+                                    if not should_hide:
+                                        if tree.live.is_started:
+                                            tree.stop()
+                                            console.print()                        
+                                        import sys
+                                        console.print(chunk, end="")
+                                        sys.stdout.flush()
                                     printed_idx = len(full_content)
                                     
                     if thinking:
@@ -203,7 +215,7 @@ class Agent:
                         if json_spinner:
                             json_spinner.update(full_content)
             
-                # Opróżnienie bufora jeśli strumień się skończył a to nie było narzędzie
+                                                                                        
                 if not tool_detected and printed_idx < len(full_content):
                     content_to_print += full_content[printed_idx:]
                     printed_idx = len(full_content)
@@ -211,9 +223,9 @@ class Agent:
             except Exception as e:
                 error_str = str(e)
                 if "exceed context window" in error_str:
-                    console.print(f"\n[red bold]Błąd: Przepełniono pamięć kontekstu (za dużo tekstu): {error_str}[/red bold]\n[yellow]Wyczyść historię wpisując komendę /clear, lub skróć swój ostatni prompt.[/yellow]")
+                    console.print(f"\n[red bold]Error: Context memory overflow (too much text): {error_str}[/red bold]\n[yellow]Clear history by typing /clear, or shorten your last prompt.[/yellow]")
                 else:
-                    console.print(f"\n[red bold]Krytyczny błąd silnika podczas generowania: {error_str}[/red bold]\n[yellow]Najprawdopodobniej brakło pamięci VRAM (Out Of Memory) lub format modelu nie jest do końca wspierany.[/yellow]")
+                    console.print(f"\n[red bold]Critical engine error during generation: {error_str}[/red bold]\n[yellow]Most likely out of VRAM (Out Of Memory) or model format is not fully supported.[/yellow]")
                 return
             finally:
                 if json_spinner:
@@ -223,12 +235,12 @@ class Agent:
                 tree.stop()
                 
             if not tool_calls:
-                # Wzmocniony Fallback dla zhalucynowanych bloków JSON
+                                                                     
                 full_content_str = full_content
                 import re
                 json_blocks = re.findall(r"```json\s*(.*?)\s*```", full_content_str, re.DOTALL)
                 
-                # Próba 1.5: tag <json> używany przez niektóre modele
+                                                                     
                 if not json_blocks:
                     json_blocks = re.findall(r"<json>\s*(.*?)\s*</json>", full_content_str, re.DOTALL)
                     if not json_blocks and "<json>" in full_content_str:
@@ -236,13 +248,13 @@ class Agent:
                         if len(parts) > 1:
                             json_blocks = [parts[-1].strip()]
                 
-                # Próba 2: Niezamknięty blok ```json
+                                                    
                 if not json_blocks and "```json" in full_content_str:
                     parts = full_content_str.split("```json")
                     if len(parts) > 1:
                         json_blocks = [parts[-1].strip()]
                 
-                # Próba 3: surowy JSON, jeśli nie ma ```json ani <json>
+                                                                       
                 if not json_blocks:
                     idx = full_content_str.find("{")
                     if idx != -1:
@@ -251,7 +263,7 @@ class Agent:
                         if raw.startswith("{") and 'name' in raw:
                             json_blocks = [raw]
                             
-                # Oczyszczanie tagów zamykających
+                                                 
                 cleaned_blocks = []
                 for b in json_blocks:
                     b = re.sub(r'</json>\s*$', '', b).strip()
@@ -270,8 +282,8 @@ class Agent:
                     if mock_calls:
                         tool_calls = mock_calls
                 else:
-                    # Extract outermost braces
-                    match = re.search(r'\{.*\}', raw, re.DOTALL)
+                                              
+                    match = re.search(r'\{.*\}', full_content_str, re.DOTALL)
                     if match:
                         raw = match.group(0)
                         try:
@@ -280,8 +292,8 @@ class Agent:
                                 tool_calls = [{"id": "call_mock", "type": "function", "function": parsed}]
                         except json.JSONDecodeError:
                             pass
-                    # If that fails, try finding multiple JSON objects (e.g. {}{})
-                    blocks = re.split(r'}\s*{', raw)
+                                                                                  
+                    blocks = re.split(r'}\s*{', full_content_str)
                     mock_calls = []
                     for i, b in enumerate(blocks):
                         if i > 0: b = "{" + b
@@ -296,7 +308,7 @@ class Agent:
                         tool_calls = mock_calls
                         full_content = ""
 
-            # Deduplikacja narzędzi na wypadek gdyby model wygenerował kilka takich samych bloków JSON pod rząd
+                                                                                                               
             if tool_calls:
                 unique_calls = []
                 seen_sigs = set()
@@ -308,14 +320,14 @@ class Agent:
                         unique_calls.append(tc)
                 tool_calls = unique_calls
 
-            # Inicjalizacja licznika pętli
+                                          
             self.self_correction_loops = getattr(self, "self_correction_loops", 0)
 
-            # Self-Correction Loop for missing thinking, empty response or silent thinking
+                                                                                          
             if not full_content.strip() and not tool_calls:
                 self.self_correction_loops += 1
                 if self.self_correction_loops >= 5:
-                    console.print("\n[red]⚠️ Przerwano pętlę samonaprawczą (osiągnięto limit 5 prób).[/red]")
+                    console.print("\n[red]⚠️ Self-correction loop interrupted (reached limit of 5 attempts).[/red]")
                     break
                 if not full_thinking.strip():
                     console.print("\n[yellow]⚠️ Model generated completely empty response. Retrying (self-correction)...[/yellow]")
@@ -327,10 +339,10 @@ class Agent:
                 continue
 
             if level_idx > 0 and not full_thinking.strip() and not ("<think>" in full_content):
-                console.print("\n[dim yellow]?? Ostrzeżenie: Model zignorował strukturę <think>, ale aplikacja kontynuuje pracę...[/dim yellow]")
+                console.print("\n[dim yellow]?? Warning: Model ignored the <think> structure, but the application continues...[/dim yellow]")
 
-            # if not tree_printed:
-            #    tree.print_tree()
+                                  
+                                  
 
             if not tool_calls:
                 import re
@@ -338,7 +350,7 @@ class Agent:
                 if tool_match and tool_match.group(1).strip().lower() != "none" and tool_match.group(1).strip().lower() != "'none'":
                     self.self_correction_loops += 1
                     if self.self_correction_loops >= 5:
-                        console.print("\n[red]⚠️ Przerwano pętlę samonaprawczą (osiągnięto limit 5 prób).[/red]")
+                        console.print("\n[red]⚠️ Self-correction loop interrupted (reached limit of 5 attempts).[/red]")
                         break
                     action_text = tool_match.group(1).strip()
                     action_text = tool_match.group(1).strip()
@@ -355,44 +367,61 @@ class Agent:
                     elif full_content.count("{") > full_content.count("}"):
                         reason = "Kod został tak gwałtownie ucięty, że nawet system Rescue Mode nie był w stanie poskładać uszkodzonych klamer."
 
-                    console.print(f"\n[yellow]⚠️ Model zaplanował akcję: '{action_text}', ale zawiodł przy wywoływaniu narzędzia.[/yellow]")
-                    console.print(f"[yellow]   Wykryty błąd: {reason}[/yellow]")
-                    console.print(f"[yellow]   Akcja: Wymuszam samonaprawę (Self-Correction)... Model za chwilę poprawi swój błąd.[/yellow]")
+                    console.print(f"\n[yellow]⚠️ Model planned an action: '{action_text}', ale zawiodł przy wywoływaniu narzędzia.[/yellow]")
+                    console.print(f"[yellow]   Detected error: {reason}[/yellow]")
+                    console.print(f"[yellow]   Action: Forcing Self-Correction... The model will fix its error shortly.[/yellow]")
                     self.context.add_assistant_message(full_content)
                     self.context.add_user_message(f"Błąd Systemowy: Zaplanowałeś akcję w tagu <think>: '{action_text}', ale zawiodłeś. Zamiast wygenerować poprawne natywne wywołanie narzędzia, najprawdopodobniej zapomniałeś o wymaganej strukturze (klucz 'arguments') lub wypisałeś surowy tekst. Twój JSON musi w 100% wyglądać tak: {{\n  \"name\": \"nazwa_narzedzia\",\n  \"arguments\": {{\n    \"parametr\": \"wartosc\"\n  }}\n}}\nPopraw swój błąd i wygeneruj poprawne wywołanie narzędzia już teraz.")
                     continue
                     
-                if not full_content:
-                    console.print("[gray50](Model did not generate a response)[/]")
-                
-                # Resetujemy licznik, bo model poprawnie użył narzędzi lub wygenerował tekst
-                self.self_correction_loops = 0
-                
-                # Fable 5 Auto-Correction Phase
+                                           
                 if modified_files and not self._fable_tested:
                     self._fable_tested = True
                     from .ui import MUTED_COLOR
-                    console.print("\n[white bold]● auto testing app[/white bold]")
-                    import subprocess
-                    test_results = ""
-                    for f in list(modified_files):
-                        if not os.path.exists(f): continue
-                        console.print(f"[{MUTED_COLOR}]  |_ Testing {f}...[/]")
-                        try:
-                            cmd = ["node", f] if f.endswith(".js") else ["python", f]
-                            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                            if res.returncode != 0:
-                                test_results += f"File {f} failed with exit code {res.returncode}:\n{res.stderr or res.stdout}\n\n"
-                        except Exception as e:
-                            test_results += f"Could not run {f}: {e}\n\n"
-                            
-                    if test_results:
-                        console.print("[red bold]✗ Tests failed! Model will autonomously fix the code.[/red bold]")
+                    import sys
+                    sys_path_added = False
+                    if "src" not in sys.path:
+                        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                        sys_path_added = True
+                        
+                    from tools.execution import run_tests
+                    if not getattr(self, "test_tool_printed", False):
+                        print_tool_call("tests", "Running tests on modified files")
+                        self.test_tool_printed = True
+                        
+                    test_results = run_tests(list(modified_files))
+                    
+                    if sys_path_added:
+                        sys.path.pop(0)
+                        
+                    if "Exit code: 0" in test_results and "Error" not in test_results:
+                        console.print(f"  [{MUTED_COLOR}]⎿  attempt {getattr(self, 'fix_attempts', 0) + 1}/3...[/]")
+                        console.print("  [green]⎿  done[/green]")
+                        self.test_tool_printed = False
+                        if full_content:
+                            console.print(full_content)
                         self.context.add_assistant_message(full_content)
-                        self.context.add_user_message(f"System Error (Fable 5 Auto-Test): I automatically tested the files you modified. Some of them crashed. You MUST fix these errors before finishing:\n\n{test_results}\n\nAnalyze the error, plan a fix, and use tools to correct it.")
-                        continue
+                        break
+                    elif "ℹ No test framework detected — syntax check only (OK)" in test_results:
+                        console.print(f"  [{MUTED_COLOR}]⎿  attempt {getattr(self, 'fix_attempts', 0) + 1}/3...[/]")
+                        console.print("  [green]⎿  done[/green]")
+                        self.test_tool_printed = False
+                        if full_content:
+                            console.print(full_content)
+                        self.context.add_assistant_message(full_content)
+                        break
                     else:
-                        console.print("[green bold]✓ All edited files executed successfully![/green bold]")
+                        self.fix_attempts = getattr(self, "fix_attempts", 0) + 1
+                        console.print(f"  [{MUTED_COLOR}]⎿  attempt {self.fix_attempts}/3...[/]")
+                        if self.fix_attempts > 3:
+                            console.print("  [red]⎿  canceled[/red]")
+                            self.test_tool_printed = False
+                            self.context.add_assistant_message(full_content)
+                            break
+                        else:
+                            self.context.add_assistant_message(full_content)
+                            self.context.add_user_message(f"System Error (Auto-Test): Tests for modified files failed. Ignore previous successes. You MUST fix these errors:\n\n{test_results}\n\nUse tools (e.g. code_search, edit_file) to diagnose and fix the issue.")
+                            continue
 
                 self.context.add_assistant_message(full_content)
                 break
@@ -400,7 +429,7 @@ class Agent:
             self.context.add_assistant_message(full_content, tool_calls=tool_calls)
             total_tools += len(tool_calls)
             
-            # Infinite loop protection
+                                      
             sig = json.dumps([{"name": tc["function"]["name"], "args": tc["function"].get("arguments", "{}")} for tc in tool_calls])
             if getattr(self, "last_tool_sig", None) == sig:
                 self.consecutive_identical_calls = getattr(self, "consecutive_identical_calls", 0) + 1
@@ -408,23 +437,24 @@ class Agent:
                 self.consecutive_identical_calls = 0
                 self.last_tool_sig = sig
                 
-            if self.consecutive_identical_calls == 2:
-                console.print("\n[red]⚠️ Loop detected (model repeated the same faulty tool 3 times). Forcing change of approach...[/red]")
-                self.context.add_user_message("System Error: You are stuck in a loop. You repeated the EXACT SAME TOOL CALL 3 times and it failed. DO NOT USE THIS EXACT TOOL CALL AGAIN. You must change your approach, use a different tool, or fix the arguments.")
+            if self.consecutive_identical_calls == 9:
+                console.print("\n[red]⚠️ Loop detected (model repeated the same faulty tool 10 times). Forcing change of approach...[/red]")
+                self.context.add_user_message("System Error: You are stuck in a loop. You repeated the EXACT SAME TOOL CALL 10 times and it failed. DO NOT USE THIS EXACT TOOL CALL AGAIN. You must change your approach, use a different tool, or fix the arguments.")
                 continue
-            elif self.consecutive_identical_calls >= 4:
+            elif self.consecutive_identical_calls >= 11:
                 console.print("\n[red]⚠️ Auto-execution stopped: Fatal loop detected.[/red]")
                 self.context.add_user_message("System: Fatal loop detected. Execution paused.")
                 break
                 
-            # Handle tool calls
+                               
             for tc in tool_calls:
                 func = tc["function"]
                 name = func.get("name", "")
+                name_lower = name.lower()
                 args_str = func.get("arguments", "{}")
                 
                 if not name:
-                    console.print("\n[red]⚠️ Przerwane wywołanie narzędzia (ucięte przez limit tokenów).[/red]")
+                    console.print("\n[red]⚠️ Interrupted tool call (truncated by token limit).[/red]")
                     self.context.add_tool_message(tc.get("id", "unknown"), "unknown", "System Error: Your tool call was incomplete because you hit the max_tokens limit. Keep your thinking block much shorter and try again.")
                     continue
                     
@@ -455,39 +485,42 @@ class Agent:
                     arg_summary = f'"{args["pattern"]}"'
                     
                 spinner = None
-                if name in ["grep", "search_web"]:
+                if name_lower in ["grep", "search_web"]:
                     from .ui import SearchSpinner
                     spinner = SearchSpinner(args.get("query", args.get("pattern", "")), is_web=(name == "search_web"))
                     spinner.start()
                 else:
                     print_tool_call(display_name, arg_summary)
                 
-                # Check for confirmations based on mode
+                                                       
                 is_md_in_plan = mode == "plan" and name in ["write_file", "create_file", "edit_file"] and args.get("path", "").endswith(".md")
                 
-                if mode == "plan" and name in ["write_file", "edit_file", "delete_file", "bash", "create_file", "run_python"] and not is_md_in_plan:
+                if mode == "plan" and name in ["write_file", "edit_file", "delete_file", "bash", "commands", "create_file", "run_python"] and not is_md_in_plan:
                     result = "Error: Tool execution blocked in 'plan' mode. You can only create/edit .md files (e.g. plan.md)."
                     if spinner:
                         spinner.stop("Error")
                     else:
                         print_tool_result(result)
                 else:
-                    is_modifying = name in ["write_file", "edit_file", "delete_file", "create_file", "bash", "run_python"]
-                    is_dangerous = name in ["bash", "run_python"]
+                    is_modifying = name in ["write_file", "edit_file", "delete_file", "create_file", "bash", "commands", "run_python"]
+                    is_dangerous = name in ["bash", "commands", "run_python"]
                     
-                    if name in ["write_file", "edit_file", "create_file"]:
+                    if name_lower in ["write_file", "edit_file", "create_file", "replace_lines", "append_file"]:
                         p = args.get("path", "")
+                        content_to_print = args.get("content", args.get("new_str", args.get("new_content", "")))
                         if p.endswith(".py") or p.endswith(".js"):
                             modified_files.add(os.path.abspath(p))
 
-                    if name in ["write_file", "create_file"]:
+                    if name_lower in ["write_file", "create_file", "append_file"]:
                         print_code_panel(os.path.abspath(args.get("path", "file")), args.get("content", ""))
-                    elif name == "edit_file":
+                    elif name_lower == "replace_lines":
+                        print_code_panel(os.path.abspath(args.get("path", "file")), args.get("new_content", ""))
+                    elif name_lower == "edit_file":
                         print_diff(args.get("path", "file"), args.get("old_str", ""), args.get("new_str", ""))
-                    elif name == "bash":
+                    elif name_lower == "bash":
                         cmd_str = args.get("command", "").strip()
                         if not cmd_str:
-                            # Próba "samoleczenia" - jeśli model nazwał argument "cmd" lub "script" zamiast "command"
+                                                                                                                     
                             for k, v in args.items():
                                 if isinstance(v, str) and v.strip():
                                     cmd_str = v.strip()
@@ -500,7 +533,7 @@ class Agent:
                             self.context.add_tool_message(tc["id"], name, err_msg)
                             continue
                         print_code_panel("Terminal", cmd_str, lexer_override="bash")
-                    elif name == "run_python":
+                    elif name_lower == "run_python":
                         if "code" in args:
                             print_code_panel("Python Run (Code)", args["code"], lexer_override="python")
                         else:
@@ -514,9 +547,9 @@ class Agent:
                     requires_prompt = False
                     if mode != "auto" and not is_md_in_plan and is_modifying:
                         requires_prompt = True
-                    # W trybie auto wszystkie komendy, nawet bash, lecą z automatu:
-                    # elif mode == "auto" and not is_md_in_plan and is_dangerous:
-                    #     requires_prompt = True
+                                                                                   
+                                                                                 
+                                                
                         
                     ans = "y"
                     if requires_prompt:
@@ -549,12 +582,32 @@ class Agent:
                             result = "User rejected the operation. Please rethink and try a different approach."
                         if spinner: spinner.stop("Rejected")
                         else: print_tool_result("Rejected. Model will try again.")
-                    elif name == "syntax_error":
+                    elif name_lower == "syntax_error":
                         if spinner: spinner.stop("Truncated Code")
                         result = "System Error: Your JSON tool call was severely truncated or malformed (JSONDecodeError). THE FILE WAS NOT CREATED YET! Do not use 'edit_file' on a file you failed to create. If you hit the token limit, try writing the file using 'write_file' again but maybe in smaller chunks."
                     else:
-                        result = execute_tool(name, args, restricted_dir=os.getcwd() if getattr(self.context, 'ide_mode', False) else None)
+                        result = execute_tool(name_lower, args, agent_instance=self, restricted_dir=os.getcwd() if getattr(self.context, 'ide_mode', False) else None)
                         
+                        if name_lower in ["write_file", "create_file", "edit_file", "replace_lines", "append_file"] and "Error" not in str(result):
+                            p = args.get("path", "")
+                            if p.endswith(".py") or p.endswith(".js"):
+                                try:
+                                                                                      
+                                    with open(os.path.abspath(p), "r", encoding="utf-8") as f:
+                                        current_code = f.read()
+                                        
+                                    from verifier import verify_code
+                                                                                                         
+                                    task_ctx = ""
+                                    if len(self.context.messages) > 1:
+                                        task_ctx = self.context.messages[1].get("content", "")[:1000]
+                                        
+                                    v_res = verify_code(self.model, os.path.abspath(p), current_code, task_ctx)
+                                    if v_res.get("status") == "NEEDS_FIX":
+                                        result = str(result) + f"\n\n[SELF-CHECK WARNING] Potential issues detected in code. You must review/fix them (self-verify attempt 1/1):\n{v_res.get('issues')}"
+                                except Exception as e:
+                                    pass
+                                    
                         if "rescued" in tc.get("id", ""):
                             result = str(result) + "\n\n[SYSTEM WARNING]: Your JSON tool call was cut off (JSONDecodeError). The file was forcefully saved up to the point it was cut off. Please use 'read_file' or 'edit_file' to inspect the end of the file, fix the broken syntax, and continue writing the remaining code."
                         
@@ -562,24 +615,51 @@ class Agent:
                             lines = len([l for l in str(result).splitlines() if l.strip() and "Results for" not in l])
                             summary = f"{lines} results" if "Error" not in str(result) else "Error"
                             spinner.stop(summary, details=str(result))
-                        elif name in ["read_file"]:
+                        elif name_lower in ["read_file"]:
                             lines = len(str(result).splitlines())
                             print_tool_result(f"Read {lines} lines")
-                        elif name == "edit_file":
+                        elif name_lower == "edit_file":
                             added = len(args.get("new_str", "").splitlines())
                             removed = len(args.get("old_str", "").splitlines())
                             print_tool_result(f"Edited {args.get('path', 'file')} ([green]+{added}[/] / [red]-{removed}[/])")
-                        elif name in ["write_file", "create_file"]:
+                        elif name_lower in ["write_file", "create_file"]:
                             added = len(args.get("content", "").splitlines())
                             print_tool_result(f"Created/Overwritten {args.get('path', 'file')} ({added} lines)")
-                        elif name == "bash":
+                        elif name_lower in ["bash", "commands"]:
                             if "Exit code: 0" in str(result):
                                 print_tool_result("Command successful")
                             else:
                                 print_tool_result("Command failed")
+                        elif name_lower in ["ls", "glob", "code_search"]:
+                            res_str = str(result)
+                            if "Error" not in res_str:
+                                title_suffix = ""
+                                if name_lower == "ls":
+                                    p = args.get("path", ".")
+                                    if not p or p == "." or p == "/" or p == "\\":
+                                        p = os.path.basename(os.path.abspath("."))
+                                    title_suffix = f" {p}"
+                                elif name_lower == "glob" and "pattern" in args: title_suffix = f" {args['pattern']}"
+                                elif name_lower == "code_search" and "query" in args: title_suffix = f" {args['query']}"
+                                print_code_panel(f"Result ({name}{title_suffix})", res_str, lexer_override="text", show_line_numbers=False)
+                            else:
+                                print_tool_result(res_str)
+                        elif name_lower in ["bugs", "tests", "run_tests"]:
+                            res_str = str(result)
+                            if name_lower in ["tests", "run_tests"]:
+                                for line in res_str.splitlines():
+                                    print_tool_result(line, escape_text=True)
+                            else:
+                                for line in res_str.splitlines():
+                                    from rich.markup import escape
+                                    line_esc = escape(line)
+                                    if line_esc.strip().startswith("|_"):
+                                        console.print(f"[bright_black]     {line_esc}[/bright_black]", highlight=False)
+                                    else:
+                                        console.print(f"[bright_black]  ⎿  {line_esc}[/bright_black]", highlight=False)
                         else:
                             res_str = str(result)
-                            print_tool_result(res_str[:60].replace("\n", " ") + "..." if len(res_str) > 60 else res_str.replace("\n", " "))
+                            print_tool_result(res_str[:60].replace("\n", " ") + "..." if len(res_str) > 60 else res_str.replace("\n", " "), escape_text=True)
 
                 self.context.add_tool_message(tc["id"], name, str(result))
                 

@@ -23,7 +23,7 @@ class IDEServer:
                 self.server = server
                 self.port = server.sockets[0].getsockname()[1]
                 self._write_lock()
-                await asyncio.Future()  # run forever
+                await asyncio.Future()               
                 
         try:
             self.loop.run_until_complete(run())

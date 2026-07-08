@@ -61,7 +61,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
     def get_context_limit(self) -> int:
         return 10000000
     def stream_chat(self, messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, reasoning_budget: int = 16384) -> Generator[Tuple[str, str, Any], None, None]:
-        # Convert tools to OpenAI format if provided
+                                                    
         openai_tools = None
         if tools:
             openai_tools = [{"type": "function", "function": t["function"]} for t in tools]
@@ -70,7 +70,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
         content_buffer = ""
         full_content_str = ""
         try:
-            # Wstrzyknięcie narzędzi do system promptu dla opornych modeli
+                                                                          
             if openai_tools and self._needs_tool_injection():
                 tool_injection = self._build_tool_system_prompt(openai_tools)
                 if messages and messages[0]["role"] == "system":
@@ -78,14 +78,14 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                 else:
                     messages.insert(0, {"role": "system", "content": tool_injection})
                 
-                # Ustawienie modelu do pionu - dodanie rygoru do OSTATNIEJ wiadomości
+                                                                                   
                 if messages and messages[-1]["role"] == "user":
                     warning = "\n\n[CRITICAL SYSTEM WARNING: Twoim bezwzględnym zadaniem w tej turze jest wywołanie narzędzia, ale ZANIM to zrobisz, MUSISZ przeprowadzić głęboką, analityczną analizę. Dopiero po dogłębnym myśleniu wygeneruj blok ```json z narzędziem!]"
                     messages[-1]["content"] += warning
                 
                 openai_tools = None
 
-            # Dodatkowe wymuszenie struktury drzewa dla modeli lokalnych (LocalLLMAPI)
+                                                                                      
             if "127.0.0.1" in getattr(self, "base_url", "") or "localhost" in getattr(self, "base_url", ""):
                 sys_content = messages[0].get("content", "") if messages else ""
                 req = ""
@@ -141,7 +141,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                     
                 delta = chunk.choices[0].delta
                 
-                # Accumulate tool calls chunks
+                                              
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -154,9 +154,9 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                                     "arguments": tc.function.arguments or ""
                                 }
                             }
-                            # Inform user in the tree that tool generation started
+                                                                                  
                             if tc.function.name:
-                                yield "", f"- Uruchamiam narzędzie: {tc.function.name}...\n", None
+                                yield "", f"- Running tool: {tc.function.name}...\n", None
                         else:
                             if tc.function.name:
                                 if tc.function.name not in active_tool_calls[idx]["function"]["name"]:
@@ -174,6 +174,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                             idx1 = content_buffer.find("<think>")
                             idx2 = content_buffer.find("<thinking>")
                             idx3 = content_buffer.find("<|channel>thought")
+                            idx4 = content_buffer.find("<|think|>")
                             
                             idx = idx1
                             tag_len = 7
@@ -183,6 +184,9 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                             if idx3 != -1 and (idx == -1 or idx3 < idx):
                                 idx = idx3
                                 tag_len = 18
+                            if idx4 != -1 and (idx == -1 or idx4 < idx):
+                                idx = idx4
+                                tag_len = 9
                             
                             if idx != -1:
                                 if idx > 0:
@@ -206,6 +210,8 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                             idx1 = content_buffer.find("</think>")
                             idx2 = content_buffer.find("</thinking>")
                             idx3 = content_buffer.find("<channel|>")
+                            idx4 = content_buffer.find("</|think|>")
+                            idx5 = content_buffer.find("<|/think|>")
                             
                             idx = idx1
                             tag_len = 8
@@ -214,6 +220,12 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                                 tag_len = 11
                             if idx3 != -1 and (idx == -1 or idx3 < idx):
                                 idx = idx3
+                                tag_len = 10
+                            if idx4 != -1 and (idx == -1 or idx4 < idx):
+                                idx = idx4
+                                tag_len = 10
+                            if idx5 != -1 and (idx == -1 or idx5 < idx):
+                                idx = idx5
                                 tag_len = 10
                             
                             if idx != -1:
@@ -241,12 +253,12 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                 else:
                     yield content_buffer, "", None
             
-            # Wzmocniony Fallback dla zhalucynowanych bloków JSON
+                                                                 
             if not active_tool_calls and full_content_str.strip():
                 import re
                 json_blocks = re.findall(r"```json\s*(.*?)\s*```", full_content_str, re.DOTALL)
                 
-                # Próba 1.5: tag <json>
+                                       
                 if not json_blocks:
                     json_blocks = re.findall(r"<json>\s*(.*?)\s*</json>", full_content_str, re.DOTALL)
                     if not json_blocks and "<json>" in full_content_str:
@@ -254,13 +266,13 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                         if len(parts) > 1:
                             json_blocks = [parts[-1].strip()]
                 
-                # Próba 2: Niezamknięty blok ```json
+                                                    
                 if not json_blocks and "```json" in full_content_str:
                     parts = full_content_str.split("```json")
                     if len(parts) > 1:
                         json_blocks = [parts[-1].strip()]
                 
-                # Próba 3: surowy JSON
+                                      
                 if not json_blocks:
                     idx = full_content_str.find("{")
                     if idx != -1:
@@ -269,25 +281,25 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                         if raw.startswith("{") and 'name' in raw:
                             json_blocks = [raw]
                             
-                # Oczyszczanie tagów zamykających
+                                                 
                 cleaned_blocks = []
                 for b in json_blocks:
                     b = re.sub(r'</json>\s*$', '', b).strip()
                     cleaned_blocks.append(b)
                 json_blocks = cleaned_blocks
                             
-                # Próba 4: Ekstremalna halucynacja - model wypisał czysty blok Markdown zamiast JSON
+                                                                                                    
                 if not json_blocks:
                     md_blocks = re.findall(r"```(?:html|css|js|javascript|python|py|cpp|c|java|go|rs|rust|sh|bash)(.*?)```", full_content_str, re.DOTALL | re.IGNORECASE)
                     if not md_blocks and "```" in full_content_str:
-                        # Może niezamknięty blok markdown
+                                                         
                         parts = re.split(r"```(?:html|css|js|javascript|python|py|cpp|c|java|go|rs|rust|sh|bash)?", full_content_str, flags=re.IGNORECASE)
                         if len(parts) > 1:
                             md_blocks = [parts[-1]]
                     
                     if md_blocks:
                         code = md_blocks[-1].strip()
-                        # Próba znalezienia nazwy pliku w tagu NEXT_ACTION
+                                                                          
                         path = "rescued_file.txt"
                         action_match = re.search(r'NEXT_ACTION:\s*(.*?)(?:\n|$)', full_content_str)
                         if action_match:
@@ -357,7 +369,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                                 }
                             }
             
-            # End of stream: yield accumulated tool calls
+                                                         
             if active_tool_calls:
                 final_calls = []
                 for idx, tc_data in active_tool_calls.items():
@@ -365,7 +377,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                     try:
                         tc_data["function"]["arguments"] = json.loads(args_str)
                     except Exception:
-                        # Keep it as string if invalid, agent.py might fix it
+                                                                             
                         pass
                     final_calls.append(tc_data)
                 
@@ -374,7 +386,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
         except Exception as e:
             err_str = str(e).lower()
             if "peer closed connection" in err_str or "incomplete chunked read" in err_str or "readerror" in err_str:
-                # Wyciszamy błąd i udajemy, że połączenie po prostu się zakończyło
+                                                                                  
                 if active_tool_calls:
                     final_calls = []
                     for idx, tc_data in active_tool_calls.items():

@@ -38,7 +38,7 @@ class LlamaModel:
                     if self.n_ctx == 0 or self.n_ctx > 8192:
                         from rich.console import Console
                         console = Console()
-                        console.print("\n[yellow]Ostrzeżenie: Brak VRAM dla pełnego okna kontekstowego (n_ctx=0). Wykonuję awaryjny fallback do bezpiecznych 8192 tokenów...[/yellow]")
+                        console.print("\n[yellow]Warning: No VRAM for full context window (n_ctx=0). Executing emergency fallback to safe 8192 tokens...[/yellow]")
                         self.n_ctx = 8192
                         self._llm = Llama(
                             model_path=self.model_path,
@@ -57,17 +57,19 @@ class LlamaModel:
             return self.llm.n_ctx()
         return 16384 if self.n_ctx == 0 else self.n_ctx
         
-    def stream_chat(self, messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, **kwargs) -> Generator[Tuple[str, str, Dict], None, None]:
+    def stream_chat(self, messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, grammar_path: str = None, **kwargs) -> Generator[Tuple[str, str, Dict], None, None]:
         """
         Streams the response from the model.
         Yields tuples of (content_chunk, thinking_chunk, tool_calls_dict)
         """
+        grammar = llama_cpp.LlamaGrammar.from_file(grammar_path) if grammar_path else None
         response = self.llm.create_chat_completion(
             messages=messages,
             tools=tools,
             stream=True,
             temperature=0.3,
-            repeat_penalty=1.15
+            repeat_penalty=1.15,
+            grammar=grammar
         )
         
         in_thinking = False
@@ -96,8 +98,16 @@ class LlamaModel:
                     if not in_thinking:
                         idx1 = content_buffer.find("<think>")
                         idx2 = content_buffer.find("<thinking>")
-                        idx = idx1 if idx1 != -1 else idx2
-                        tag_len = 7 if idx1 != -1 else 10
+                        idx3 = content_buffer.find("<|think|>")
+                        
+                        idx = idx1
+                        tag_len = 7
+                        if idx2 != -1 and (idx == -1 or idx2 < idx):
+                            idx = idx2
+                            tag_len = 10
+                        if idx3 != -1 and (idx == -1 or idx3 < idx):
+                            idx = idx3
+                            tag_len = 9
                         
                         if idx != -1:
                             if idx > 0:
@@ -105,7 +115,7 @@ class LlamaModel:
                             in_thinking = True
                             content_buffer = content_buffer[idx+tag_len:]
                         else:
-                            # Hold back characters that could form a tag
+                                                                        
                             if "<" in content_buffer:
                                 last_lt = content_buffer.rfind("<")
                                 yield content_buffer[:last_lt], "", None
@@ -117,8 +127,20 @@ class LlamaModel:
                     else:
                         idx1 = content_buffer.find("</think>")
                         idx2 = content_buffer.find("</thinking>")
-                        idx = idx1 if idx1 != -1 else idx2
-                        tag_len = 8 if idx1 != -1 else 11
+                        idx3 = content_buffer.find("</|think|>")
+                        idx4 = content_buffer.find("<|/think|>")
+                        
+                        idx = idx1
+                        tag_len = 8
+                        if idx2 != -1 and (idx == -1 or idx2 < idx):
+                            idx = idx2
+                            tag_len = 11
+                        if idx3 != -1 and (idx == -1 or idx3 < idx):
+                            idx = idx3
+                            tag_len = 10
+                        if idx4 != -1 and (idx == -1 or idx4 < idx):
+                            idx = idx4
+                            tag_len = 10
                         
                         if idx != -1:
                             if idx > 0:

@@ -6,8 +6,8 @@ from rich.live import Live
 import time
 import sys
 console = Console()
-# Theme Colors (from Claude Code style)
-ACCENT_COLOR = "white"  # White
+                                       
+ACCENT_COLOR = "white"         
 MUTED_COLOR = "gray50"
 SUCCESS_COLOR = "green"
 ERROR_COLOR = "red"
@@ -15,11 +15,18 @@ def print_header(model_name: str, cwd: str):
     from rich import box
     import json, os
     engine_short = "cpp"
-    state_file = os.path.expanduser("~/.cmdai2/state.json")
+    state_file = os.path.expanduser("~/.cmdai_code/state.json")
     try:
         with open(state_file, "r") as f:
             state = json.load(f)
             cwd = state.get("cwd", cwd)
+            engine_str = state.get("llama_engine", "")
+            if "vulcan" in engine_str.lower():
+                engine_short = "vulcan"
+            elif "diffusion" in engine_str.lower():
+                engine_short = "diffusion"
+            elif "cpp" in engine_str.lower():
+                engine_short = "cpp"
     except:
         pass
 
@@ -38,7 +45,7 @@ def print_tool_call(tool_name: str, arg_summary: str):
     name_lower = tool_name.lower()
     if name_lower in ["read_file", "read"]:
         console.print(f"\n[bold]● Read: {arg_summary}[/bold]")
-    elif name_lower in ["edit_file", "edit"]:
+    elif name_lower in ["edit_file", "edit", "append_file", "replace_lines"]:
         console.print(f"\n[bold]● Edit: {arg_summary}[/bold]")
     elif name_lower in ["write_file", "create_file", "write", "create"]:
         console.print(f"\n[bold]● New file: {arg_summary}[/bold]")
@@ -50,24 +57,102 @@ def print_tool_call(tool_name: str, arg_summary: str):
         console.print(f"\n[bold]● Python Script: {arg_summary}[/bold]")
     elif name_lower == "delete_file":
         console.print(f"\n[bold]● Delete: {arg_summary}[/bold]")
+    elif name_lower in ["ls", "list_dir"]:
+        console.print(f"\n[bold]● Ls: {arg_summary}[/bold]")
+    elif name_lower == "glob":
+        console.print(f"\n[bold]● Glob: {arg_summary}[/bold]")
+    elif name_lower in ["run_tests", "tests"]:
+        console.print("\n[bold]● Tests:[/bold]")
+    elif name_lower == "code_search":
+        console.print(f"\n[bold]● Code Search: {arg_summary}[/bold]")
+    elif name_lower == "bugs":
+        console.print("\n[bold]● Bugs:[/bold]")
+    elif name_lower == "search_web":
+        console.print(f"\n[bold]● Web Search: {arg_summary}[/bold]")
     else:
         console.print(f"\n[bold]● Tool ({tool_name}): {arg_summary}[/bold]")
-def print_tool_result(result_summary: str):
-    console.print(f"[{MUTED_COLOR}]  ⎿  {result_summary}[/]")
+def print_tool_result(result_summary: str, escape_text: bool = False):
+    if escape_text:
+        from rich.markup import escape
+        result_summary = escape(result_summary)
+    console.print(f"[bright_black]  ⎿  {result_summary}[/bright_black]", highlight=False)
 from rich.syntax import Syntax
 def print_diff(path: str, old_str: str, new_str: str):
     import difflib
+    import os
+    import re
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.table import Table
+    
+    start_line = 1
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            idx = content.find(old_str)
+            if idx != -1:
+                start_line = content[:idx].count("\n") + 1
+    except Exception:
+        pass
+
     old_lines = old_str.splitlines() if old_str else []
     new_lines = new_str.splitlines() if new_str else []
     diff_lines = list(difflib.unified_diff(old_lines, new_lines, lineterm='', n=3))
     
-    # Usuwamy nagłówki unified diff (---, +++)
     if len(diff_lines) > 2:
         diff_lines = diff_lines[2:]
         
-    diff_content = "\n".join(diff_lines) if diff_lines else "No changes detected."
-    print_code_panel(f"{path} (Diff)", diff_content, lexer_override="diff")
-def print_code_panel(path: str, content: str, lexer_override: str = None):
+    if not diff_lines:
+        print_tool_result(f"No changes detected in {path}")
+        return
+
+    table = Table(show_header=False, box=None, padding=(0, 0), collapse_padding=True, expand=True)
+    table.add_column("Line", width=5)
+    table.add_column("Code", ratio=1)
+
+    current_old_line = start_line
+    current_new_line = start_line
+    last_old_line = start_line - 1
+    
+    for line in diff_lines:
+        if line.startswith("@@"):
+            m = re.search(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if m:
+                new_old_line = start_line - 1 + int(m.group(1))
+                if last_old_line != start_line - 1 and new_old_line > last_old_line + 1:
+                    gap = new_old_line - last_old_line - 1
+                    table.add_row("", Text(f" ... {gap} hidden lines ...", style="bright_black"))
+                current_old_line = new_old_line
+                current_new_line = start_line - 1 + int(m.group(2))
+                last_old_line = current_old_line - 1
+            continue
+        elif line.startswith("+"):
+            table.add_row(
+                Text(f" {current_new_line:>3} ", style="bright_black on #1a331a"), 
+                Text(f" {line[1:]}", style="default on #1a331a")
+            )
+            current_new_line += 1
+            last_old_line = current_old_line - 1
+        elif line.startswith("-"):
+            table.add_row(
+                Text(f" {current_old_line:>3} ", style="bright_black on #331a1a"), 
+                Text(f" {line[1:]}", style="default on #331a1a")
+            )
+            current_old_line += 1
+            last_old_line = current_old_line - 1
+        else:
+            table.add_row(
+                Text(f" {current_new_line:>3} ", style="bright_black"), 
+                Text(f" {line[1:]}", style="default")
+            )
+            current_old_line += 1
+            current_new_line += 1
+            last_old_line = current_old_line - 1
+
+    panel = Panel(table, title=f" {path} ", title_align="left", border_style=ACCENT_COLOR, padding=(0, 2))
+    console.print(panel)
+def print_code_panel(path: str, content: str, lexer_override: str = None, show_line_numbers: bool = True, start_line: int = 1):
     lexer = lexer_override or "text"
     if not lexer_override:
         if path.endswith(".py"): lexer = "python"
@@ -82,11 +167,21 @@ def print_code_panel(path: str, content: str, lexer_override: str = None):
     display_title = ".../" + "/".join(parts[-3:]) if len(parts) > 3 else p
     
     lines = content.splitlines()
-    display_content = "\n".join(lines[:20])
-    subtitle = f"[gray50]... (and {len(lines)-20} more lines)[/gray50]" if len(lines) > 20 else None
+    if lexer == "text" and not show_line_numbers:
+        display_content = content
+        subtitle = None
+        from rich.text import Text
+        from rich.markup import escape
+        safe_content = display_content.replace("[red]●[/red]", "___RED_DOT___")
+        escaped_content = escape(safe_content)
+        final_markup = escaped_content.replace("___RED_DOT___", "[red]●[/red]")
+        renderable = Text.from_markup(final_markup)
+    else:
+        display_content = "\n".join(lines[:1000])
+        subtitle = f"[gray50]... (and {len(lines)-1000} more lines)[/gray50]" if len(lines) > 1000 else None
+        renderable = Syntax(display_content, lexer, theme="monokai", line_numbers=show_line_numbers, start_line=start_line, word_wrap=True)
         
-    syntax = Syntax(display_content, lexer, theme="monokai", line_numbers=True, word_wrap=True)
-    panel = Panel(syntax, title=f"[bold]{display_title}[/bold]", title_align="left", subtitle=subtitle, subtitle_align="right", border_style=ACCENT_COLOR)
+    panel = Panel(renderable, title=f"[bold]{display_title}[/bold]", title_align="left", subtitle=subtitle, subtitle_align="right", border_style=ACCENT_COLOR)
     console.print(panel)
 import rich.spinner
 rich.spinner.SPINNERS["claude"] = {"interval": 120, "frames": ["✻", "✽", "✶", "✢"]}
@@ -129,7 +224,7 @@ class ThinkingTree:
         spaces = len(line) - len(lstripped)
         
         import re
-        # Auto-detect lists and sub-lists for better tree formatting
+                                                                    
         if re.match(r'^(-\s|\*\s|\d+\.\s|[a-zA-Z]\.\s)', lstripped) and spaces < 2:
             spaces = 2
         elif re.match(r'^\d+\.\d+\.\s', lstripped) and spaces < 4:
@@ -166,10 +261,13 @@ class ThinkingTree:
         return t
         
     def update(self):
-        pass # Now handled automatically by Live in a background thread
+        pass                                                           
         
     def stop(self):
         self.live.stop()
+        import sys
+        sys.stdout.flush()
+        print("", end="", flush=True)
         
     def print_tree(self):
         if not self.lines: return
@@ -222,10 +320,10 @@ class LiveToolStream:
         m = re.search(r'"(?:code|content|command|file_content)"\s*:\s*"(.*)', self.content, re.DOTALL)
         if m:
             preview = m.group(1)
-            # Szybkie, naivowe odkodowanie by JSON wyglądał jak kod
+                                                                   
             preview = preview.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
             
-            # Odcięcie końcówek json jeśli model go zamknął
+                                                           
             if preview.endswith('"\n}'): preview = preview[:-3]
             elif preview.endswith('"}'): preview = preview[:-2]
             elif preview.endswith('"'): preview = preview[:-1]

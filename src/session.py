@@ -52,7 +52,7 @@ class SessionState:
         return out.strip()
 
     def to_markdown(self) -> str:
-        # Same format for simplicity, can be edited manually
+                                                            
         return self.to_prompt()
 
     @classmethod
@@ -113,13 +113,13 @@ class SessionManager:
             
     def save_state(self):
         if not self.current_state.goal and not self.current_state.decisions and not self.current_state.files_touched:
-            return # empty
+            return        
         self.ensure_dir()
         path = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}.md")
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.current_state.to_markdown())
             
-        # Also symlink or copy to state.md for the active one
+                                                             
         state_path = os.path.join(self.cmdai_code_dir, "state.md")
         with open(state_path, "w", encoding="utf-8") as f:
             f.write(self.current_state.to_markdown())

@@ -53,7 +53,7 @@ def create_picker_app(tabs, options_dict, start_tab=0):
         lines = []
         lines.append(("", "\n"))
         
-        # Tabs row
+                  
         for i, t in enumerate(tabs):
             if i == current_tab:
                 lines.append(("class:active_tab", f"  > {t}  "))
@@ -61,7 +61,7 @@ def create_picker_app(tabs, options_dict, start_tab=0):
                 lines.append(("class:inactive_tab", f"    {t}  "))
         lines.append(("", "\n\n"))
         
-        # Options
+                 
         opts = options_dict[current_tab]
         for i, opt in enumerate(opts):
             if i == selected_index[current_tab]:

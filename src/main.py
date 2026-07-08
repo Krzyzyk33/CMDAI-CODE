@@ -18,7 +18,7 @@ def load_state():
             backup_file = STATE_FILE + ".backup"
             shutil.copy2(STATE_FILE, backup_file)
             from .ui import console
-            console.print(f"[red]BŁĄD: Plik state.json jest uszkodzony (np. zła składnia JSON). Utworzono kopię zapasową w: {backup_file}[/red]")
+            console.print(f"[red]ERROR: state.json is corrupted (e.g. bad JSON syntax). Backup created at: {backup_file}[/red]")
             return {}
     return {}
 def save_state(state):
@@ -37,7 +37,7 @@ def get_default_model():
     
     if model_type == "api":
         active_model = state.get("active_api_model")
-        if active_model:
+        if active_model and isinstance(active_model, dict):
             return "api", active_model
 
     saved_model = state.get("model_path")
@@ -53,7 +53,7 @@ def get_default_model():
         return "local", local_models[-1]
 
     active_model = state.get("active_api_model")
-    if active_model:
+    if active_model and isinstance(active_model, dict):
         console.print("[yellow]No local .gguf models found; starting with saved API model.[/yellow]")
         return "api", active_model
 
@@ -79,8 +79,8 @@ def print_chat_history(context):
         if msg['role'] == 'user':
             content = msg.get('content', '')
             if content.startswith('<tool_response>'):
-                res_str = content.replace('<tool_response>\n', '').replace('\n</tool_response>', '').strip()
-                print_tool_result(res_str[:60].replace("\n", " ") + "..." if len(res_str) > 60 else res_str.replace("\n", " "))
+                res_str = content.replace('<tool_response>\\n', '').replace('\\n</tool_response>', '').strip()
+                print_tool_result(res_str[:60].replace("\\n", " ") + "..." if len(res_str) > 60 else res_str.replace("\\n", " "))
             else:
                 print_user_msg(content)
         elif msg['role'] == 'assistant':
@@ -90,7 +90,7 @@ def print_chat_history(context):
             text = re.sub(r'\{\s*"name"\s*:.*?"arguments"\s*:.*?\}', '', text, flags=re.DOTALL)
             text = text.strip()
             if text:
-                console.print(f"\n")
+                console.print(f"\\n")
                 console.print(Markdown(text))
             
             if 'tool_calls' in msg and msg['tool_calls']:
@@ -143,14 +143,16 @@ def main():
     console.clear()
     m_type, m_val = get_default_model()
     
-    # Initialize components
+                           
     if m_type == "api":
         from .api_model import OpenAIAPIModel
         model_path = m_val['name']
         model = OpenAIAPIModel(model_name=m_val['name'], api_key=m_val['api_key'], base_url=m_val['base_url'], provider_id=m_val.get('provider'))
     else:
         model_path = m_val
-        model = LlamaModel(model_path)
+        saved_state = load_state()
+        n_gpu_layers = saved_state.get("n_gpu_layers", -1)
+        model = LlamaModel(model_path, n_gpu_layers=n_gpu_layers)
     context = ContextManager()
     agent = Agent(model, context)
     
@@ -167,13 +169,27 @@ def main():
     print_header(os.path.basename(model_path), cwd)
     
     import shutil
-    import shutil
     
-    # We now handle the layout spacing inside prompt_toolkit itself
-    # so that the completion menu knows how much vertical space it has.
+                                                                   
+                                                                       
+    
+                                              
+    try:
+        import sys
+        src_dir = os.path.dirname(os.path.abspath(__file__))
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+            
+        from indexer.scan import full_or_incremental_scan
+        import threading
+                                                                             
+        threading.Thread(target=full_or_incremental_scan, args=(cwd,), daemon=True).start()
+    except Exception as e:
+                                                                        
+        pass
         
     while True:
-        tokens = context.count_tokens()
+        tokens = context.get_token_count()
         user_input = input_handler.get_input(os.path.basename(model_path), tokens, model.get_context_limit())
         mode = input_handler.get_mode()
         
@@ -195,8 +211,8 @@ def main():
                 context.trigger_compaction(model)
             elif user_input == "/review":
                 agent.auto_review = not agent.auto_review
-                stan = "WŁĄCZONY" if agent.auto_review else "WYŁĄCZONY"
-                console.print(f"\n[magenta]🔍 Tryb Auto-Refleksji (samosprawdzania) został {stan}.[/magenta]")
+                stan = "ENABLED" if agent.auto_review else "DISABLED"
+                console.print(f"\n[magenta]🔍 Auto-Reflection (self-correction) mode was {stan}.[/magenta]")
             elif user_input.startswith("/sessions"):
                 while True:
                     sm = context.session_manager
@@ -213,13 +229,13 @@ def main():
                         
                     if res["action"] == "new":
                         import questionary
-                        new_id = questionary.text("Podaj nazwę nowej sesji (enter by anulować):").ask()
+                        new_id = questionary.text("Enter name for the new session (enter to cancel):").ask()
                         if new_id and new_id.strip():
                             new_id = new_id.strip()
                             context.load_history(new_id)
                             console.clear()
                             print_header(os.path.basename(model_path), cwd)
-                            console.print(f"[green]Utworzono i przełączono na sesję: {new_id} (wczytano {len(context.messages)} wiadomości)[/green]")
+                            console.print(f"[green]Created and switched to session: {new_id} (loaded {len(context.messages)} messages)[/green]")
                         else:
                             console.clear()
                             print_header(os.path.basename(model_path), cwd)
@@ -235,13 +251,13 @@ def main():
                         if del_id == sm.current_state.session_id:
                             context.clear()
                             console.print("[yellow]Deleted active session. Starting a new one.[/yellow]")
-                        # brak break -> wraca do wyświetlenia listy
+                                                                   
                     elif res["action"] == "load":
                         s_id = res["value"]
                         context.load_history(s_id)
                         console.clear()
                         print_header(os.path.basename(model_path), cwd)
-                        console.print(f"[green]Przełączono na sesję: {s_id} (wczytano {len(context.messages)} wiadomości)[/green]")
+                        console.print(f"[green]Switched to session: {s_id} (loaded {len(context.messages)} messages)[/green]")
                         
                         print_chat_history(context)
                         break
@@ -249,31 +265,31 @@ def main():
             elif user_input == "/ide":
                 in_ide = os.environ.get("TERM_PROGRAM") in ["vscode", "JetBrains-JediTerm"] or "VSCODE_PID" in os.environ or "TERMINAL_EMULATOR" in os.environ
                 if not in_ide:
-                    console.print("[red]Błąd: Integracja /ide może być włączona tylko gdy aplikacja działa wewnątrz wbudowanego terminala IDE (VS Code, JetBrains itp.).[/red]")
+                    console.print("[red]Error: /ide integration can only be enabled when running inside a built-in IDE terminal (VS Code, JetBrains itp.).[/red]")
                 else:
                     context.ide_mode = True
-                    console.print(f"[green]IDE Server running on port {ide_server.port}. Włączono rygorystyczną izolację projektu.[/green]")
+                    console.print(f"[green]IDE Server running on port {ide_server.port}. Strict project isolation enabled.[/green]")
             elif user_input == "/auto":
                 input_handler.mode_index = input_handler.modes.index("auto")
-                console.print("[green]Tryb zmieniony na: auto[/green]")
+                console.print("[green]Mode changed to: auto[/green]")
             elif user_input == "/code":
                 input_handler.mode_index = input_handler.modes.index("code")
-                console.print("[green]Tryb zmieniony na: code[/green]")
+                console.print("[green]Mode changed to: code[/green]")
             elif user_input == "/plan":
                 input_handler.mode_index = input_handler.modes.index("plan")
-                console.print("[green]Tryb zmieniony na: plan[/green]")
+                console.print("[green]Mode changed to: plan[/green]")
             elif user_input == "/llama":
                 from .model_picker import create_picker_app
                 import importlib.util
                 import subprocess
                 
-                # Zabezpieczenie przed błędem
+                                             
                 state = load_state()
                 current_engine = state.get("llama_engine", "llama cpp")
                 
                 installed = []
                 if importlib.util.find_spec("llama_cpp"):
-                    # Precyzyjna autodetekcja backendu wprost z biblioteki C++
+                                                                              
                     detected = False
                     try:
                         import io
@@ -311,25 +327,25 @@ def main():
                             installed.append("llama cpp")
                         
                 if not installed:
-                    installed = ["Brak zainstalowanych silników"]
+                    installed = ["No installed engines"]
                 
-                tabs = ["Zainstalowane", "Instalacja"]
+                tabs = ["Installed", "Installation"]
                 
                 available_to_install = [e for e in ["llama cpp", "llama vulcan"] if e not in installed]
                 if not available_to_install:
-                    available_to_install = ["Wszystko zainstalowane"]
+                    available_to_install = ["All installed"]
                     
                 options = {
-                    0: installed + ["Anuluj"],
-                    1: available_to_install + ["Anuluj"]
+                    0: installed + ["Cancel"],
+                    1: available_to_install + ["Cancel"]
                 }
                 
                 res = create_picker_app(tabs, options, start_tab=0)
                 
-                if res["action"] == "select" and res["value"] not in ["Anuluj", "Brak zainstalowanych silników", "Wszystko zainstalowane"]:
+                if res["action"] == "select" and res["value"] not in ["Cancel", "No installed engines", "All installed"]:
                     selected = res["value"]
-                    if res["tab"] == "Instalacja":
-                        console.print(f"\n[yellow]⏳ Rozpoczynam instalację silnika: {selected}...[/yellow]")
+                    if res["tab"] == "Installation":
+                        console.print(f"\n[yellow]⏳ Starting engine installation: {selected}...[/yellow]")
                         
                         cmd = ""
                         if selected == "llama cpp":
@@ -341,17 +357,17 @@ def main():
                                 cmd = 'CMAKE_ARGS="-DGGML_VULCAN=1" pip install llama-cpp-python --force-reinstall --no-cache-dir'
                             
                         if cmd:
-                            console.print(f"[cyan]Wykonywanie: {cmd}[/cyan]")
+                            console.print(f"[cyan]Executing: {cmd}[/cyan]")
                             subprocess.run(cmd, shell=True)
                         
                         state["llama_engine"] = selected
                         save_state(state)
-                        console.print(f"[green]✅ Silnik Llama został zainstalowany i ustawiony na: {selected}[/green]")
+                        console.print(f"[green]✅ Llama engine has been installed and set to: {selected}[/green]")
                         import time; time.sleep(2)
-                    elif res["tab"] == "Zainstalowane":
+                    elif res["tab"] == "Installed":
                         state["llama_engine"] = selected
                         save_state(state)
-                        console.print(f"[green]✅ Silnik Llama ustawiony na: {selected}[/green]")
+                        console.print(f"[green]✅ Llama engine set to: {selected}[/green]")
                         import time; time.sleep(1)
                         
                 os.system("cls" if os.name == "nt" else "clear")
@@ -405,7 +421,7 @@ def main():
                             import time; time.sleep(2)
                             continue
                             
-                        model_name = console.input(f"\n[bold]Podaj nazwę modelu dla {provider.upper()}: [/bold]")
+                        model_name = console.input(f"\n[bold]Enter model name for {provider.upper()}: [/bold]")
                         if model_name:
                             if provider == "localllmapi":
                                 base_url = console.input(f"\n[bold]Enter Base URL for local API (e.g. http://127.0.0.1:1234/v1): [/bold]")
@@ -456,7 +472,8 @@ def main():
                     gc.collect()
                     
                     model_path = new_model_path
-                    model = LlamaModel(model_path)
+                    n_gpu_layers = state.get("n_gpu_layers", -1)
+                    model = LlamaModel(model_path, n_gpu_layers=n_gpu_layers)
                     agent.model = model
                     os.system("cls" if os.name == "nt" else "clear")
                     print_header(os.path.basename(model_path), cwd)
@@ -467,7 +484,7 @@ def main():
                     state["model_type"] = "api"
                     state["active_api_model"] = m_val
                     save_state(state)
-                    console.print(f"\n[green]Przełączono na model API: {m_val['name']}[/green]")
+                    console.print(f"\n[green]Switched to API model: {m_val['name']}[/green]")
                     
                     if hasattr(model, 'llm'):
                         del agent.model
@@ -487,7 +504,7 @@ def main():
                 console.print(f"Unknown command or not implemented: {user_input}")
             continue
             
-        # Add IDE context to user prompt if any
+                                               
         ide_ctx = ide_server.get_ide_context()
         if ide_ctx:
             user_input += f"\n\n[IDE Context]\n{ide_ctx}"
@@ -517,9 +534,9 @@ def main():
         print_user_msg(user_input)
         agent.handle_user_input(user_input, mode, input_handler)
         
-        # Auto-compaction if context exceeds 90%
+                                                
         limit = model.get_context_limit()
-        if context.count_tokens() >= limit * 0.9:
+        if context.get_token_count() >= limit * 0.9:
             context.trigger_compaction(model)
 if __name__ == "__main__":
     main()

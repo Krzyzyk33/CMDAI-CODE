@@ -33,7 +33,7 @@ def mark_plan_step_done(step_number: int, restricted_dir: str = None, **kwargs) 
         
         found = False
         for i, line in enumerate(lines):
-            # Prosty regex szukający [ ] przy podanym numerze kroku
+                                                                   
             if re.search(r'(?:^|\s)' + step_str + r'\..*?\[ \]', line):
                 lines[i] = line.replace('[ ]', '[x]', 1)
                 found = True
@@ -56,7 +56,7 @@ def submit_plan(**kwargs) -> str:
         return "Error: You MUST provide 'steps_list' argument as an array of strings (e.g. ['Step 1', 'Step 2'])."
         
     if isinstance(steps_list, str):
-        # Model wrongly passed a single string, try to split by newlines
+                                                                        
         steps_list = [s.strip() for s in steps_list.split('\n') if s.strip()]
         
     content = f"# Architecture Details\n{architecture_details}\n\n## Steps\n"
@@ -65,6 +65,6 @@ def submit_plan(**kwargs) -> str:
     return save_plan(content, **kwargs)
 
 def todo_write(items: List[str]) -> str:
-    # Actual UI update handled in agent/ui loop
+                                               
     return "Todo list updated."
 

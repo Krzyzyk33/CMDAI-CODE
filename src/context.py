@@ -1,47 +1,35 @@
 import os
 from typing import List, Dict, Any, Optional
-SYSTEM_PROMPT = """You are CMDAI CODE, a highly capable AI coding assistant running locally in the terminal.
-You have access to tools to read, create, edit, search and delete files. You CAN run terminal commands and bash/powershell scripts using the bash tool, but ONLY under user supervision (the user must confirm execution).
-Read the *** THINKING LEVEL REQUIREMENTS *** at the end of this prompt carefully. IF your current thinking level requires a <think> block, you must output your internal thinking process between <think> and </think> tags.
-If you DO generate a <think> block, you MUST ALWAYS use a hierarchical tree structure with `|_ ` for indentation so the UI can parse your thinking.
-Example:
+SYSTEM_PROMPT = """You are CMDAI CODE — local terminal coding agent. Tools: read/create/edit/search/delete files, run bash/powershell (user must confirm execution).
+
+THINK BLOCK (see thinking-level rules at end): if required, output <think>...</think> using tree format with `|_ ` indentation, e.g.:
 <think>
-  |_ UNDERSTAND: Analizuję zapytanie użytkownika...
+  |_ UNDERSTAND: ...
   |_ CONTEXT:
-    |_ Sprawdzam strukturę projektu
-    |_ Narzędzia są gotowe
-  |_ PLAN: Wykonanie zadania
+    |_ ...
+  |_ PLAN: ...
 </think>
-HARD RULES FOR TOOLS & THINKING:
-1. WRITE / CREATE: You can use these tools to create new files or completely OVERWRITE existing ones.
-2. EDIT is only for existing files. You must provide the EXACT, literal `old_str` to replace. It must be unique.
-3. EXECUTE ONLY ONE TOOL AT A TIME. Do not queue multiple tools in a single response. You must wait for the result of the first tool before calling the next one.
-4. If you create or edit a python script, you must run it using the `run_python` tool to verify it works correctly.
-5. FABLE 5 MODE: You are an autonomous agent. If you encounter an error, DO NOT GIVE UP. Analyze the error, try an alternative approach, and keep working indefinitely until the user's task is 100% completed. Never apologize and never stop halfway.
-6. If the same tool call fails repeatedly, change your approach instead of repeating it.
-7. NEVER run destructive commands (delete_file) without explicit user permission or unless asked to.
-8. ALWAYS generate a short text response to the user AFTER finishing the entire task.
-9. DO NOT write python scripts for web scraping or fetching APIs. Use `search_web` with the target URL directly instead.
-10. CRITICAL: NEVER output code blocks directly in your conversational text response! If the user asks you to write code, you MUST use the `write_file` or `create_file` tool to save it to the disk. Your text response should only summarize what you saved.
-11. CRITICAL: Writing "TOOL: <name>" inside the <think> block is ONLY for your planning. To ACTUALLY execute a tool, you MUST output the native JSON function calling payload! 
-Your JSON MUST strictly follow this exact structure:
-```json
-{
-  "name": "tool_name_here",
-  "arguments": {
-    "parameter_name": "value"
-  }
-}
-```
-Do not invent your own format (like omitting the "arguments" wrapper). You MUST use this exact structure to trigger the API.
-12. CRITICAL: If the user request is extremely large, asks for a complete project, or you are starting a complex application, YOU MUST NOT attempt to write the entire code in one turn. In your first turn, you MUST use the 'submit_plan' tool to break the project down into multiple logical steps. Then wait, and implement the files ONE BY ONE in subsequent turns.
-13. CRITICAL: You have NO LIMIT on file generation sizes. Whenever creating a file using `write_file`, ALWAYS output the 100% FULL and complete file, no matter how long it is. DO NOT split the code, do not create skeletons, and do not use `edit_file` immediately after. Just write the whole thing.
-14. CRITICAL: You MUST ALWAYS invoke a tool immediately after closing the </think> tag! Do not just write text and stop. ALWAYS trigger the native JSON function call right after your thoughts end.
-15. CRITICAL: You are STRICTLY FORBIDDEN from drawing ascii graphs, mermaid graphs, or any other visual representations in your text. 
-16. CRITICAL: Your <think> block MUST ALWAYS use the tree structure (with `|_ `) exactly as shown in the example. This is mandatory for the UI to parse it into visual trees.
-26: AVAILABLE TOOLS:
+
+RULES:
+1. write/create = new file or full overwrite. edit = existing file only, old_str must be exact+unique.
+2. ONE tool call per response. Wait for result before next call.
+3. .py files you create/edit: always verify with run_python.
+4. AUTONOMOUS MODE: never give up on error — analyze, try alternate approach, keep going until task 100% done. No apologies, no stopping halfway. If a tool fails repeatedly, change approach, don't repeat it.
+5. delete_file only with explicit user permission.
+6. Always end with a short text summary after finishing.
+7. Never write scraping/API scripts — use search_web with target URL directly.
+8. Never put code blocks in chat text — always save code via write_file/create_file; text response only summarizes.
+9. Tool execution = native JSON function call only. Writing "TOOL: x" in <think> is planning only, not execution — never invent your own call format.
+10. Large/complex/full-project requests: don't write everything in one turn. First turn = submit_plan to break into steps; implement files one by one in later turns.
+11. No file-size limit: write_file always gets the 100% complete file, never a skeleton, never followed by edit_file to finish it.
+12. If the task is not yet 100% complete, always call a tool immediately after </think> — never stop at just text. Only stop at text (without tool calls) when providing the final summary (Rule 6).
+13. No ascii/mermaid/visual diagrams in text ever.
+14. <think> block always uses `|_ ` tree structure, no exceptions.
+
+AVAILABLE TOOLS:
 {tools_desc}
-CRITICAL COMMUNICATION RULE: Always respond to the user in their own language (e.g., Polish) when writing conversational text!
+
+Always reply to the user in their own language (e.g. Polish).
 """
 class ContextManager:
     def __init__(self, cwd: str = ".", session_id: str = None):
@@ -133,7 +121,7 @@ class ContextManager:
         sys_dir = os.path.join(app_dir, "systemmodels")
         model_ref = None
         
-        # Zawsze najwyższy priorytet ma lokalny folder systemmodels
+                                                                   
         if os.path.exists(sys_dir):
             import glob
             sys_models = glob.glob(os.path.join(sys_dir, "*.gguf"))
@@ -141,7 +129,7 @@ class ContextManager:
                 needed_ctx = max(8192, self.get_token_count() + 4000)
                 model_ref = {"path": sys_models[0], "n_ctx": needed_ctx, "n_gpu_layers": 8}
                 
-        # Jeżeli folder jest pusty, sprawdź czy użytkownik wybrał coś w UI (state.json)
+                                                                                       
         if not model_ref:
             model_ref = state.get("compaction_model")
         
@@ -279,7 +267,7 @@ class ContextManager:
                 for content, thinking, _ in compaction_model_instance.stream_chat(messages, reasoning_budget=0):
                     chunk = content or thinking or ""
                     if chunk:
-                        if len(response_text) > 9000:  # Hard limit ~2000 tokenów na wypadek halucynacji
+                        if len(response_text) > 9000:                                                   
                             break
                         response_text += chunk
                         current_line += chunk
@@ -291,13 +279,13 @@ class ContextManager:
                             current_line = parts[-1]
                 if current_line.strip():
                     tree.add_line(current_line)
-                break  # Sukces!
+                break           
             except Exception as e:
                 err_str = str(e).lower()
                 if "exceed" in err_str or "context" in err_str or "token" in err_str or "capacity" in err_str:
                     retry_count += 1
                     if retry_count < max_retries:
-                        console.print(f"\n[{MUTED_COLOR}][Model systemowy nie pomieścił tej porcji danych. Odcinam 30% najstarszej historii i próbuję ponownie ({retry_count}/3)...][/]")
+                        console.print(f"\n[{MUTED_COLOR}][System model could not fit this data. Trimming 30% of oldest history and retrying ({retry_count}/3)...][/]")
                         cut_idx = max(1, int(len(current_messages) * 0.3))
                         current_messages = current_messages[cut_idx:]
                         continue
@@ -340,10 +328,10 @@ class ContextManager:
     def get_system_message(self, tools_desc: str, mode: str, thinking_desc: str) -> Dict[str, str]:
         prompt = self.system_prompt
         
-        # Baza informacji o narzędziach
+                                       
         if tools_desc:
             prompt += f"\n\nAVAILABLE TOOLS:\n{tools_desc}\nCRITICAL: Use the tools directly. DO NOT ask the user to run commands for you."
-        # Różne zachowanie w zależności od trybu
+                                                
         if mode == "plan":
             prompt += (
                 "\n\n*** CRITICAL: YOU ARE IN PLAN MODE ***\n"
@@ -369,7 +357,7 @@ class ContextManager:
                 "2. You can use bash to test your code and fix errors autonomously.\n"
                 "3. Continue working until the task is completely finished."
             )
-        # Plan.md context injection
+                                   
         plan_file = os.path.join(self.cwd, "plan.md")
         if os.path.exists(plan_file):
             try:
@@ -379,7 +367,7 @@ class ContextManager:
             except Exception:
                 pass
                 
-        # Session context injection
+                                   
         session_context = self.session_manager.current_state.to_prompt()
         if session_context:
             prompt += f"\n\n{session_context}"
@@ -401,7 +389,7 @@ class ContextManager:
     def add_assistant_message(self, msg: str, tool_calls=None):
         m = {"role": "assistant", "content": msg}
         if tool_calls:
-            # Upewnij się, że arguments są zawsze stringiem, co jest wymagane przez API OpenAI
+                                                                                              
             formatted_tc = []
             import json
             for tc in tool_calls:
@@ -414,7 +402,7 @@ class ContextManager:
         self.messages.append(m)
         self.save_history()
     def add_tool_message(self, tool_call_id: str, name: str, content: str):
-        # Format explicitly as a user message to bypass llama-cpp-python template limitations
+                                                                                             
         self.messages.append({
             "role": "user",
             "content": f"<tool_response>\n{content}\n</tool_response>"
@@ -439,10 +427,10 @@ class ContextManager:
     def get_system_message(self, tools_desc: str, mode: str, thinking_desc: str) -> Dict[str, str]:
         prompt = self.system_prompt
         
-        # Baza informacji o narzędziach
+                                       
         if tools_desc:
             prompt += f"\n\nAVAILABLE TOOLS:\n{tools_desc}\nCRITICAL: Use the tools directly. DO NOT ask the user to run commands for you."
-        # Różne zachowanie w zależności od trybu
+                                                
         if mode == "plan":
             prompt += (
                 "\n\n*** CRITICAL: YOU ARE IN PLAN MODE ***\n"
@@ -468,7 +456,7 @@ class ContextManager:
                 "2. You can use bash to test your code and fix errors autonomously.\n"
                 "3. Continue working until the task is completely finished."
             )
-        # Plan.md context injection
+                                   
         plan_file = os.path.join(self.cwd, "plan.md")
         if os.path.exists(plan_file):
             try:
@@ -478,7 +466,7 @@ class ContextManager:
             except Exception:
                 pass
                 
-        # Session context injection
+                                   
         session_context = self.session_manager.current_state.to_prompt()
         if session_context:
             prompt += f"\n\n{session_context}"
@@ -500,7 +488,7 @@ class ContextManager:
     def add_assistant_message(self, msg: str, tool_calls=None):
         m = {"role": "assistant", "content": msg}
         if tool_calls:
-            # Upewnij się, że arguments są zawsze stringiem, co jest wymagane przez API OpenAI
+                                                                                              
             formatted_tc = []
             import json
             for tc in tool_calls:
@@ -513,7 +501,7 @@ class ContextManager:
         self.messages.append(m)
         self.save_history()
     def add_tool_message(self, tool_call_id: str, name: str, content: str):
-        # Format explicitly as a user message to bypass llama-cpp-python template limitations
+                                                                                             
         self.messages.append({
             "role": "user",
             "content": f"<tool_response>\n{content}\n</tool_response>"
@@ -541,25 +529,19 @@ class ContextManager:
             else:
                 msgs.append({"role": "user", "content": injection.strip()})
         elif thinking_desc:
-            # Fallback jeśli nie ma jeszcze wiadomości
+                                                    
             sys_msg["content"] += f"\n\n*** CURRENT THINKING LEVEL REQUIREMENTS ***\n{thinking_desc}"
             
         return [sys_msg] + msgs
         
     def get_token_count(self) -> int:
         sys_msg = self.get_system_message("", "auto", "")
-        total_chars = len(sys_msg.get("content", "")) + 4000 # 4000 zapasu na narzędzia (tools_desc) i tagi myślenia
+        total_chars = len(sys_msg.get("content", "")) + 4000                                                        
         for msg in self.messages:
             total_chars += len(msg.get("content", ""))
-        # Ekstremalnie bezpieczny dzielnik dla polskiego tekstu i gęstego kodu (1 token = ~2 znaki)
+                                                                                                   
         return total_chars // 2
         
     def clear(self):
         self.messages = []
         self.save_history()
-        
-    def count_tokens(self) -> int:
-        # Pomiń system prompt, żeby pasek zaczynał od 0% (pokazujemy zużycie "rozmową")
-        text = " ".join([m.get("content", "") for m in self.messages if m.get("content")])
-        words = len(text.split())
-        return int(words * 1.3)

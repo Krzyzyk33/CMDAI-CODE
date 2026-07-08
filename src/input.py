@@ -11,11 +11,11 @@ COMMANDS = {
     "/llama": "change the Llama engine (e.g. llama cpp, llama vulcan, llama diffusion)",
     "/clear": "clear the entire chat history and the console screen buffer",
     "/compact": "summarize the conversation so far to save tokens",
-    "/init": "przeskanuj całe repozytorium i zbuduj bazę wiedzy o plikach",
-    "/cost": "pokaż dokładne statystyki zużycia tokenów oraz koszty sesji",
-    "/ide": "wyświetl obecny status połączenia z Twoim środowiskiem IDE",
-    "/auto": "przełącz w tryb automatyczny (bez pytania o zgody na pliki)",
-    "/code": "przełącz w tryb kodowania (pyta o zgodę przed edycją)",
+    "/init": "scan the entire repository and build a file knowledge base",
+    "/cost": "show detailed token usage statistics and session costs",
+    "/ide": "display the current connection status with your IDE environment",
+    "/auto": "switch to automatic mode (without asking for file permissions)",
+    "/code": "switch to coding mode (asks for permission before editing)",
     "/plan": "switch to planning mode (only reads files and plans)",
     "/sessions": "manage contextual sessions and revert to an older state",
     "/review": "toggle auto-reflection mode to double-check generated code",
@@ -26,7 +26,7 @@ class CMDAICompleter(Completer):
         text = document.text_before_cursor
         
         if "@" in text:
-            # Simple file completion
+                                    
             prefix = text.split("@")[-1]
             try:
                 dirname = os.path.dirname(prefix) or "."
@@ -106,12 +106,12 @@ class InputHandler:
         def _(event):
             text = event.app.current_buffer.text
             word = text.lstrip()
-            # If exact match, just run it
+                                         
             if word in COMMANDS:
                 event.app.current_buffer.validate_and_handle()
             else:
                 matches = [cmd for cmd in COMMANDS.keys() if cmd.startswith(word)]
-                # If not exact match but selected, complete it
+                                                              
                 if matches and 0 <= self.cmd_index < len(matches):
                     event.app.current_buffer.text = matches[self.cmd_index]
                     event.app.current_buffer.cursor_position = len(event.app.current_buffer.text)
@@ -131,7 +131,7 @@ class InputHandler:
             try:
                 import ctypes
                 ctypes.windll.user32.OpenClipboard(0)
-                handle = ctypes.windll.user32.GetClipboardData(13) # 13 is CF_UNICODETEXT
+                handle = ctypes.windll.user32.GetClipboardData(13)                       
                 if handle:
                     ptr = ctypes.windll.kernel32.GlobalLock(handle)
                     data = ctypes.c_wchar_p(ptr).value
@@ -247,7 +247,7 @@ class InputHandler:
                     
                 return Transformation(new_fragments)
         
-        # Prevent prompt_toolkit from forcing a 7-line gap for autocomplete menus
+                                                                                 
         self.session.reserve_space_for_menu = 0
             
         def get_prompt():
@@ -271,7 +271,7 @@ class InputHandler:
                 
                 for i, (cmd, desc) in enumerate(visible_matches):
                     actual_idx = self.cmd_scroll + i
-                    # Truncate description if terminal is too narrow
+                                                                    
                     avail_width = width - 20
                     if len(desc) > avail_width:
                         desc = desc[:avail_width-3] + "..."

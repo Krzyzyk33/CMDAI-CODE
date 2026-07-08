@@ -7,10 +7,10 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style
 
 def run_session_picker(sessions, current_session_id):
-    options = ["[Nowa sesja]"]
+    options = ["[New session]"]
     for s in sessions:
         options.append(s)
-    options.append("[Anuluj]")
+    options.append("[Cancel]")
     
     selected_index = 0
     delete_mode = False
@@ -53,7 +53,7 @@ def run_session_picker(sessions, current_session_id):
     def _(event):
         opt = options[selected_index]
         if isinstance(opt, str):
-            if opt == "[Nowa sesja]":
+            if opt == "[New session]":
                 result["action"] = "new"
             else:
                 result["action"] = "cancel"

@@ -2,8 +2,8 @@ import os
 import importlib
 import pkgutil
 
-# Rejestr załadowanych dostawców
-# Słownik w formacie: {"provider_id": module}
+                                
+                                             
 PROVIDERS = {}
 
 def load_providers():
@@ -17,11 +17,11 @@ def load_providers():
             
         module = importlib.import_module(f".{module_name}", package="src.providers")
         
-        # Sprawdzamy, czy moduł definiuje wymaganą zmienną PROVIDER_ID
+                                                                      
         if hasattr(module, "PROVIDER_ID"):
             PROVIDERS[module.PROVIDER_ID] = module
 
-# Ładujemy dostawców przy imporcie
+                                  
 load_providers()
 
 def get_provider(provider_id):
@@ -37,13 +37,13 @@ def detect_provider_by_url(url):
     for provider_id, module in PROVIDERS.items():
         if hasattr(module, "match_url") and module.match_url(url):
             return provider_id
-    return "openai" # Domyślny fallback
+    return "openai"                    
 
 def get_provider_tabs():
     """Zwraca listę nazw wyświetlanych (DISPLAY_NAME) dla zakładek w menu."""
     tabs = []
-    # Aby zachować kolejność (OpenAI często pierwsze), możemy posortować, ale dla uproszczenia zwracamy listę
-    # Posortujemy tak, aby zachować sensowny układ, albo zwrócimy jak leci
+                                                                                                             
+                                                                          
     for module in PROVIDERS.values():
         if hasattr(module, "DISPLAY_NAME"):
             tabs.append(module.DISPLAY_NAME)
