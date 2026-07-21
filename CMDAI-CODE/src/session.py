@@ -51,37 +51,35 @@ class SessionState:
             
         return out.strip()
 
-    def to_markdown(self) -> str:
-                                                            
-        return self.to_prompt()
+    def to_json(self) -> str:
+        import json
+        import dataclasses
+        return json.dumps(dataclasses.asdict(self), ensure_ascii=False, indent=2)
 
     @classmethod
     def from_markdown(cls, text: str, session_id: str = "default"):
         state = cls(session_id=session_id)
         current_section = None
-        
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
-                
-            if line.startswith("Cel:"):
-                state.goal = line[4:].strip()
+            
+            if line.startswith("Goal:"):
+                state.goal = line[5:].strip()
                 current_section = "goal"
-            elif line.startswith("Decyzje:"):
+            elif line.startswith("Decisions:"):
                 current_section = "decisions"
-            elif line.startswith("Pliki:"):
+            elif line.startswith("Files:"):
                 current_section = "files"
             elif line.startswith("Plan:"):
                 current_section = "plan"
-            elif line.startswith("Problemy:"):
+            elif line.startswith("Issues:"):
                 current_section = "issues"
-            elif line.startswith("Ograniczenia:"):
+            elif line.startswith("Constraints:"):
                 current_section = "constraints"
-            elif line.startswith("[KONTEKST SESJI]"):
-                continue
             else:
-                if current_section == "goal" and not line.startswith("-"):
+                if current_section == "goal" and not line.startswith("-") and not line.startswith("["):
                     state.goal += " " + line
                 elif current_section == "decisions" and line.startswith("-"):
                     state.decisions.append(line[1:].strip())
@@ -89,17 +87,29 @@ class SessionState:
                     parts = line[1:].strip().split(":", 1)
                     if len(parts) == 2:
                         state.files_touched[parts[0].strip()] = parts[1].strip()
+                    else:
+                        state.files_touched[parts[0].strip()] = ""
                 elif current_section == "plan" and line.startswith("["):
-                    match = re.match(r'\[([xX ]+)\]\s*(.*)', line)
-                    if match:
-                        done = match.group(1).strip().lower() == "x"
-                        state.current_plan.append((match.group(2).strip(), done))
+                    is_done = line.startswith("[x]") or line.startswith("[X]")
+                    step = line[3:].strip() if len(line) > 3 and line[2] == "]" else line
+                    state.current_plan.append((step, is_done))
                 elif current_section == "issues" and line.startswith("-"):
                     state.open_issues.append(line[1:].strip())
                 elif current_section == "constraints" and line.startswith("-"):
                     state.constraints.append(line[1:].strip())
-                    
         return state
+
+    @classmethod
+    def from_json(cls, text: str, session_id: str = "default"):
+        import json
+        try:
+            data = json.loads(text)
+            data["session_id"] = session_id
+            if "current_plan" in data:
+                data["current_plan"] = [tuple(x) for x in data["current_plan"]]
+            return cls(**data)
+        except Exception:
+            return cls(session_id=session_id)
 
 class SessionManager:
     def __init__(self, cwd: str = "."):
@@ -115,25 +125,25 @@ class SessionManager:
         if not self.current_state.goal and not self.current_state.decisions and not self.current_state.files_touched:
             return        
         self.ensure_dir()
-        path = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}.md")
+        path = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}_state.json")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(self.current_state.to_markdown())
+            f.write(self.current_state.to_json())
             
-                                                             
-        state_path = os.path.join(self.cmdai_code_dir, "state.md")
+        # Zapisz też globalny state dla łatwego powrotu
+        state_path = os.path.join(self.cmdai_code_dir, "state_session.json")
         with open(state_path, "w", encoding="utf-8") as f:
-            f.write(self.current_state.to_markdown())
+            f.write(self.current_state.to_json())
 
     def load_state(self, session_id: str = "default"):
         self.ensure_dir()
-        path = os.path.join(self.cmdai_code_dir, f"session_{session_id}.md")
+        path = os.path.join(self.cmdai_code_dir, f"session_{session_id}_state.json")
         if not os.path.exists(path) and session_id == "default":
-            path = os.path.join(self.cmdai_code_dir, "state.md")
+            path = os.path.join(self.cmdai_code_dir, "state_session.json")
             
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    self.current_state = SessionState.from_markdown(f.read(), session_id)
+                    self.current_state = SessionState.from_json(f.read(), session_id)
             except Exception:
                 self.current_state = SessionState(session_id=session_id)
         else:
@@ -145,8 +155,8 @@ class SessionManager:
             return []
         sessions_dict = {}
         for f in os.listdir(self.cmdai_code_dir):
-            if f.startswith("session_") and f.endswith(".md"):
-                sid = f[8:-3]
+            if f.startswith("session_") and f.endswith("_state.json"):
+                sid = f[8:-11]
                 path = os.path.join(self.cmdai_code_dir, f)
                 mtime = os.path.getmtime(path)
                 sessions_dict[sid] = mtime
@@ -169,7 +179,7 @@ class SessionManager:
         if not os.path.exists(self.cmdai_code_dir):
             return
         
-        md_path = os.path.join(self.cmdai_code_dir, f"session_{session_id}.md")
+        md_path = os.path.join(self.cmdai_code_dir, f"session_{session_id}_state.json")
         json_path = os.path.join(self.cmdai_code_dir, f"session_{session_id}_history.json")
         
         try:
@@ -181,15 +191,15 @@ class SessionManager:
             pass
 
     def rename_session(self, new_id: str):
-        if self.current_state.session_id == new_id:
+        if not self.current_state.session_id or self.current_state.session_id == new_id:
             return
             
-        old_md = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}.md")
+        old_md = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}_state.json")
         old_json = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}_history.json")
         
         self.current_state.session_id = new_id
         
-        new_md = os.path.join(self.cmdai_code_dir, f"session_{new_id}.md")
+        new_md = os.path.join(self.cmdai_code_dir, f"session_{new_id}_state.json")
         new_json = os.path.join(self.cmdai_code_dir, f"session_{new_id}_history.json")
         
         try:

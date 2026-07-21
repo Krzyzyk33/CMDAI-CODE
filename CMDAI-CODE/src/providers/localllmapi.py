@@ -20,9 +20,12 @@ def modify_chat_kwargs(kwargs: dict, reasoning_budget: int = 0) -> None:
     kwargs["timeout"] = 120.0
                                                                                           
     if "messages" in kwargs:
-        for msg in kwargs["messages"]:
+        import copy
+        new_msgs = copy.deepcopy(kwargs["messages"])
+        for msg in new_msgs:
             if "tool_calls" in msg:
                 del msg["tool_calls"]
             if msg.get("role") == "tool":
                 msg["role"] = "user"
                 msg["content"] = f"[TOOL RESPONSE]\n{msg.get('content')}\n[/TOOL RESPONSE]"
+        kwargs["messages"] = new_msgs

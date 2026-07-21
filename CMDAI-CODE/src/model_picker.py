@@ -94,7 +94,7 @@ def create_picker_app(tabs, options_dict, start_tab=0):
     app.run()
     return result
 
-def run_model_picker(state):
+def run_model_picker(state, mode="main"):
     app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     models_dir = os.path.join(app_dir, "models")
     local_models = glob.glob(os.path.join(models_dir, "*.gguf"))
@@ -115,6 +115,14 @@ def run_model_picker(state):
         1: local_models if local_models else ["No local models"],
         2: [f"{m['name']} [{get_prov(m)}]" for m in api_models] if api_models else ["No API models"]
     }
+    
+    if mode == "subagents":
+        tabs.append("Thinking Level")
+        current_think = state.get("subagent_thinking", "Auto")
+        opts_think = [f"Auto{' (Current)' if current_think == 'Auto' else ''}"]
+        for name in ["Low", "Medium", "High", "Ultra", "Extreme"]:
+            opts_think.append(f"{name}{' (Current)' if current_think == name else ''}")
+        options[3] = opts_think
     
     res = create_picker_app(tabs, options, start_tab=1)
     
@@ -142,6 +150,10 @@ def run_model_picker(state):
                     if f"{m['name']} [{get_prov(m)}]" == val:
                         out["value"] = m
                         break
+        elif tab == "Thinking Level":
+            val_clean = val.replace(" (Current)", "")
+            out["action"] = "set_thinking"
+            out["value"] = val_clean
     return out
 
 def run_provider_picker(mode="api"):

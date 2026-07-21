@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import glob as pyglob
 import subprocess
 import shutil
@@ -53,11 +54,18 @@ def submit_plan(**kwargs) -> str:
     steps_list = kwargs.get("steps_list")
     
     if not steps_list:
-        return "Error: You MUST provide 'steps_list' argument as an array of strings (e.g. ['Step 1', 'Step 2'])."
+        if architecture_details and architecture_details != "No architecture details provided.":
+            steps_list = [line.strip() for line in architecture_details.split('\n') if line.strip().startswith(('- ', '* ', '1.', '1)'))]
+        if not steps_list:
+            return "Error: You MUST provide 'steps_list' argument as an array of strings (e.g. ['Step 1', 'Step 2'])."
         
     if isinstance(steps_list, str):
-                                                                        
-        steps_list = [s.strip() for s in steps_list.split('\n') if s.strip()]
+        try:
+            steps_list = json.loads(steps_list)
+            if not isinstance(steps_list, list):
+                steps_list = [steps_list]
+        except (json.JSONDecodeError, TypeError):
+            steps_list = [s.strip() for s in steps_list.split('\n') if s.strip()]
         
     content = f"# Architecture Details\n{architecture_details}\n\n## Steps\n"
     for i, step in enumerate(steps_list):

@@ -35,11 +35,8 @@ class LlamaModel:
                 )
             except ValueError as e:
                 if "Failed to create llama_context" in str(e) or "Failed to load model" in str(e):
-                    if self.n_ctx == 0 or self.n_ctx > 8192:
-                        from rich.console import Console
-                        console = Console()
-                        console.print("\n[yellow]Warning: No VRAM for full context window (n_ctx=0). Executing emergency fallback to safe 8192 tokens...[/yellow]")
-                        self.n_ctx = 8192
+                    if self.n_ctx > 4096:
+                        self.n_ctx = max(self.n_ctx // 2, 4096)
                         self._llm = Llama(
                             model_path=self.model_path,
                             n_ctx=self.n_ctx,

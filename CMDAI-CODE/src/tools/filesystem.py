@@ -119,7 +119,7 @@ def run_ls(path: str = ".") -> str:
         
     entries.sort(key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower()))
     
-    result = [f"|_ {os.path.basename(os.path.abspath(path)) or path}"]
+    result = []
     limit = 200
     
     for entry in entries[:limit]:
@@ -141,10 +141,12 @@ def run_ls(path: str = ".") -> str:
         
     return "\n".join(result)
 
-def run_glob(pattern: str) -> str:
+def run_glob(pattern: str = "") -> str:
     import glob as pyglob
     
-                                        
+    if not pattern:
+        return "Error: You must provide a 'pattern' argument to the glob tool."
+        
     if pattern == "*":
         pattern = "**/*"
     elif pattern.startswith("*.") and not pattern.startswith("**/*"):

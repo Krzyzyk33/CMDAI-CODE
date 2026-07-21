@@ -61,8 +61,8 @@ class ContextManager:
         if session_id:
             self.session_manager.load_state(session_id)
         else:
-            import datetime
-            self.session_manager.load_state(session_id)
+            import uuid
+            self.session_manager.load_state(uuid.uuid4().hex[:8])
         
         path = os.path.join(self.session_manager.cmdai_code_dir, f"session_{self.session_manager.current_state.session_id}_history.json")
         if os.path.exists(path):
@@ -73,7 +73,6 @@ class ContextManager:
                 self.messages = []
         else:
             self.messages = []
-        self.full_messages = list(self.messages)
             
     def rename_session(self, new_id: str):
         self.session_manager.rename_session(new_id)
@@ -88,7 +87,7 @@ class ContextManager:
         json_path = f"{base_path}_history.json"
         try:
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(self.full_messages, f, ensure_ascii=False, indent=2)
+                json.dump(self.messages, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -104,7 +103,6 @@ class ContextManager:
                 self.messages = []
         else:
             self.messages = []
-        self.full_messages = list(self.messages)
 
     def _load_project_context(self):
         cmdai_file = __import__("os").path.join(self.cwd, "CMDAI.md")
@@ -351,24 +349,24 @@ class ContextManager:
 
         response_text = response_text.strip() or self._fallback_summary()
 
+        from .session import SessionState
         self.session_manager.current_state = SessionState.from_markdown(response_text, self.session_manager.current_state.session_id)
         self.session_manager.save_state()
         
-        summary_text = (
-            "[COMPRESSED SESSION CONTEXT]\n"
-            f"{self.session_manager.current_state.to_prompt() or response_text}\n\n"
-            "Kontynuuj od tego miejsca. To jest streszczenie poprzedniej historii po kompresji kontekstu."
-        )
-        
-        if "[COMPRESSED SESSION CONTEXT]" in self.system_prompt:
-            self.system_prompt = self.system_prompt.split("[COMPRESSED SESSION CONTEXT]")[0].strip()
+        for m in self.messages:
+            m["hidden"] = True
             
-        self.system_prompt += f"\n\n{summary_text}"
-        self.messages = []
-        
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "[COMPRESSED SESSION CONTEXT]\n"
+                f"{self.session_manager.current_state.to_prompt() or response_text}\n\n"
+                "Kontynuuj od tego miejsca. To jest streszczenie poprzedniej historii po kompresji kontekstu."
+            )
+        })
         self.save_history()
         tokens_count = len(response_text) // 4
-        console.print(f"[{MUTED_COLOR}][Context compacted: ~{tokens_count} tokens summary saved to system prompt.][/]")
+        console.print(f"[{MUTED_COLOR}][Context compacted: ~{tokens_count} tokens summary saved.][/]")
         if main_model_released:
             console.print(f"[{MUTED_COLOR}][Main model will reload on the next turn.][/]")
     def get_system_message(self, tools_desc: str, mode: str, thinking_desc: str) -> Dict[str, str]:
@@ -434,25 +432,17 @@ class ContextManager:
         mode = getattr(self.session_manager.current_state, "mode", "auto")
         system_msg = self.get_system_message(tools_desc, mode, thinking_desc)
         msgs.append(system_msg)
-        msgs.extend(self.messages)
+        msgs.extend([m for m in self.messages if not m.get("hidden")])
         return msgs
 
     def add_user_message(self, msg: str):
         msg_obj = {"role": "user", "content": msg}
         self.messages.append(msg_obj)
-        self.full_messages.append(msg_obj)
         self.append_transcript(msg_obj)
         self.save_history()
 
-    def add_assistant_message(self, msg: str, tool_calls=None, thinking: str = None):
+    def add_assistant_message(self, msg: str, tool_calls=None):
         m = {"role": "assistant", "content": msg}
-        if thinking:
-            m["thinking"] = thinking.strip()
-        else:
-            import re
-            think_match = re.search(r'<think>(.*?)(?:</think>|$)', msg, flags=re.DOTALL | re.IGNORECASE)
-            if think_match:
-                m["thinking"] = think_match.group(1).strip()
         if tool_calls:
             m["tool_calls"] = tool_calls
             formatted_tc = []
@@ -469,7 +459,6 @@ class ContextManager:
                 })
             m["tool_calls"] = formatted_tc
         self.messages.append(m)
-        self.full_messages.append(m)
         self.append_transcript(m)
         self.save_history()
 
@@ -481,7 +470,6 @@ class ContextManager:
             "content": str(content)
         }
         self.messages.append(m)
-        self.full_messages.append(m)
         self.append_transcript(m)
         
         m_llama = {
@@ -489,11 +477,9 @@ class ContextManager:
             "content": f"<tool_response>\n{content}\n</tool_response>"
         }
         self.messages.append(m_llama)
-        self.full_messages.append(m_llama)
         # Note: we don't append m_llama to transcript because it's duplicate.
         self.save_history()
 
     def clear(self):
         self.messages = []
-        self.full_messages = []
         self.save_history()

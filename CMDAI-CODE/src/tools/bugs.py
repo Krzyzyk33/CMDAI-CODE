@@ -38,8 +38,9 @@ def run_bugs() -> str:
 
     output = []
     for fpath, errs in errors_by_file.items():
-        output.append(fpath)
-        for err in errs:
-            output.append(f"   {err}")
+        output.append(f"├─ {fpath}")
+        for j, err in enumerate(errs):
+            branch = "└─" if j == len(errs) - 1 else "├─"
+            output.append(f"│  {branch} {err[4:]}")
 
     return "\n".join(output)

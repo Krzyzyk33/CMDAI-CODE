@@ -22,10 +22,25 @@ COMMANDS = {
     "/plan": "switch to planning mode (only reads files and plans)",
     "/quit": "terminate the program and close the terminal window",
     "/review": "toggle auto-reflection mode to double-check generated code",
+    "/runsubagents": "execute background tasks manually using a plan-first flow",
     "/sessions": "manage contextual sessions and revert to an older state",
     "/subagents": "manage background subagents and assign models for background tasks",
     "/undo": "stash the recent code modifications to revert them"
 }
+
+from prompt_toolkit.lexers import PygmentsLexer
+from pygments.lexer import RegexLexer
+from pygments.token import Keyword, Text, String
+
+class CMDAILexer(RegexLexer):
+    tokens = {
+        'root': [
+            (r'^/runsubagents\b', Keyword.Special),
+            (r'@\S+', Keyword.Type),
+            (r'".*?"', String),
+            (r'.', Text),
+        ]
+    }
 class CMDAICompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -90,6 +105,9 @@ class InputHandler:
         ]
         self.thinking_idx = thinking_idx
         self.pending_typeahead = ""
+        self._cached_width = 0
+        self._cached_top = ""
+        self._cached_engine = ""
         
         self.cmd_index = 0
         self.cmd_scroll = 0
@@ -216,10 +234,13 @@ class InputHandler:
         self.session = PromptSession(
             history=FileHistory(self.history_file),
             completer=CMDAICompleter(),
+            lexer=PygmentsLexer(CMDAILexer),
             key_bindings=self.bindings,
             style=Style.from_dict({
                 'prompt': 'white bold',
                 'bottom-toolbar': 'default',
+                'pygments.keyword.special': 'bg:#00aaaa fg:#ffffff bold',
+                'pygments.keyword.type': '#00ff00',
             }),
             complete_style=CompleteStyle.READLINE_LIKE,
             complete_while_typing=False,
@@ -228,49 +249,62 @@ class InputHandler:
     def get_input(self, model_name: str = "model", tokens: int = 0, max_tokens: int = 128000) -> str:
         import shutil
         import json, os
-        engine_short = "cpp"
+
+        new_width = shutil.get_terminal_size().columns - 2
+        if new_width != self._cached_width:
+            self._cached_width = new_width
+            self._cached_top = "╭" + "─" * (new_width - 2) + "╮"
+
+        width = self._cached_width
+        top = self._cached_top
+
+        engine_short = self._cached_engine
         state_file = os.path.expanduser("~/.cmdai_code/state.json")
         if os.path.exists(state_file):
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
-                    engine_short = json.load(f).get("llama_engine", "llama cpp").replace("llama ", "")
+                    eng = json.load(f).get("llama_engine", "llama cpp").replace("llama ", "")
+                    if eng != self._cached_engine:
+                        self._cached_engine = eng
+                        engine_short = eng
             except:
                 pass
-                
+
         from prompt_toolkit.formatted_text import HTML
-        from prompt_toolkit import print_formatted_text
         from prompt_toolkit.layout.processors import Processor, Transformation
         from prompt_toolkit.utils import get_cwidth
-        
-        width = shutil.get_terminal_size().columns - 2
-        top = "╭" + "─" * (width - 2) + "╮"
-        
+
         handler = self
-        
+        _model_name = model_name
+        _tokens = tokens
+        _max_tokens = max_tokens
+        _engine_short = engine_short
+
         class WrappingBottomProcessor(Processor):
             def apply_transformation(self, ti):
                 term_width = shutil.get_terminal_size().columns - 1
                 W = width - 5
-                if W < 10: 
+                if W < 10:
                     return Transformation(ti.fragments)
-                
+
                 new_fragments = []
                 if ti.lineno > 0:
                     new_fragments.append(('fg:white', '│   '))
-                    
+
                 current_line_len = 0
-                
+
                 for style, text in ti.fragments:
                     for char in text:
                         if char == '\n':
                             pad = W - current_line_len
-                            new_fragments.append(('', ' ' * pad))
+                            if pad > 0:
+                                new_fragments.append(('', ' ' * pad))
                             new_fragments.append(('fg:white', '│'))
                             new_fragments.append(('', ' ' * (term_width - width)))
                             new_fragments.append(('fg:white', '│   '))
                             current_line_len = 0
                             continue
-                            
+
                         cw = get_cwidth(char)
                         if current_line_len + cw > W:
                             pad = W - current_line_len
@@ -280,74 +314,76 @@ class InputHandler:
                             new_fragments.append(('', ' ' * (term_width - width)))
                             new_fragments.append(('fg:white', '│   '))
                             current_line_len = 0
-                            
+
                         new_fragments.append((style, char))
                         current_line_len += cw
-                        
+
                 pad = W - current_line_len
                 if pad > 0:
                     new_fragments.append(('', ' ' * pad))
                 new_fragments.append(('fg:white', '│'))
-                
+
                 if ti.lineno == ti.document.line_count - 1:
                     new_fragments.append(('', ' ' * (term_width - width)))
-                    
+
                     bottom_len = width
                     if bottom_len > 2:
-                        current_bottom = "╰" + "─" * (bottom_len - 2) + "╯"
-                        new_fragments.append(('fg:white', current_bottom))
-                        
+                        new_fragments.append(('fg:white', "╰" + "─" * (bottom_len - 2) + "╯"))
+
                     new_fragments.append(('', ' ' * (term_width - width)))
                     mode_sym = {"code": "⏵ code", "auto": "⏵⏵ auto", "plan": "⏸ plan"}[handler.modes[handler.mode_index]]
                     think_name = handler.thinking_levels[handler.thinking_idx][0]
-                    
-                    pct = (tokens / max_tokens) * 100 if max_tokens > 0 else 0
+
+                    pct = (_tokens / _max_tokens) * 100 if _max_tokens > 0 else 0
                     bar_len = 10
-                    filled_len = int((pct / 100) * bar_len)
-                    filled_len = min(bar_len, max(0, filled_len))
+                    filled_len = min(bar_len, max(0, int((pct / 100) * bar_len)))
                     bar = "█" * filled_len + "░" * (bar_len - filled_len)
-                    
-                    pct_str = f"{model_name}: ctx [{bar}] {pct:.0f}% ({tokens}/{max_tokens})"
+
+                    pct_str = f"{_model_name}: ctx [{bar}] {pct:.0f}% ({_tokens}/{_max_tokens})"
                     pct_style = 'fg:red' if pct >= 80 else ('fg:white' if pct >= 50 else 'fg:gray')
-                    
-                    status_left = f"  {mode_sym} ·  {engine_short} ·  {think_name} ·  "
-                    new_fragments.append(('fg:gray', status_left))
+
+                    new_fragments.append(('fg:gray', f"  {mode_sym} ·  {_engine_short} ·  {think_name} ·  "))
                     new_fragments.append((pct_style, pct_str))
-                    
+
                 return Transformation(new_fragments)
-        
-                                                                                 
+
         sys.stdout.write("\033[?25h")
         sys.stdout.flush()
         sys.stderr.flush()
-        
+
         self.session.reserve_space_for_menu = 0
-            
+
+        _last_prompt_text = [None]
+        _last_prompt_html = [None]
+
         def get_prompt():
             text = self.session.default_buffer.text
+            if text == _last_prompt_text[0] and _last_prompt_html[0] is not None:
+                return _last_prompt_html[0]
+            _last_prompt_text[0] = text
+
             lines = []
-            
             is_slash = text.startswith("/")
             is_file = "@" in text and not is_slash
-            
+
             if is_slash or is_file:
                 matches = self._get_matches(text)
-                
+
                 if matches:
                     self.cmd_index = min(self.cmd_index, len(matches) - 1)
                     if self.cmd_index < self.cmd_scroll:
                         self.cmd_scroll = self.cmd_index
                     elif self.cmd_index >= self.cmd_scroll + 4:
                         self.cmd_scroll = self.cmd_index - 3
-                        
+
                 visible_matches = matches[self.cmd_scroll : self.cmd_scroll + 4]
-                
+
                 for i, (cmd, desc) in enumerate(visible_matches):
                     actual_idx = self.cmd_scroll + i
                     avail_width = width - 20
                     if len(desc) > avail_width:
-                        desc = desc[:avail_width-3] + "..."
-                        
+                        desc = desc[:avail_width - 3] + "..."
+
                     if actual_idx == self.cmd_index:
                         lines.append(f"<style bg='#333333' fg='#ffffff'>  {cmd.ljust(15)} {desc} </style>")
                     else:
@@ -355,26 +391,31 @@ class InputHandler:
             else:
                 self.cmd_index = 0
                 self.cmd_scroll = 0
-                    
+
             empty_lines = 2 - len(lines)
             if empty_lines < 0:
                 empty_lines = 0
-                
+
             prompt_str = "\n" * empty_lines
             if lines:
                 prompt_str += "\n".join(lines) + "\n"
-                
+
             prompt_str += f"<style fg='white'>{top}</style>\n<style fg='white'>│ </style><b>&gt; </b>"
-            return HTML(prompt_str)
-            
+            result = HTML(prompt_str)
+            _last_prompt_html[0] = result
+            return result
+
+        _last_prompt_text[0] = None
+        _last_prompt_html[0] = None
+
         def get_continuation(width, line_number, is_soft_wrap):
             return []
-            
+
         default_text = self.pending_typeahead
         self.pending_typeahead = ""
         try:
             res = self.session.prompt(
-                get_prompt, 
+                get_prompt,
                 multiline=True,
                 prompt_continuation=get_continuation,
                 reserve_space_for_menu=0,
