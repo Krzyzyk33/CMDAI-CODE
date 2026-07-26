@@ -100,17 +100,18 @@ def run_session_picker(sessions, current_session_id):
             else:
                 s_id = opt["id"]
                 s_date = opt["date"]
+                msg_info = f" ({opt.get('msg_count', 0)} wiad.)" if "msg_count" in opt else ""
                 active_mark = "*" if s_id == current_session_id else " "
 
                 if is_selected and delete_mode:
-                    lines.append(("class:delete_mode", f" > {active_mark} {s_id} ({s_date})  [Wciśnij ENTER, by usunąć]\n"))
+                    lines.append(("class:delete_mode", f" > {active_mark} {s_id} ({s_date}){msg_info}  [Wciśnij ENTER, by usunąć]\n"))
                 else:
                     delete_hint = "  (Naciśnij '→', by usunąć)" if is_selected else ""
                     if is_selected:
-                        lines.append(("class:selected", f" > {active_mark} {s_id} ({s_date}){delete_hint}\n"))
+                        lines.append(("class:selected", f" > {active_mark} {s_id} ({s_date}){msg_info}{delete_hint}\n"))
                     else:
                         style = "class:active_item" if s_id == current_session_id else "class:unselected"
-                        lines.append((style, f"   {active_mark} {s_id} ({s_date})\n"))
+                        lines.append((style, f"   {active_mark} {s_id} ({s_date}){msg_info}\n"))
 
         remaining_below = len(options) - (scroll_offset + visible_count)
         if remaining_below > 0:

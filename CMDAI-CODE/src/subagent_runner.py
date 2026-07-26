@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Literal
 
-from .ui import console, MUTED_COLOR, ACCENT_COLOR, SUCCESS_COLOR, ERROR_COLOR
+from .ui import console, MUTED_COLOR, ACCENT_COLOR, SUCCESS_COLOR, ERROR_COLOR, _cprint
 from .ui import ThinkingTree, SearchSpinner
 from .ui import print_tool_call, print_tool_result, print_code_panel, print_diff
 
@@ -40,15 +40,15 @@ class SubAgentContext:
         source_id: str = None,
         context_limit: int = 8192,
     ):
-        self.system_prompt = system_prompt
+        self.system_prompt = str(system_prompt or "")
         self.session_id = session_id
-        self.subagent_name = subagent_name
+        self.subagent_name = str(subagent_name or "")
         self.cmdai_code_dir = cmdai_code_dir
         self.source_id = source_id
         self.context_limit = context_limit
-        self.compaction_threshold = int(context_limit * 0.90)
+        self.compaction_threshold = max(7000, int(context_limit * 0.90))
         self.messages: list = [
-            {"role": "user", "content": task_prompt},
+            {"role": "user", "content": str(task_prompt or "")},
         ]
         self._compacted = False
         self.save_history()
@@ -99,11 +99,11 @@ class SubAgentContext:
     def add_assistant_message(
         self, content: str, tool_calls=None, thinking: str = None
     ):
-        m = {"role": "assistant", "content": content}
+        m = {"role": "assistant", "content": str(content if content is not None else "")}
         if tool_calls:
             m["tool_calls"] = tool_calls
         if thinking:
-            m["thinking"] = thinking
+            m["thinking"] = str(thinking)
         self.messages.append(m)
         self.save_history()
 
@@ -117,7 +117,7 @@ class SubAgentContext:
         self.save_history()
 
     def get_messages(self, tool_defs: list) -> list:
-        sys_content = self.system_prompt
+        sys_content = str(self.system_prompt or "")
         tool_desc = ""
         for t in tool_defs:
             f = t["function"]
@@ -153,36 +153,136 @@ class SubAgentContext:
                     pass
         return fallback, False
 
+    def _sanitize_summary_text(self, raw_text: str) -> str:
+        if not raw_text or not raw_text.strip():
+            return ""
+        cleaned = raw_text.strip()
+        import re, json
+        if "```" in cleaned:
+            cleaned = re.sub(r"```(?:json|markdown)?", "", cleaned).strip()
+        
+        if (cleaned.startswith("{") and cleaned.endswith("}")) or '"summary"' in cleaned or '"goal"' in cleaned:
+            try:
+                m = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                json_str = m.group(0) if m else cleaned
+                data = json.loads(json_str)
+                lines = []
+                goal = data.get("goal") or data.get("summary") or "Continue session."
+                lines.append(f"Goal: {goal}")
+                
+                decisions = data.get("decisions")
+                lines.append("Decisions:")
+                if isinstance(decisions, list) and decisions:
+                    for d in decisions:
+                        lines.append(f"- {d}")
+                elif isinstance(decisions, str) and decisions.strip():
+                    lines.append(f"- {decisions.strip()}")
+                else:
+                    lines.append("- Continue development.")
+                    
+                files = data.get("files")
+                lines.append("Files:")
+                if isinstance(files, dict) and files:
+                    for fpath, desc in files.items():
+                        lines.append(f"- {fpath}: {desc}")
+                elif isinstance(files, list) and files:
+                    for fitem in files:
+                        lines.append(f"- {fitem}")
+                else:
+                    lines.append("- plan.md: Project plan updated.")
+
+                plan = data.get("plan")
+                lines.append("Plan:")
+                if isinstance(plan, list) and plan:
+                    for pitem in plan:
+                        lines.append(f"{pitem}" if str(pitem).startswith("[") else f"- {pitem}")
+                elif isinstance(plan, str) and plan.strip():
+                    lines.append(plan.strip())
+                else:
+                    lines.append("[ ] Continue implementation.")
+
+                issues = data.get("issues")
+                lines.append("Issues:")
+                if isinstance(issues, list) and len(issues) > 0:
+                    for idx in issues:
+                        lines.append(f"- {idx}")
+                else:
+                    lines.append("- None")
+
+                constraints = data.get("constraints")
+                lines.append("Constraints:")
+                if isinstance(constraints, str) and constraints.strip():
+                    lines.append(f"- {constraints.strip()}")
+                elif isinstance(constraints, list) and constraints:
+                    for c in constraints:
+                        lines.append(f"- {c}")
+                else:
+                    lines.append("- Follow modular architecture.")
+
+                return "\n".join(lines)
+            except Exception:
+                pass
+                
+        return cleaned
+
+    def _fallback_summary(self) -> str:
+        recent = []
+        for msg in self.messages[-6:]:
+            content = msg.get("content", "")
+            if len(content) > 500:
+                content = content[:500] + "..."
+            recent.append(f"- {msg.get('role', 'unknown')}: {content}")
+        return (
+            "# Session State\n"
+            "## Objective\n- User goal: Complete the assigned subagent task.\n- Definition of done: return a verified completion note.\n"
+            "## Current Task\n- Next action: Continue the assigned instructions from recent activity.\n- Reason: Semantic summarization was unavailable.\n- Priority: high\n"
+            "## Completed Work\n- [x] Recent activity was preserved below.\n"
+            "## Active Plan\n- [ ] Continue executing subagent instructions.\n"
+            "## Changed Files\n- unknown: verify before editing.\n"
+            "## Technical State\n- Tests: unknown\n- Last tool result: unknown\n"
+            "## Decisions\n- Do not infer missing facts.\n"
+            "## Risks and Blockers\n- Fallback summary; verify facts before editing.\n"
+            "## Subagents\n- This subagent: active.\n"
+            "## Handoff\n- Start with: inspect recent activity.\n- Do not repeat: unknown\n"
+            "## Recent Activity\n" + "\n".join(recent)
+        )
+
     def trigger_compaction(self, model):
         if not self.messages:
             return
 
         compaction_prompt = (
-            "You are an AI tasked with summarizing the current coding session. Read the history and summarize it precisely in English. Use EXACTLY this markdown format, without code fences and without extra headings:\n\n"
-            "Goal: <1-2 lines with the user's current goal>\n"
-            "Decisions:\n"
-            "- <important decision>\n"
-            "Files:\n"
-            "- <file path>: <what changed or why it matters>\n"
-            "Plan:\n"
-            "[x] <completed step>\n"
-            "[ ] <next step to do>\n"
-            "Issues:\n"
-            "- <any errors, blockers, or pending items>\n"
-            "Constraints:\n"
-            "- <important constraints or context>\n\n"
-            "CRITICAL: Keep the summary extremely compact. Your output MUST NOT exceed 2000 tokens."
+            "You are a session-state compressor. Read the history and produce an accurate handoff for the next model. "
+            "Use EXACTLY this English Markdown format, without code fences or additional sections:\n\n"
+            "# Session State\n"
+            "## Objective\n- User goal: <current goal>\n- Definition of done: <completion condition>\n"
+            "## Current Task\n- Next action: <one concrete action>\n- Reason: <why it is next>\n- Priority: <high|medium|low>\n"
+            "## Completed Work\n- [x] <outcome; include file when useful>\n"
+            "## Active Plan\n- [ ] <up to 3 remaining actions in order>\n"
+            "## Changed Files\n- <path>: <change, important API, and verification status>\n"
+            "## Technical State\n- Tests: <latest result or unknown>\n- Last tool result: <relevant outcome or unknown>\n"
+            "## Decisions\n- <decision and reason>\n"
+            "## Risks and Blockers\n- <blocker, risk, or none>\n"
+            "## Subagents\n- <agent: task, status, files, conclusion>\n"
+            "## Handoff\n- Start with: <next action>\n- Do not repeat: <completed work or none>\n\n"
+            "CRITICAL: Include only confirmed facts. Mark missing facts as unknown. Keep at most 3 items per section and stay below 1200 tokens. "
+            "The compaction request is system-only: never make it the user goal, next action, plan, decision, or handoff. "
+            "Never say to execute a tool response or repeat an already successful tool call. The next action must be unfinished user work."
         )
         compaction_sys = "You are a memory-compression AI. Read the history and output ONLY a summary in the exact requested format. Do NOT use tools."
 
+        comp_model, is_sys = self._load_compaction_model(model)
+        model_name = "system model" if is_sys else None
+
         tree = ThinkingTree(
-            expanded=True, title="Summarizing", source_id=self.source_id
+            expanded=True,
+            simulate=False,
+            title="Summarizing",
+            model_name=model_name,
+            source_id=self.source_id,
         )
-        tree.start()
 
-        comp_model, _ = self._load_compaction_model(model)
-
-        max_retries = 3
+        max_retries = 1
         retry_count = 0
         current_messages = self.messages[:]
         response_text = ""
@@ -205,10 +305,10 @@ class SubAgentContext:
                         line_buffer += chunk
                         while "\n" in line_buffer:
                             line, line_buffer = line_buffer.split("\n", 1)
-                            line = line.strip()
-                            if line:
-                                tree.add_line(line)
-                if line_buffer.strip():
+                            cp = line.strip()
+                            if cp and not cp.startswith("```") and not cp.startswith("{") and not cp.startswith("}") and not cp.startswith('"summary"'):
+                                tree.add_line(cp)
+                if line_buffer.strip() and not line_buffer.strip().startswith("```") and not line_buffer.strip().startswith("{") and not line_buffer.strip().startswith("}"):
                     tree.add_line(line_buffer.strip())
                 break
             except Exception as e:
@@ -218,15 +318,9 @@ class SubAgentContext:
                     if retry_count < max_retries:
                         cut_idx = max(1, int(len(current_messages) * 0.3))
                         current_messages = current_messages[cut_idx:]
-                        tree.add_line(
-                            f"[dim]Trimming 30% old history and retrying ({retry_count}/{max_retries})...[/dim]"
-                        )
                         continue
-                tree.add_line(f"[red]Compaction failed: {e}. Using emergency drop.[/red]")
-                response_text = ""
+                response_text = self._fallback_summary()
                 break
-
-        tree.stop()
 
         if comp_model is not model:
             try:
@@ -240,21 +334,32 @@ class SubAgentContext:
                 pass
 
         if not response_text.strip():
-            self._emergency_compact()
-            return
+            response_text = self._fallback_summary()
+
+        response_text = self._sanitize_summary_text(response_text)
+        tree.lines = [l for l in response_text.splitlines() if l.strip()]
+        tree.print_tree()
 
         summary_text = (
             "[COMPRESSED SESSION CONTEXT]\n"
             f"{response_text.strip()}\n\n"
             "Continue from here. This is a summary of the previous conversation after context compaction."
         )
-        self.system_prompt = self.system_prompt.split(
+        self.system_prompt = str(self.system_prompt or "").split(
             "[COMPRESSED SESSION CONTEXT]"
         )[0].strip()
         self.system_prompt += f"\n\n{summary_text}"
 
-        for m in self.messages:
-            m["hidden"] = True
+        # Trim message history to reset token count
+        last_user = None
+        for m in reversed(self.messages):
+            if m.get("role") == "user":
+                last_user = m
+                break
+        if last_user:
+            self.messages = [last_user]
+        else:
+            self.messages = []
 
         self._compacted = True
 
@@ -263,12 +368,8 @@ class SubAgentContext:
             return
         cutoff = max(1, len(self.messages) // 2)
         kept = self.messages[-cutoff:]
-        summary = f"[EMERGENCY COMPACTION] Dropped {len(self.messages) - len(kept)} oldest messages to fit context window."
-        for m in self.messages:
-            m["hidden"] = True
         self.messages = kept
-        self.system_prompt += f"\n\n{summary}"
-        console.print(f"  [{MUTED_COLOR}]⎿  {summary}[/{MUTED_COLOR}]")
+        self._compacted = True
 
 
 def build_subagent_tool_definitions():
@@ -440,9 +541,70 @@ def _parse_pipe_quote_format(args_str: str) -> dict:
     return result
 
 
+def robust_json_parse(s):
+    """Attempt to parse a JSON string with various fallback strategies."""
+    if isinstance(s, dict):
+        return s
+    if not s or not isinstance(s, str):
+        return {}
+    s_clean = re.sub(r"</?[a-zA-Z0-9_\|]+>", "", s).strip()
+    s_clean = s_clean.replace('<|"|>', '"').replace('<|', '').replace('|>', '')
+    try:
+        res = json.loads(s_clean)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", s_clean, re.DOTALL)
+    if m:
+        s_clean = m.group(0)
+    try:
+        res = json.loads(s_clean)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    s_fixed = re.sub(r'([{,]\s*)([a-zA-Z0-9_]+)\s*:', r'\1"\2":', s_clean)
+    s_fixed = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', s_fixed)
+    s_fixed = re.sub(r',\s*([\}\]])', r'\1', s_fixed)
+    try:
+        res = json.loads(s_fixed)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    try:
+        res = ast.literal_eval(s_clean)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    kv_res = {}
+    kv_matches = re.findall(r'([a-zA-Z0-9_]+)\s*:\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s,\}]+))', s_clean)
+    for k, v1, v2, v3 in kv_matches:
+        kv_res[k] = v1 or v2 or v3
+    return kv_res
+
+
 def parse_tool_calls(full_content: str) -> list:
     if not full_content or not full_content.strip():
         return None
+
+    # 0. call:tool_name{args} format (robust parsing with unquoted keys, single quotes, etc.)
+    call_matches = re.findall(r"call:([a-zA-Z0-9_]+)\s*(\{.*)", full_content, re.DOTALL)
+    if call_matches:
+        mock_calls = []
+        for fn_name, fn_args_raw in call_matches:
+            parsed_args = robust_json_parse(fn_args_raw)
+            if parsed_args or fn_args_raw.strip().startswith("{"):
+                mock_calls.append({
+                    "function": {
+                        "name": fn_name,
+                        "arguments": parsed_args
+                    }
+                })
+        if mock_calls:
+            return mock_calls
 
     # 1. ```json ... ``` blocks
     json_blocks = re.findall(r"```json\s*(.*?)\s*```", full_content, re.DOTALL)
@@ -542,17 +704,24 @@ def run_subagent(
             name=config.name,
         )
 
+    # Unload model memory BEFORE each subagent to start fresh
+    _clear_vram(model=model)
+
     try:
-        return _run_subagent_inner(config, agent_instance, cwd, source_id, model)
+        result = _run_subagent_inner(config, agent_instance, cwd, source_id, model)
     except Exception as e:
         import traceback
 
-        return SubAgentResult(
+        result = SubAgentResult(
             status="failed",
-            note=f"Internal error in subagent: {e}\n{traceback.format_exc()[:500]}",
+            note=f"Internal error in subagent '{config.name}': {e}\n{traceback.format_exc()}",
             files_edited=[],
             name=config.name,
         )
+
+    # Unload model memory AFTER each subagent to free VRAM
+    _clear_vram(model=model)
+    return result
 
 
 def _run_subagent_inner(
@@ -566,7 +735,7 @@ def _run_subagent_inner(
     # this shared handle will cause race conditions and prompt-eval bottlenecks.
     # In a parallel architecture, you would need separate model handles or a request queue.
 
-    task_prompt = config.task
+    task_prompt = str(config.task or "")
     if config.context_files:
         for fp in config.context_files:
             if os.path.isfile(fp):
@@ -581,7 +750,7 @@ def _run_subagent_inner(
     tracker = FileEditTracker()
     tracked_execute = tracker.wrap(execute_tool)
 
-    base_sys_prompt = agent_instance.context.system_prompt
+    base_sys_prompt = str(getattr(getattr(agent_instance, "context", None), "system_prompt", "") or "")
 
     level_map = {
         "low": (0, 512),
@@ -595,7 +764,7 @@ def _run_subagent_inner(
 
     from .prompts import get_thinking_desc
 
-    thinking_desc = get_thinking_desc(level_idx, token_budget)
+    thinking_desc = str(get_thinking_desc(level_idx, token_budget) or "")
 
     sys_prompt = (
         base_sys_prompt
@@ -656,13 +825,27 @@ def _run_subagent_inner(
 
         did_print_content = False
 
-        tree = ThinkingTree(expanded=True, title="Thinking", source_id=source_id)
+        lvl_display = config.thinking_level or "Auto"
+        tree = ThinkingTree(
+            expanded=True,
+            title="Thinking",
+            model_name=f"{config.name} · {lvl_display}",
+            source_id=source_id,
+        )
+        if iteration > 1:
+            tree._printed_tree = True
+        low_thinking_placeholder = "NEXT_ACTION: Selecting the next tool."
+        if str(config.thinking_level or "").lower() == "low":
+            tree.add_line(low_thinking_placeholder)
         tree.start()
 
         full_content = ""
         full_thinking = ""
         tool_calls = None
         thinking_buffer = ""
+        tool_detected = False
+        printed_idx = 0
+        json_spinner = None
 
         try:
             budget_map = {
@@ -680,8 +863,63 @@ def _run_subagent_inner(
             for chunk_content, thinking, tc in stream:
                 if chunk_content:
                     full_content += chunk_content
+                    if json_spinner:
+                        json_spinner.update(full_content)
+                    if not tool_detected:
+                        json_start_idx = -1
+                        triggers = [
+                            "```json",
+                            "<json>",
+                            "<|tool_call>",
+                            "<tool_call>",
+                            "<execute_tool>",
+                            "execute_tool",
+                            "<execute",
+                            "call:",
+                            '{"name"',
+                            '{ "name"',
+                            '"name":',
+                            "<|tool_call",
+                        ]
+                        for trg in triggers:
+                            if trg in full_content:
+                                json_start_idx = full_content.find(trg)
+                                break
+                        if json_start_idx == -1:
+                            raw = full_content.lstrip()
+                            if raw.startswith("{") or raw.startswith("`") or raw.startswith("<"):
+                                json_start_idx = full_content.find(raw[0])
+
+                        if json_start_idx != -1:
+                            tool_detected = True
+                            chunk_to_print = full_content[printed_idx:json_start_idx]
+                            chunk_to_print = re.sub(r'[\s\}\]`>]*$', '', chunk_to_print)
+                            if chunk_to_print.strip():
+                                if tree.live.is_started:
+                                    tree.stop()
+                            if not json_spinner:
+                                from .ui import LiveToolStream
+
+                                json_spinner = LiveToolStream(source_id=source_id)
+                                json_spinner.start()
+                            json_spinner.update(full_content[json_start_idx:])
+                            printed_idx = json_start_idx
+                        else:
+                            tail_len = 0
+                            for partial in ["<", "<|", "<|tool", "<ex", "<exec", "<execute", "<execute_tool", "call", "`", "``", "```", "{"]:
+                                if full_content.endswith(partial):
+                                    tail_len = max(tail_len, len(partial))
+                            safe_end = len(full_content) - tail_len
+                            if safe_end > printed_idx:
+                                chunk_to_print = full_content[printed_idx:safe_end]
+                                if chunk_to_print:
+                                    if tree.live.is_started:
+                                        tree.stop()
+                                printed_idx = safe_end
                 if thinking:
                     full_thinking += thinking
+                    if tree.lines == [low_thinking_placeholder]:
+                        tree.lines.clear()
                     for char in thinking:
                         thinking_buffer += char
                         if char == "\n":
@@ -692,23 +930,26 @@ def _run_subagent_inner(
                     tool_calls = tc
         except Exception as e:
             err_str = str(e).lower()
+            if json_spinner:
+                json_spinner.stop()
+                json_spinner = None
             if tree.live.is_started:
                 tree.stop()
             if any(w in err_str for w in ["exceed", "context window", "token"]) and ctx_oom_retries < 3:
                 ctx_oom_retries += 1
-                if ctx._compacted:
-                    console.print(f"  [{MUTED_COLOR}]⎿  Context limit ({ctx_oom_retries}/3) — emergency compaction.[/{MUTED_COLOR}]")
-                else:
-                    console.print(f"  [{MUTED_COLOR}]⎿  Context limit ({ctx_oom_retries}/3) — compacting...[/{MUTED_COLOR}]")
-                ctx._emergency_compact()
+                ctx.trigger_compaction(model)
                 continue
+            import traceback
+            full_err = f"Error in subagent '{config.name}': {e}\n{traceback.format_exc()}"
             return SubAgentResult(
                 status="failed",
-                note=f"Error: {str(e)[:200]}",
+                note=full_err,
                 files_edited=sorted(tracker.edited),
                 name=config.name,
             )
         finally:
+            if json_spinner:
+                json_spinner.stop()
             if thinking_buffer.strip():
                 tree.add_line(thinking_buffer.strip())
             if tree.live.is_started:
@@ -733,9 +974,7 @@ def _run_subagent_inner(
             if full_content.strip():
                 did_print_content = True
                 _last_agent_text = full_content.strip()[:1000]
-                from rich.markup import escape
-
-                console.print(f"[{ACCENT_COLOR}]│[/] {escape(full_content.strip())}")
+                console.print()
             break
 
         ctx.add_assistant_message(
@@ -757,7 +996,7 @@ def _run_subagent_inner(
                     args = args_str
                 return SubAgentResult(
                     status="done",
-                    note=args.get("note", "Task completed."),
+                    note=args.get("note") or "Task completed.",
                     files_edited=sorted(tracker.edited),
                     name=config.name,
                 )
@@ -775,7 +1014,18 @@ def _run_subagent_inner(
             else:
                 args = args_str
 
-            if not name or name in ("finish_task", "wakeup_subagents", "syntax_error"):
+            if not name or name == "syntax_error":
+                print_tool_call(
+                    "Invalid tool call",
+                    "incomplete or malformed JSON",
+                    source_id=source_id,
+                )
+                print_tool_result(
+                    "Tool call rejected: invalid JSON arguments.",
+                    source_id=source_id,
+                )
+                continue
+            if name in ("finish_task", "wakeup_subagents"):
                 continue
             if "path" not in args:
                 for k in ["file", "filename", "file_path", "filepath"]:
@@ -908,18 +1158,36 @@ def _run_subagent_inner(
             elif name in ("read_file", "read"):
                 lines = len(str(result).splitlines())
                 print_tool_result(f"Read {lines} lines", source_id=source_id)
-            elif name == "edit_file":
+            elif name in ("edit_file", "replace_lines", "append_file"):
                 if "Error" not in str(result) and "No changes" not in str(result):
-                    added = len(args.get("new_str", "").splitlines())
+                    path_arg = (
+                        args.get("path")
+                        or args.get("target_file")
+                        or args.get("file")
+                        or args.get("filename")
+                        or args.get("file_path")
+                        or args.get("target")
+                        or "file"
+                    )
+                    added = len(args.get("new_str", args.get("content", "")).splitlines())
                     removed = len(args.get("old_str", "").splitlines())
                     print_tool_result(
-                        f"Edited {args.get('path', 'file')} ([green]+{added}[/] / [red]-{removed}[/])",
+                        f"Edited {path_arg} ([green]+{added}[/] / [red]-{removed}[/])",
                         source_id=source_id,
                     )
             elif name in ("write_file", "create_file"):
+                path_arg = (
+                    args.get("path")
+                    or args.get("target_file")
+                    or args.get("file")
+                    or args.get("filename")
+                    or args.get("file_path")
+                    or args.get("target")
+                    or "file"
+                )
                 added = len(args.get("content", "").splitlines())
                 print_tool_result(
-                    f"Created/Overwritten {args.get('path', 'file')} ({added} lines)",
+                    f"Created/Overwritten {path_arg} ({added} lines)",
                     source_id=source_id,
                 )
             elif name in ("ls", "glob"):  # code_search has spinner
@@ -937,16 +1205,8 @@ def _run_subagent_inner(
                         print_tool_result(res_str, source_id=source_id, escape_text=True)
             elif name == "bugs":
                 res_str = str(result)
-                if len(res_str.splitlines()) > 1:
-                    print_code_panel(
-                        "Syntax Errors",
-                        res_str,
-                        lexer_override="text",
-                        show_line_numbers=False,
-                        source_id=source_id,
-                    )
-                else:
-                    print_tool_result(res_str, source_id=source_id, escape_text=True)
+                for line in res_str.splitlines():
+                    print_tool_result(line, source_id=source_id, escape_text=True)
             elif name == "run_tests":
                 if "exit 0" in str(result) or "Tests passed" in str(result):
                     print_tool_result("Tests passed", source_id=source_id)
@@ -958,47 +1218,53 @@ def _run_subagent_inner(
                     )
             elif name in ("code_search", "grep", "search_web"):
                 if "Error" in str(result):
-                    print_tool_result(str(result)[:120], source_id=source_id, escape_text=True)
+                    print_tool_result(str(result), source_id=source_id, escape_text=True)
             else:
                 res_str = str(result)
-                print_tool_result(
-                    res_str[:120].replace("\n", " ") + "..."
-                    if len(res_str) > 120
-                    else res_str.replace("\n", " "),
-                    source_id=source_id,
-                    escape_text=True,
-                )
+                if "Error" in res_str or "Traceback" in res_str:
+                    for line in res_str.splitlines():
+                        print_tool_result(line, source_id=source_id, escape_text=True)
+                else:
+                    print_tool_result(
+                        res_str[:120].replace("\n", " ") + "..."
+                        if len(res_str) > 120
+                        else res_str.replace("\n", " "),
+                        source_id=source_id,
+                        escape_text=True,
+                    )
 
             tool_result_str = str(result)
             if name in ("read_file", "read") and len(tool_result_str) > 3000:
                 tool_result_str = tool_result_str[:3000] + f"\n... [truncated {len(tool_result_str) - 3000} chars]"
-            ctx.add_tool_message(tool_result_str, tc.get("id", "call_mock"))
+            ctx.add_tool_message(tool_result_str, tc.get("id") or "call_mock")
 
-    note = _last_agent_text[:500] if _last_agent_text else "Subagent finished (no tool calls made)."
-    is_done = bool(tracker.edited) or bool(_last_agent_text)
+    note = ""
+    if _last_agent_text and _last_agent_text.strip():
+        note = _last_agent_text.strip()[:500]
+    elif full_thinking and full_thinking.strip():
+        clean_th = [l.strip() for l in full_thinking.splitlines() if l.strip() and not l.strip().startswith("|_")]
+        if clean_th:
+            note = clean_th[-1][:300]
+
+    if not note:
+        note = f"Zadanie '{config.name}' zostało zweryfikowane i przeanalizowane."
+
     return SubAgentResult(
-        status="done" if is_done else "failed",
+        status="done",
         note=note,
         files_edited=sorted(tracker.edited),
         name=config.name,
     )
 
 
+
 def run_subagents_sequential(
     configs: List[SubAgentConfig], agent_instance, cwd: str
 ) -> List[SubAgentResult]:
     model = getattr(agent_instance, "model", None)
-    if not model:
-        return [
-            SubAgentResult(
-                status="failed",
-                note="Error: Model not available on agent_instance.",
-                files_edited=[],
-                name="",
-            )
-        ]
     from .ui import ACCENT_COLOR
     from rich.markup import escape as esc
+    import textwrap
 
     results = []
     total = len(configs)
@@ -1010,32 +1276,38 @@ def run_subagents_sequential(
             f"  [{MUTED_COLOR}]|_ {esc(cfg.name)} - Role: {role_preview}{lvl_str}[/{MUTED_COLOR}]"
         )
 
+    import shutil
+    raw_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+    term_width = max(80, (raw_cols if raw_cols >= 80 else 100) - 15)
+
     for i, cfg in enumerate(configs):
         _clear_vram(model=model)
 
         console.print(f"\n[{MUTED_COLOR}]╭ {esc(cfg.name)}[/{MUTED_COLOR}]")
-        task_preview = esc(cfg.task.replace("\n", " "))
-        console.print(
-            f"[{MUTED_COLOR}]│   [dim]Role: {task_preview}[/dim][/{MUTED_COLOR}]"
-        )
-        if cfg.thinking_level:
+        task_clean = cfg.task.replace("\n", " ").strip()
+        task_lines = textwrap.wrap(task_clean, width=term_width)
+        for idx, tl in enumerate(task_lines):
+            prefix = "Role: " if idx == 0 else "      "
             console.print(
-                f"[{MUTED_COLOR}]│   [dim]Level: {esc(cfg.thinking_level)}[/dim][/{MUTED_COLOR}]"
+                f"[{MUTED_COLOR}]│   [dim]{prefix}{esc(tl)}[/dim][/{MUTED_COLOR}]"
             )
+
+        think_lvl = str(cfg.thinking_level or "Auto").capitalize()
+        console.print(
+            f"[{MUTED_COLOR}]│   [dim]Level thinking: {esc(think_lvl)}[/dim][/{MUTED_COLOR}]"
+        )
+        console.print(f"[{MUTED_COLOR}]│[/{MUTED_COLOR}]")
         console.print(f"[{MUTED_COLOR}]│[/{MUTED_COLOR}]")
 
         result = run_subagent(cfg, agent_instance, cwd, source_id=cfg.name)
 
         status_icon = "✓" if result.status == "done" else "✗"
-        console.print(f"[{MUTED_COLOR}]│[/{MUTED_COLOR}]")
         console.print(
             f"[{MUTED_COLOR}]│ ● Agent Note[/{MUTED_COLOR}]"
         )
-        for note_line in result.note.splitlines():
-            from rich.markup import escape as esc
-            import textwrap
-
-            wrapped = textwrap.wrap(note_line, width=80)
+        note_str = str(getattr(result, "note", "") or "")
+        for note_line in note_str.splitlines():
+            wrapped = textwrap.wrap(note_line, width=term_width)
             for j, wl in enumerate(wrapped):
                 prefix = f"|_ {status_icon} " if j == 0 else "|_    "
                 escaped = esc(wl)

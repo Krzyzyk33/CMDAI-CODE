@@ -6,66 +6,95 @@ import shutil
 from typing import List, Dict, Any, Optional
 
 def read_file(path: str, offset: int = 0, limit: Optional[int] = None) -> str:
-    if not os.path.exists(path):
-        return f"Error: File {path} not found."
-    with open(path, "r", encoding="utf-8") as f:
+    path = str(path or "")
+    try:
+        offset = int(offset) if offset is not None else 0
+    except (ValueError, TypeError):
+        offset = 0
+    try:
+        limit = int(limit) if (limit is not None and str(limit).strip() != "") else None
+    except (ValueError, TypeError):
+        limit = None
+
+    if not path or not os.path.exists(path):
+        return f"Error: File '{path}' not found."
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
         end = offset + limit if limit else len(lines)
         subset = lines[offset:end]
         return "".join(subset)
 
-def create_file(path: str, content: str) -> str:
+def create_file(path: str, content: str = "") -> str:
+    path = str(path or "")
+    content = str(content or "")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
         f.write(content)
     return f"Success: File {path} created/overwritten."
 
-def edit_file(path: str, old_str: str, new_str: str) -> str:
+def edit_file(path: str, old_str: str = "", new_str: str = "") -> str:
+    path = str(path or "")
+    old_str = str(old_str or "")
+    new_str = str(new_str or "")
     if not os.path.exists(path):
-        return f"Error: File {path} not found."
-    with open(path, "r", encoding="utf-8") as f:
+        return f"Error: File '{path}' not found."
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
-    
+
     count = content.count(old_str)
     if count == 0:
         return "Error: old_str not found in file."
     elif count > 1:
         return "Error: old_str is ambiguous, found multiple times. Provide more context."
-        
+
     new_content = content.replace(old_str, new_str)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
         f.write(new_content)
     return f"Success: Replaced old_str with new_str in {path}."
 
-def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:
+def replace_lines(path: str, start_line: int = 1, end_line: int = 1, new_content: str = "") -> str:
+    path = str(path or "")
+    try:
+        start_line = int(start_line) if start_line is not None else 1
+    except (ValueError, TypeError):
+        start_line = 1
+    try:
+        end_line = int(end_line) if end_line is not None else 1
+    except (ValueError, TypeError):
+        end_line = 1
+    new_content = str(new_content or "")
+
     if not os.path.exists(path):
-        return f"Error: File {path} not found."
-    with open(path, "r", encoding="utf-8") as f:
+        return f"Error: File '{path}' not found."
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     if start_line < 1 or start_line > len(lines):
         return f"Error: start_line {start_line} is out of bounds."
     if end_line < start_line or end_line > len(lines):
         return f"Error: end_line {end_line} is out of bounds."
-    
-                                      
+
     lines[start_line - 1:end_line] = [new_content + ("\n" if not new_content.endswith("\n") else "")]
-    
-    with open(path, "w", encoding="utf-8") as f:
+
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
     return f"Success: Replaced lines {start_line}-{end_line} in {path}."
 
-def append_file(path: str, content: str) -> str:
+def append_file(path: str, content: str = "") -> str:
+    path = str(path or "")
+    content = str(content or "")
     if not os.path.exists(path):
-        return f"Error: File {path} not found."
-    with open(path, "a", encoding="utf-8") as f:
+        return f"Error: File '{path}' not found."
+    with open(path, "a", encoding="utf-8", errors="replace") as f:
         if not content.startswith("\n"):
             f.write("\n")
         f.write(content)
     return f"Success: Appended content to {path}."
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str = "") -> str:
+    path = str(path or "")
+    content = str(content or "")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
         f.write(content)
     return f"Success: File {path} overwritten."
 
@@ -104,6 +133,14 @@ def _has_syntax_error(target_path: str) -> bool:
 def run_ls(path: str = ".") -> str:
     if not path or not str(path).strip():
         path = "."
+    path = str(path).strip()
+    # Protect against listing root/drive paths (e.g., C:\, /, D:\)
+    abs_path = os.path.abspath(path)
+    # Check if it's a filesystem root (e.g., C:\, D:\, /)
+    if abs_path == os.path.splitdrive(abs_path)[0] + os.sep or abs_path == os.sep:
+        path = os.getcwd()
+    if path in ("/", "\\", "C:\\", "C:/", "D:\\", "D:/"):
+        path = os.getcwd()
     if not os.path.exists(path):
         return f"Error: Path {path} not found."
     if os.path.isfile(path):

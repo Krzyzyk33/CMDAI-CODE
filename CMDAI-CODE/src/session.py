@@ -12,8 +12,16 @@ class SessionState:
     current_plan: List[Tuple[str, bool]] = field(default_factory=list)
     open_issues: List[str] = field(default_factory=list)
     constraints: List[str] = field(default_factory=list)
+    summary_sections: Dict[str, List[str]] = field(default_factory=dict)
 
     def to_prompt(self) -> str:
+        if self.summary_sections:
+            out = "[SESSION STATE]\n# Session State\n"
+            for title, lines in self.summary_sections.items():
+                out += f"\n## {title}\n"
+                out += "\n".join(lines) + "\n"
+            return out.strip()
+
         out = "[KONTEKST SESJI]\n"
         if self.goal:
             out += f"Cel: {self.goal}\n\n"
@@ -64,6 +72,16 @@ class SessionState:
             line = line.strip()
             if not line:
                 continue
+
+            if line.startswith("## "):
+                current_section = line[3:].strip()
+                state.summary_sections.setdefault(current_section, [])
+                continue
+            if line.startswith("# "):
+                continue
+            if current_section in state.summary_sections:
+                state.summary_sections[current_section].append(line)
+                continue
             
             if line.startswith("Goal:"):
                 state.goal = line[5:].strip()
@@ -97,6 +115,12 @@ class SessionState:
                     state.open_issues.append(line[1:].strip())
                 elif current_section == "constraints" and line.startswith("-"):
                     state.constraints.append(line[1:].strip())
+        if state.summary_sections:
+            objective = state.summary_sections.get("Objective", [])
+            for item in objective:
+                if item.lower().startswith("- user goal:"):
+                    state.goal = item.split(":", 1)[1].strip()
+                    break
         return state
 
     @classmethod
@@ -122,7 +146,7 @@ class SessionManager:
             os.makedirs(self.cmdai_code_dir)
             
     def save_state(self):
-        if not self.current_state.goal and not self.current_state.decisions and not self.current_state.files_touched:
+        if not self.current_state.goal and not self.current_state.decisions and not self.current_state.files_touched and not self.current_state.summary_sections:
             return        
         self.ensure_dir()
         path = os.path.join(self.cmdai_code_dir, f"session_{self.current_state.session_id}_state.json")
@@ -170,7 +194,17 @@ class SessionManager:
         result = []
         for sid, mtime in sessions_dict.items():
             dt = datetime.datetime.fromtimestamp(mtime)
-            result.append({"id": sid, "mtime": mtime, "date": dt.strftime("%Y-%m-%d %H:%M")})
+            msg_count = 0
+            hist_path = os.path.join(self.cmdai_code_dir, f"session_{sid}_history.json")
+            if os.path.exists(hist_path):
+                try:
+                    import json
+                    with open(hist_path, "r", encoding="utf-8") as f:
+                        msgs = json.load(f)
+                        msg_count = len(msgs)
+                except Exception:
+                    pass
+            result.append({"id": sid, "mtime": mtime, "date": dt.strftime("%Y-%m-%d %H:%M"), "msg_count": msg_count})
             
         result.sort(key=lambda x: x["mtime"], reverse=True)
         return result

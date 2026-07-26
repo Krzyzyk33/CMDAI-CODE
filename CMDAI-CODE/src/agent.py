@@ -37,10 +37,9 @@ class Agent:
 
     def handle_user_input(self, user_msg: str, mode: str, input_handler):
         import time
-        from .ui import print_turn_done
-
-        # Auto-context logic
+        import os
         import re
+        from .ui import print_turn_done
 
         words = [
             w
@@ -75,10 +74,24 @@ class Agent:
         ]
 
         auto_context_msg = ""
+        at_files = re.findall(r"@([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)", user_msg)
+        if at_files:
+            for af in at_files:
+                af_path = os.path.abspath(af) if not os.path.isabs(af) else af
+                if os.path.isfile(af_path):
+                    try:
+                        with open(af_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        lines = content.splitlines()
+                        if len(lines) > 300:
+                            content = "\n".join(lines[:300]) + f"\n... [truncated {len(lines)-300} lines]"
+                        auto_context_msg += f"\n\n[USER ATTACHED FILE: {af}]\n{content}\n"
+                        console.print(f"[{MUTED_COLOR}]  |_ Attached file: {af}[/]")
+                    except Exception:
+                        pass
         if words:
             from .indexer.scan import get_project_dir
             from .indexer.symbol_db import SymbolDB
-            import os
 
             try:
                 db_path = os.path.join(get_project_dir(os.getcwd()), "index.db")
@@ -119,7 +132,10 @@ class Agent:
             except Exception:
                 pass
 
-        self.context.add_user_message(user_msg + auto_context_msg)
+        self.context.add_user_message(
+            user_msg + auto_context_msg,
+            attached_files=at_files if 'at_files' in locals() and at_files else None,
+        )
 
         self._has_reflected = False
         turn_start = time.time()
@@ -129,25 +145,42 @@ class Agent:
         modified_files = set()
         self._fable_tested = False
         while iteration < self.max_iterations:
-            base_tokens = (
-                len(self.context.get_system_message("", "auto", "").get("content", ""))
-                // 2
-                + 2000
-            )
-            max_allowed = base_tokens + 6000
-
-            if self.context.get_token_count() >= max_allowed:
+            if self.context.get_token_count() >= 7000:
                 self.context.trigger_compaction(self.model)
 
             iteration += 1
             tree = ThinkingTree(expanded=input_handler.thinking_expanded)
-            tree.start()
+            if iteration > 1:
+                tree._printed_tree = True
 
             level_info = input_handler.thinking_levels[input_handler.thinking_idx]
             level_idx = input_handler.thinking_idx
+            low_thinking_placeholder = "NEXT_ACTION: Selecting the next tool."
+            if level_idx == 0:
+                tree.add_line(low_thinking_placeholder)
+
+            def set_low_next_action(tool_name: str, path: str = ""):
+                if level_idx != 0 or tree.lines != [low_thinking_placeholder]:
+                    return
+                verbs = {
+                    "read_file": "Reading",
+                    "write_file": "Creating",
+                    "create_file": "Creating",
+                    "edit_file": "Editing",
+                    "replace_lines": "Editing",
+                    "append_file": "Appending to",
+                    "delete_file": "Deleting",
+                    "glob": "Searching files with",
+                    "code_search": "Searching code for",
+                    "wakeup_subagents": "Delegating work to subagents",
+                    "run_tests": "Running tests for",
+                }
+                label = verbs.get(tool_name.lower(), f"Running {tool_name}")
+                target = f" {path}" if path else ""
+                tree.lines = [f"NEXT_ACTION: {label}{target}."]
 
             if level_idx == 0:
-                thinking_desc = "IF you generate thoughts, you MUST wrap them inside <think> and </think> tags.\nTHINKING BEHAVIOR - LOW:\nDo not generate a THINK section. Proceed directly to ACTION or text response.\nException: if the task requires choosing a file/function to edit and it is not obvious from the user's prompt, write only:\n<think>\n  |_ UNDERSTAND: <what the task is about>\n  |_ PLAN: <1 line>\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nAfter performing an action, DO NOT generate THINK, regardless of the result.\nException: if Bash returned an error, write 1 line of diagnosis in <think> and immediately propose a fix in the next ACTION.\nDo not perform additional 'just in case' actions (build, search) unless the user asked for it.\nCRITICAL: ALWAYS respond to the user in their own language (e.g., Polish)."
+                thinking_desc = "IF you generate thoughts, you MUST wrap them inside <think> and </think> tags.\nTHINKING BEHAVIOR - LOW:\nAt the beginning of EVERY turn, generate exactly one short THINK block, then immediately act:\n<think>\n  |_ NEXT_ACTION: <one concrete next tool action, max 12 words>\n</think>\n\nDo not add UNDERSTAND, CONTEXT, OPTIONS, CHOICE, PLAN, or sub-trees. Do not generate another THINK after a successful action. Only after an error, write one line: `|_ ISSUE: <short error and next action>`, then call the next tool. Do not perform additional 'just in case' actions (build, search) unless the user asked for it.\nCRITICAL: ALWAYS respond to the user in their own language (e.g., Polish)."
             elif level_idx == 1:
                 thinking_desc = "IF you generate thoughts, you MUST wrap them inside <think> and </think> tags.\nTHINKING BEHAVIOR - MEDIUM:\nAt the beginning of the turn, generate a concise THINK strictly inside <think> and </think> tags:\n<think>\n  |_ UNDERSTAND: <what the task is about>\n  |_ PLAN: <short list of steps (max 3)>\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nDo not generate sub-trees.\nAfter reading/searching, DO NOT generate THINK, unless the result differs drastically from expectations.\nAfter modifying actions (Edit/Write/Bash), you may generate a short THINK (1-2 lines) if the plan needs updating.\n\nForced actions: Search all callers after changing a function signature (ACTION: Search). Do not build the project unless requested.\nCRITICAL: ALWAYS respond to the user in their own language (e.g., Polish)."
             elif level_idx == 2:
@@ -234,6 +267,8 @@ class Agent:
                     **kwargs,
                 )
             except Exception as e:
+                if tree.live.is_started:
+                    tree.stop()
                 console.print(
                     f"\n[red bold]Model loading error: {e}[/red bold]\n[yellow]Type /model to switch to a valid model![/yellow]"
                 )
@@ -243,9 +278,6 @@ class Agent:
             full_thinking = ""
             tool_calls = None
             thinking_newline = True
-
-            in_thinking_tree = False
-            thinking_buffer = ""
 
             in_thinking_tree = False
             thinking_buffer = ""
@@ -302,24 +334,34 @@ class Agent:
                         full_content += content
                         if not tool_detected:
                             json_start_idx = -1
-                            if "```json" in full_content:
-                                json_start_idx = full_content.find("```json")
-                            elif "<json>" in full_content:
-                                json_start_idx = full_content.find("<json>")
-                            else:
+                            triggers = [
+                                "```json",
+                                "<json>",
+                                "<|tool_call>",
+                                "<tool_call>",
+                                "<execute_tool>",
+                                "execute_tool",
+                                "<execute",
+                                "call:",
+                                '{"name"',
+                                '{ "name"',
+                                '"name":',
+                            ]
+                            for trg in triggers:
+                                if trg in full_content:
+                                    json_start_idx = full_content.find(trg)
+                                    break
+                            if json_start_idx == -1:
                                 raw = full_content.lstrip()
-                                if (
-                                    raw.startswith("{")
-                                    or raw.startswith("`")
-                                    or raw.startswith("n")
-                                    or raw.startswith("o")
-                                ):
+                                if raw.startswith("{") or raw.startswith("`") or raw.startswith("<"):
                                     json_start_idx = full_content.find(raw[0])
 
                             if json_start_idx != -1:
+                                tool_detected = True
                                 chunk_to_print = full_content[
                                     printed_idx:json_start_idx
                                 ]
+                                chunk_to_print = re.sub(r'[\s\}\]`>]*$', '', chunk_to_print)
                                 if chunk_to_print:
                                     if tree.live.is_started:
                                         tree.stop()
@@ -328,11 +370,15 @@ class Agent:
 
                                     console.print(chunk_to_print, end="", markup=False)
                                     sys.stdout.flush()
-                                    printed_idx = json_start_idx
+                                printed_idx = json_start_idx
 
                                 if tree.live.is_started:
                                     tree.stop()
                                     console.print()
+                                elif tree.lines == [low_thinking_placeholder]:
+                                    m_tool = re.search(r'"name"\s*:\s*"([^\"]+)"', full_content[json_start_idx:])
+                                    set_low_next_action(m_tool.group(1) if m_tool else "tool")
+                                    tree.print_tree()
                                 if not json_spinner:
                                     from .ui import LiveToolStream
 
@@ -344,23 +390,33 @@ class Agent:
                                 if json_spinner:
                                     json_spinner.stop()
                                     json_spinner = None
-                                chunk = full_content[printed_idx:]
-                                if chunk:
-                                    should_hide = (
-                                        bool(modified_files) and not self._fable_tested
-                                    )
-                                    if not should_hide:
-                                        if tree.live.is_started:
-                                            tree.stop()
-                                            console.print()
-                                        import sys
+                                tail_len = 0
+                                for partial in ["<", "<|", "<|tool", "<|tool_call", "<ex", "<exec", "<execute", "<execute_tool", "call", "`", "``", "```", "{"]:
+                                    if full_content.endswith(partial):
+                                        tail_len = max(tail_len, len(partial))
+                                safe_end = len(full_content) - tail_len
+                                if safe_end > printed_idx:
+                                    chunk = full_content[printed_idx:safe_end]
+                                    if chunk:
+                                        should_hide = (
+                                            bool(modified_files) and not self._fable_tested
+                                        )
+                                        if not should_hide:
+                                            if tree.live.is_started:
+                                                tree.stop()
+                                                console.print()
+                                            import sys
 
-                                        console.print(chunk, end="", markup=False)
-                                        sys.stdout.flush()
-                                    printed_idx = len(full_content)
+                                            console.print(chunk, end="", markup=False)
+                                            sys.stdout.flush()
+                                        printed_idx = safe_end
 
                     if thinking:
                         full_thinking += thinking
+                        if tree.lines == [low_thinking_placeholder]:
+                            tree.lines.clear()
+                        if not tree.live.is_started:
+                            tree.start()
                         for char in thinking:
                             thinking_buffer += char
                             if char == "\n":
@@ -378,6 +434,17 @@ class Agent:
                         if tree.live.is_started:
                             tree.stop()
                             console.print()
+                        elif tree.lines == [low_thinking_placeholder]:
+                            func = tc[0].get("function", {}) if isinstance(tc, list) and tc else {}
+                            raw_args = func.get("arguments", {})
+                            if isinstance(raw_args, str):
+                                try:
+                                    raw_args = json.loads(raw_args)
+                                except Exception:
+                                    raw_args = {}
+                            path = raw_args.get("path", raw_args.get("file", "")) if isinstance(raw_args, dict) else ""
+                            set_low_next_action(func.get("name", "tool"), str(path or ""))
+                            tree.print_tree()
                         if not json_spinner:
                             from .ui import LiveToolStream
 
@@ -406,118 +473,118 @@ class Agent:
                     json_spinner.stop()
                 if thinking_buffer.strip():
                     tree.add_line(thinking_buffer.strip())
-                tree.stop()
+                # Stop the live spinner but DON'T print the tree yet.
+                # We defer printing until after the retry check below,
+                # so that failed attempts (thinking-only, no action) don't
+                # print a duplicate ThinkingTree before the retry.
+                if tree.live.is_started:
+                    tree.live.stop()
 
             if not tool_calls:
                 full_content_str = full_content
-                import re
+                import re, json, ast
 
-                json_blocks = re.findall(
-                    r"```json\s*(.*?)\s*```", full_content_str, re.DOTALL
-                )
+                def robust_json_parse(s):
+                    if isinstance(s, dict):
+                        return s
+                    if not s or not isinstance(s, str):
+                        return {}
+                    s_clean = re.sub(r"</?[a-zA-Z0-9_\|]+>", "", s).strip()
+                    s_clean = s_clean.replace('<|"|>', '"').replace('<|', '').replace('|>', '')
+                    try:
+                        res = json.loads(s_clean)
+                        if isinstance(res, dict):
+                            return res
+                    except Exception:
+                        pass
+                    m = re.search(r"\{.*\}", s_clean, re.DOTALL)
+                    if m:
+                        s_clean = m.group(0)
+                    try:
+                        res = json.loads(s_clean)
+                        if isinstance(res, dict):
+                            return res
+                    except Exception:
+                        pass
+                    s_fixed = re.sub(r'([{,]\s*)([a-zA-Z0-9_]+)\s*:', r'\1"\2":', s_clean)
+                    s_fixed = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', s_fixed)
+                    s_fixed = re.sub(r',\s*([\}\]])', r'\1', s_fixed)
+                    try:
+                        res = json.loads(s_fixed)
+                        if isinstance(res, dict):
+                            return res
+                    except Exception:
+                        pass
+                    try:
+                        res = ast.literal_eval(s_clean)
+                        if isinstance(res, dict):
+                            return res
+                    except Exception:
+                        pass
+                    kv_res = {}
+                    kv_matches = re.findall(r'([a-zA-Z0-9_]+)\s*:\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s,\}]+))', s_clean)
+                    for k, v1, v2, v3 in kv_matches:
+                        kv_res[k] = v1 or v2 or v3
+                    return kv_res
 
-                if not json_blocks:
-                    json_blocks = re.findall(
-                        r"<json>\s*(.*?)\s*</json>", full_content_str, re.DOTALL
-                    )
-                    if not json_blocks and "<json>" in full_content_str:
-                        parts = full_content_str.split("<json>")
-                        if len(parts) > 1:
-                            json_blocks = [parts[-1].strip()]
-
-                if not json_blocks and "```json" in full_content_str:
-                    parts = full_content_str.split("```json")
-                    if len(parts) > 1:
-                        json_blocks = [parts[-1].strip()]
-
-                if not json_blocks:
-                    idx = full_content_str.find("{")
-                    if idx != -1:
-                        raw = full_content_str[idx:].strip()
-                        raw = re.sub(
-                            r"</?tool_call>\s*$", "", raw, flags=re.DOTALL
-                        ).strip()
-                        raw = re.sub(r"</json>\s*$", "", raw, flags=re.DOTALL).strip()
-                        if raw.startswith("{") and "name" in raw:
-                            json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-                            if json_match:
-                                raw = json_match.group(0)
-                            json_blocks = [raw]
-
-                cleaned_blocks = []
-                for b in json_blocks:
-                    b = re.sub(r"</json>\s*$", "", b).strip()
-                    cleaned_blocks.append(b)
-                json_blocks = cleaned_blocks
-
-                if json_blocks:
-                    mock_calls = []
-                    for block in json_blocks:
-                        try:
-                            parsed = json.loads(block)
-                            if (
-                                isinstance(parsed, dict)
-                                and "name" in parsed
-                                and "arguments" in parsed
-                            ):
-                                mock_calls.append(
-                                    {
-                                        "id": "call_mock",
-                                        "type": "function",
-                                        "function": parsed,
-                                    }
-                                )
-                        except json.JSONDecodeError:
-                            pass
+                mock_calls = []
+                call_matches = re.findall(r"call:([a-zA-Z0-9_]+)\s*(\{.*)", full_content_str, re.DOTALL)
+                if call_matches:
+                    for fn_name, fn_args_raw in call_matches:
+                        parsed_args = robust_json_parse(fn_args_raw)
+                        if parsed_args or fn_args_raw.strip().startswith("{"):
+                            mock_calls.append({
+                                "id": "call_mock",
+                                "type": "function",
+                                "function": {
+                                    "name": fn_name,
+                                    "arguments": parsed_args
+                                }
+                            })
                     if mock_calls:
                         tool_calls = mock_calls
-                else:
-                    match = re.search(r"\{.*\}", full_content_str, re.DOTALL)
-                    if match:
-                        raw = match.group(0)
-                        try:
-                            parsed = json.loads(raw)
-                            if (
-                                isinstance(parsed, dict)
-                                and "name" in parsed
-                                and "arguments" in parsed
-                            ):
-                                tool_calls = [
-                                    {
-                                        "id": "call_mock",
-                                        "type": "function",
-                                        "function": parsed,
-                                    }
-                                ]
-                        except json.JSONDecodeError:
-                            pass
 
-                    blocks = re.split(r"}\s*{", full_content_str)
-                    mock_calls = []
-                    for i, b in enumerate(blocks):
-                        if i > 0:
-                            b = "{" + b
-                        if i < len(blocks) - 1:
-                            b = b + "}"
-                        try:
-                            parsed = json.loads(b)
-                            if (
-                                isinstance(parsed, dict)
-                                and "name" in parsed
-                                and "arguments" in parsed
-                            ):
-                                mock_calls.append(
-                                    {
-                                        "id": "call_mock",
-                                        "type": "function",
-                                        "function": parsed,
-                                    }
-                                )
-                        except json.JSONDecodeError:
-                            pass
-                    if mock_calls:
-                        tool_calls = mock_calls
-                        full_content = ""
+                if not tool_calls:
+                    tc_tag_blocks = re.findall(r"<\|?tool_call\|?>\s*(.*?)\s*(?:</tool_call>|<tool_call\|>|<\|tool_call\|>|$)", full_content_str, re.DOTALL)
+                    if tc_tag_blocks:
+                        for block in tc_tag_blocks:
+                            parsed = robust_json_parse(block.strip())
+                            if isinstance(parsed, dict) and "name" in parsed:
+                                fn_name = parsed["name"]
+                                args = parsed.get("arguments", parsed.get("args", {}))
+                                if isinstance(args, str):
+                                    args = robust_json_parse(args)
+                                mock_calls.append({
+                                    "id": "call_mock",
+                                    "type": "function",
+                                    "function": {"name": fn_name, "arguments": args}
+                                })
+                        if mock_calls:
+                            tool_calls = mock_calls
+
+                if not tool_calls:
+                    json_blocks = re.findall(r"```json\s*(.*?)\s*```", full_content_str, re.DOTALL)
+                    if not json_blocks:
+                        json_blocks = re.findall(r"<json>\s*(.*?)\s*</json>", full_content_str, re.DOTALL)
+                    if not json_blocks:
+                        idx = full_content_str.find("{")
+                        if idx != -1:
+                            json_blocks = [full_content_str[idx:].strip()]
+                    if json_blocks:
+                        for b in json_blocks:
+                            parsed = robust_json_parse(b)
+                            if isinstance(parsed, dict) and "name" in parsed:
+                                fn_name = parsed["name"]
+                                args = parsed.get("arguments", parsed.get("args", {}))
+                                if isinstance(args, str):
+                                    args = robust_json_parse(args)
+                                mock_calls.append({
+                                    "id": "call_mock",
+                                    "type": "function",
+                                    "function": {"name": fn_name, "arguments": args}
+                                })
+                        if mock_calls:
+                            tool_calls = mock_calls
 
             if tool_calls:
                 unique_calls = []
@@ -542,6 +609,10 @@ class Agent:
                         "\n[red]⚠️ Self-correction loop interrupted (reached limit of 5 attempts).[/red]"
                     )
                     break
+                # Mark the tree as printed so it won't produce duplicate output on retry
+                tree._printed_tree = True
+                tree._is_stopped = True
+                tree.lines.clear()
                 if not full_thinking.strip():
                     console.print(
                         "\n[yellow]⚠️ Model generated completely empty response. Retrying (self-correction)...[/yellow]"
@@ -550,14 +621,15 @@ class Agent:
                         "System Error: You returned an empty response. Remember to generate a <think> block (if required) and take action or provide a text response."
                     )
                 else:
-                    console.print(
-                        "\n[yellow]⚠️ Model only generated thinking but took no action (likely hit token limit). Forcing emergency compaction...[/yellow]"
-                    )
                     self.context.trigger_compaction(self.model)
                     self.context.add_user_message(
                         "System Error: You generated a very long <think> block and stopped abruptly because you ran out of tokens! I have just compressed your context history to give you more free space. You MUST now use a tool (e.g. write_file) immediately to continue your work! Limit your thinking to 1 sentence and output the tool call."
                     )
                 continue
+
+            # Print the thinking tree only for successful responses
+            # (not retried attempts that produced only thinking and no action).
+            tree.stop()
 
             if (
                 level_idx > 0
@@ -634,13 +706,6 @@ class Agent:
                     elif full_content.count("{") > full_content.count("}"):
                         reason = "Kod został tak gwałtownie ucięty, że nawet system Rescue Mode nie był w stanie poskładać uszkodzonych klamer."
 
-                    console.print(
-                        f"\n[yellow]⚠️ Model planned an action: '{action_text}', ale zawiodł przy wywoływaniu narzędzia.[/yellow]"
-                    )
-                    console.print(f"[yellow]   Detected error: {reason}[/yellow]")
-                    console.print(
-                        f"[yellow]   Action: Forcing Self-Correction... The model will fix its error shortly.[/yellow]"
-                    )
                     self.context.add_assistant_message(full_content)
                     self.context.add_user_message(
                         f'Błąd Systemowy: Zaplanowałeś akcję w tagu <think>: \'{action_text}\', ale zawiodłeś. Zamiast wygenerować poprawne natywne wywołanie narzędzia, najprawdopodobniej zapomniałeś o wymaganej strukturze (klucz \'arguments\') lub wypisałeś surowy tekst. Twój JSON musi w 100% wyglądać tak: {{\n  "name": "nazwa_narzedzia",\n  "arguments": {{\n    "parametr": "wartosc"\n  }}\n}}\nPopraw swój błąd i wygeneruj poprawne wywołanie narzędzia już teraz.'
@@ -649,7 +714,6 @@ class Agent:
 
                 if modified_files and not self._fable_tested:
                     self._fable_tested = True
-                    from .ui import MUTED_COLOR
                     import sys
 
                     sys_path_added = False
@@ -711,7 +775,9 @@ class Agent:
                 self.context.add_assistant_message(full_content)
                 break
 
-            self.context.add_assistant_message(full_content, tool_calls=tool_calls)
+            self.context.add_assistant_message(
+                full_content, tool_calls=tool_calls, thinking=full_thinking
+            )
             total_tools += len(tool_calls)
 
             sig = json.dumps(
@@ -755,6 +821,7 @@ class Agent:
                 args_str = func.get("arguments", "{}")
 
                 if not name:
+                    print_tool_call("Invalid tool call", "incomplete or malformed JSON")
                     console.print(
                         "\n[red]⚠ Interrupted tool call (truncated by token limit).[/red]"
                     )
@@ -806,8 +873,7 @@ class Agent:
                         args.get("query", args.get("pattern", "")), tool_name=name
                     )
                     spinner.start()
-                else:
-                    print_tool_call(display_name, arg_summary)
+                print_tool_call(display_name, arg_summary)
 
                 is_md_in_plan = (
                     mode == "plan"
@@ -846,6 +912,15 @@ class Agent:
                     ]
                     is_dangerous = name in ["bash", "commands", "run_python"]
 
+                    def _get_arg_path(a: dict, default: str = "file") -> str:
+                        if not isinstance(a, dict):
+                            return default
+                        for k in ("path", "target_file", "file", "filename", "file_path", "target", "file_name", "filepath", "p", "doc", "uri"):
+                            v = a.get(k)
+                            if v and isinstance(v, str) and v.strip():
+                                return v.strip()
+                        return default
+
                     if name_lower in [
                         "write_file",
                         "edit_file",
@@ -853,7 +928,7 @@ class Agent:
                         "replace_lines",
                         "append_file",
                     ]:
-                        p = args.get("path", "")
+                        p = _get_arg_path(args)
                         content_to_print = args.get(
                             "content", args.get("new_str", args.get("new_content", ""))
                         )
@@ -861,18 +936,23 @@ class Agent:
                             modified_files.add(os.path.abspath(p))
 
                     if name_lower in ["write_file", "create_file", "append_file"]:
-                        print_code_panel(
-                            os.path.abspath(args.get("path", "file")),
-                            args.get("content", ""),
-                        )
+                        from .ui import LiveCodePanel
+
+                        path = os.path.abspath(_get_arg_path(args))
+                        content = args.get("content", "")
+                        panel = LiveCodePanel(path)
+                        panel.start()
+                        for line in content.splitlines():
+                            panel.add_line(line)
+                        panel.stop()
                     elif name_lower == "replace_lines":
                         print_code_panel(
-                            os.path.abspath(args.get("path", "file")),
+                            os.path.abspath(_get_arg_path(args)),
                             args.get("new_content", ""),
                         )
                     elif name_lower == "edit_file":
                         print_diff(
-                            args.get("path", "file"),
+                            _get_arg_path(args),
                             args.get("old_str", ""),
                             args.get("new_str", ""),
                         )
@@ -1034,22 +1114,42 @@ class Agent:
                                 else "Error"
                             )
                             spinner.stop(summary, details=str(result))
-                        elif name_lower in ["read_file"]:
+                        elif name_lower in ["read_file", "read"]:
                             if "Error" in str(result):
                                 print_tool_result(str(result))
                             else:
+                                path_arg = _get_arg_path(args, "")
                                 lines = len(str(result).splitlines())
-                                print_tool_result(f"Read {lines} lines")
-                        elif name_lower == "edit_file":
-                            added = len(args.get("new_str", "").splitlines())
+                                file_str = f" ({path_arg})" if path_arg else ""
+                                print_tool_result(f"Read {lines} lines{file_str}")
+                        elif name_lower in ["edit_file", "replace_lines", "append_file"]:
+                            path_arg = (
+                                args.get("path")
+                                or args.get("target_file")
+                                or args.get("file")
+                                or args.get("filename")
+                                or args.get("file_path")
+                                or args.get("target")
+                                or "file"
+                            )
+                            added = len(args.get("new_str", args.get("content", "")).splitlines())
                             removed = len(args.get("old_str", "").splitlines())
                             print_tool_result(
-                                f"Edited {args.get('path', 'file')} ([green]+{added}[/] / [red]-{removed}[/])"
+                                f"Edited {path_arg} ([green]+{added}[/] / [red]-{removed}[/])"
                             )
                         elif name_lower in ["write_file", "create_file"]:
+                            path_arg = (
+                                args.get("path")
+                                or args.get("target_file")
+                                or args.get("file")
+                                or args.get("filename")
+                                or args.get("file_path")
+                                or args.get("target")
+                                or "file"
+                            )
                             added = len(args.get("content", "").splitlines())
                             print_tool_result(
-                                f"Created/Overwritten {args.get('path', 'file')} ({added} lines)"
+                                f"Created/Overwritten {path_arg} ({added} lines)"
                             )
                         elif name_lower in ["bash", "commands"]:
                             if "Exit code: 0" in str(result):
@@ -1059,45 +1159,43 @@ class Agent:
                         elif name_lower in ["ls", "glob", "code_search"]:
                             res_str = str(result)
                             if "Error" not in res_str:
-                                title_suffix = ""
-                                if name_lower == "ls":
-                                    p = args.get("path", ".")
-                                    if not p or p == "." or p == "/" or p == "\\":
-                                        p = os.path.basename(os.path.abspath("."))
-                                    title_suffix = f" {p}"
-                                elif name_lower == "glob" and "pattern" in args:
-                                    title_suffix = f" {args['pattern']}"
-                                elif name_lower == "code_search" and "query" in args:
-                                    title_suffix = f" {args['query']}"
-                                print_code_panel(
-                                    f"Result ({name}{title_suffix})",
-                                    res_str,
-                                    lexer_override="text",
-                                    show_line_numbers=False,
-                                )
-                            else:
-                                print_tool_result(res_str)
-                        elif name_lower in ["bugs", "tests", "run_tests"]:
-                            res_str = str(result)
-                            if name_lower in ["tests", "run_tests"]:
-                                for line in res_str.splitlines():
-                                    print_tool_result(line, escape_text=True)
-                            else:
-                                for line in res_str.splitlines():
+                                if name_lower == "code_search":
                                     from rich.markup import escape
 
-                                    line_esc = escape(line)
-                                    stripped = line_esc.strip()
-                                    if stripped.startswith("|_"):
-                                        console.print(
-                                            f"[bright_black]    {stripped}[/bright_black]",
-                                            highlight=False,
-                                        )
-                                    else:
-                                        console.print(
-                                            f"[bright_black]  |_ {line_esc}[/bright_black]",
-                                            highlight=False,
-                                        )
+                                    for line in res_str.splitlines():
+                                        if line.strip():
+                                            console.print(f"  [{MUTED_COLOR}]|_ {escape(line)}[/{MUTED_COLOR}]")
+                                else:
+                                    title_suffix = ""
+                                    if name_lower == "ls":
+                                        p = args.get("path", ".")
+                                        if not p or p == "." or p == "/" or p == "\\":
+                                            p = os.path.basename(os.path.abspath("."))
+                                        title_suffix = f" {p}"
+                                    elif name_lower == "glob" and "pattern" in args:
+                                        title_suffix = f" {args['pattern']}"
+                                    print_code_panel(
+                                        f"Result ({name}{title_suffix})",
+                                        res_str,
+                                        lexer_override="text",
+                                        show_line_numbers=False,
+                                    )
+                            else:
+                                print_tool_result(res_str)
+                        elif name_lower == "bugs":
+                            res_str = str(result)
+                            for line in res_str.splitlines():
+                                from rich.markup import escape
+                                console.print(f"[bright_black]  {escape(line)}[/bright_black]", highlight=False)
+                        elif name_lower == "wakeup_subagents":
+                            res_str = str(result)
+                            if res_str.startswith("Error:"):
+                                from rich.markup import escape
+
+                                console.print(f"\n[{MUTED_COLOR}]● Subagent:[/{MUTED_COLOR}]")
+                                for line in res_str.splitlines():
+                                    if line.strip():
+                                        console.print(f"  [{MUTED_COLOR}]|_ {escape(line)}[/{MUTED_COLOR}]")
                         else:
                             res_str = str(result)
                             print_tool_result(
@@ -1108,13 +1206,6 @@ class Agent:
                             )
 
                 self.context.add_tool_message(tc["id"], name, str(result))
-
-        if self.context.session_manager.current_state.current_plan:
-            plan = self.context.session_manager.current_state.current_plan
-            done = sum(1 for _, is_done in plan if is_done)
-            console.print(
-                f"\n[bold green]\U0001f4ca Plan Progress: {done}/{len(plan)} steps completed.[/bold green]"
-            )
 
         print_turn_done(
             time.time() - turn_start,
@@ -1156,17 +1247,16 @@ class Agent:
         if should_release:
             del compaction_model_instance
 
-        title = re.sub(r'[<>:"/\\|?*]', "", title)
-        import unicodedata
-
-        title = (
-            unicodedata.normalize("NFKD", title)
-            .encode("ascii", "ignore")
-            .decode("utf-8")
-            .lower()
-        )
-        title = re.sub(r"[^a-z0-9]+", "_", title)
+        title = re.sub(r'[<>:"/\\|?*\r\n]', "", title).strip()
+        title = re.sub(r"\s+", "_", title).lower()
+        title = re.sub(r"[^a-zA-Z0-9_a-ząćęłńóśźżA-Z0-9ĄĆĘŁŃÓŚŹŻ]+", "_", title)
         title = title.strip("_")[:40].strip()
+
+        if not title or title.startswith("cmdai_code"):
+            fallback = understand_text[:30].strip()
+            fallback = re.sub(r"[^a-zA-Z0-9_a-ząćęłńóśźżA-Z0-9ĄĆĘŁŃÓŚŹŻ]+", "_", fallback).strip("_").lower()
+            if fallback:
+                title = fallback[:30]
 
         if title:
             self.context.rename_session(title)

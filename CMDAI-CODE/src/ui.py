@@ -3,6 +3,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.spinner import Spinner
 from rich.live import Live
+from rich.syntax import Syntax
 import time
 import sys
 import shutil
@@ -41,6 +42,26 @@ class PrefixWrapper:
         narrowed_options = options.update_width(options.max_width - prefix_width)
         lines = list(console.render_lines(self.renderable, narrowed_options))
 
+
+
+class PrefixWrapper:
+    def __init__(self, renderable, prefix_text="│ ", prefix_style="grey50"):
+        if isinstance(renderable, str):
+            from rich.text import Text
+
+            self.renderable = Text.from_markup(renderable)
+        else:
+            self.renderable = renderable
+        self.prefix_text = prefix_text
+        self.prefix_style = prefix_style
+
+    def __rich_console__(self, console, options):
+        from rich.segment import Segment
+
+        prefix_width = len(self.prefix_text)
+        narrowed_options = options.update_width(options.max_width - prefix_width)
+        lines = list(console.render_lines(self.renderable, narrowed_options))
+
         style = console.get_style(self.prefix_style)
         left = Segment(self.prefix_text, style)
         nl = Segment("\n")
@@ -48,11 +69,12 @@ class PrefixWrapper:
         for i, line in enumerate(lines):
             yield left
             yield from line
-            if i < len(lines) - 1:
-                yield nl
-
+            yield nl
 
 def _cprint(renderable, source_id=None, **kwargs):
+    if isinstance(renderable, str):
+        if "Warning: Model ignored" in renderable or "? Warning:" in renderable:
+            return
     if source_id:
         renderable = PrefixWrapper(renderable)
     console.print(renderable, **kwargs)
@@ -63,17 +85,6 @@ MUTED_COLOR = "gray50"
 SUCCESS_COLOR = "green"
 ERROR_COLOR = "red"
 
-
-def _set_title():
-    try:
-        import ctypes, os
-        ctypes.windll.kernel32.SetConsoleTitleW("cmdai code")
-    except Exception:
-        try:
-            import sys
-            sys.stdout.write("\033]0;cmdai code\007")
-        except Exception:
-            pass
 
 def print_header(model_name: str, cwd: str):
     _set_title()
@@ -113,7 +124,7 @@ def print_header(model_name: str, cwd: str):
 def print_user_msg(msg: str):
     from rich.markup import escape
 
-    console.print(f"\n\n[bold]> {escape(msg)}[/bold]")
+    console.print(f"\n[bold]> {escape(msg)}[/bold]")
 
 
 def print_agent_msg(msg: str):
@@ -153,10 +164,6 @@ def print_tool_call(tool_name: str, arg_summary: str, source_id: str = None):
         _cprint(f"\n[bold]● Waking Subagents[/bold]", source_id=source_id)
     elif name_lower in ["bugs", "run_bugs"]:
         _cprint("\n[bold]● Bugs:[/bold]", source_id=source_id)
-    elif name_lower == "search_web":
-        _cprint(f"\n[bold]⚙ Web Search: {arg_summary}[/bold]", source_id=source_id)
-    elif name_lower == "wakeup_subagents":
-        _cprint(f"\n[{ACCENT_COLOR}]● Subagents[/]", source_id=source_id)
     else:
         _cprint(
             f"\n[bold]● Tool ({tool_name}): {arg_summary}[/bold]", source_id=source_id
@@ -178,10 +185,6 @@ def print_tool_result(
         source_id=source_id,
         highlight=False,
     )
-
-
-from rich.syntax import Syntax
-
 
 def print_diff(path: str, old_str: str, new_str: str, source_id: str = None):
     import difflib
@@ -341,6 +344,71 @@ def print_code_panel(
     sys.stdout.flush()
 
 
+class LiveCodePanel:
+    def __init__(self, path: str, max_lines: int = 20):
+        self.path = path
+        self.max_lines = max_lines
+        self.lines = []
+
+        p = path.replace("\\", "/")
+        parts = p.split("/")
+        self.title = ".../" + "/".join(parts[-3:]) if len(parts) > 3 else p
+
+        self.live = Live(
+            get_renderable=self._render, refresh_per_second=10, transient=False
+        )
+
+    def start(self):
+        self.live.start()
+
+    def add_line(self, text: str):
+        if len(self.lines) >= self.max_lines:
+            return
+        self.lines.append(text)
+        import time
+
+        time.sleep(0.03)
+        self.live.update(self._render())
+
+    def _render(self):
+        display_lines = self.lines[: self.max_lines]
+        has_more = len(self.lines) >= self.max_lines
+
+        if display_lines:
+            display_content = "\n".join(display_lines)
+            renderable = Syntax(
+                display_content,
+                "text",
+                theme="monokai",
+                line_numbers=True,
+                start_line=1,
+                word_wrap=True,
+            )
+        else:
+            empty_text = Text()
+            renderable = empty_text
+
+        subtitle = None
+        if has_more:
+            subtitle = "[gray50]... truncated to first 20 lines[/gray50]"
+
+        panel = Panel(
+            renderable,
+            title=f"[bold]{self.title}[/bold]",
+            title_align="left",
+            subtitle=subtitle,
+            subtitle_align="right",
+            border_style=ACCENT_COLOR,
+        )
+        return panel
+
+    def stop(self):
+        self.live.stop()
+        import sys
+
+        sys.stdout.flush()
+
+
 import rich.spinner
 
 rich.spinner.SPINNERS["claude"] = {"interval": 120, "frames": ["✻", "✽", "✶", "✢"]}
@@ -388,10 +456,12 @@ class ThinkingTree:
 
         self.start_time = time.time()
         self.live = Live(
-            get_renderable=self.render, refresh_per_second=5, transient=False
+            get_renderable=self.render, refresh_per_second=5, transient=True
         )
 
     def start(self):
+        self._is_stopped = False
+        self._printed_tree = False
         self.start_time = time.time()
         self.live.start()
 
@@ -425,7 +495,7 @@ class ThinkingTree:
                 self.fake_added += 1
 
         t = Text()
-        prefix = "\n"
+        prefix = "" if self.source_id else "\n"
         model_str = f" · {self.model_name}" if self.model_name else ""
         if self.title == "Subagents":
             t.append(
@@ -453,20 +523,26 @@ class ThinkingTree:
         pass
 
     def stop(self):
-        self.live.stop()
+        if getattr(self, "_is_stopped", False):
+            return
+        self._is_stopped = True
+        if self.live.is_started:
+            self.live.stop()
         import sys
 
         sys.stdout.flush()
+        self.print_tree()
         print("", end="", flush=True)
 
     def print_tree(self):
-        if not self.lines:
+        if getattr(self, "_printed_tree", False) or not self.lines:
             return
+        self._printed_tree = True
 
         from rich.markup import escape
 
         elapsed_sec = time.time() - self.start_time
-        prefix = "\n" if self.source_id is None else ""
+        prefix = "" if self.source_id else "\n"
         model_str = f" · {self.model_name}" if self.model_name else ""
         if self.title == "Subagents":
             _cprint(
@@ -573,12 +649,15 @@ class LiveToolStream:
                     if m_lvl:
                         lvl = m_lvl.group(1)
 
-                    role_str = (
-                        f" - Role: {role.replace(chr(92) + 'n', ' ')}" if role else ""
-                    )
+                    role_str = ""
+                    if role:
+                        import textwrap
+                        role_clean = role.replace("\\n", " ").replace("\n", " ").strip()
+                        role_wrapped = textwrap.fill(role_clean, width=70, subsequent_indent="     ")
+                        role_str = f"\n     Role: {role_wrapped}"
                     lvl_str = f" ({lvl})" if lvl else ""
 
-                    tree_text += f"  [{MUTED_COLOR}]|_ {name}{role_str}{lvl_str}[/{MUTED_COLOR}]\n"
+                    tree_text += f"  [{MUTED_COLOR}]|_ {name}{lvl_str}{role_str}[/{MUTED_COLOR}]\n"
             else:
                 tree_text += (
                     f"  [{MUTED_COLOR}]|_ Planning subagents...[/{MUTED_COLOR}]\n"
@@ -592,7 +671,7 @@ class LiveToolStream:
         import re
 
         m = re.search(
-            r'"(?:code|content|command|file_content)"\s*:\s*"(.*)',
+            r'"(?:code|content|command|file_content|new_str|new_content)"\s*:\s*"(.*)',
             self.content,
             re.DOTALL,
         )
@@ -615,7 +694,7 @@ class LiveToolStream:
                 preview = "\n".join(lines[-20:])
 
             path_m = re.search(
-                r'"(?:path|TargetFile|file_path|file)"\s*:\s*"([^"]+)"', self.content
+                r'"(?:path|TargetFile|file_path|file|target_file)"\s*:\s*"([^"]+)"', self.content
             )
             title = f"[bold white]{path_m.group(1)}[/bold white]" if path_m else ""
 

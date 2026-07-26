@@ -4,12 +4,12 @@ import ast
 def run_bugs() -> str:
     """
     Skanuje cały projekt (.) pod kątem błędów składniowych.
-    Zwraca natywne logi błędów z kompilatora Pythona.
+    Zwraca strukturę drzewa z wykazem plików i wyciągniętymi liniami błędów.
     """
     path = "."
     files_to_check = []
-    for root, _, files in os.walk(path):
-        if ".cmdai_code_project" in root or "__pycache__" in root or "venv" in root or "node_modules" in root:
+    for root, dirs, files in os.walk(path):
+        if ".cmdai_code_project" in root or "__pycache__" in root or "venv" in root or "node_modules" in root or ".git" in root:
             continue
         for f in files:
             if f.endswith(".py"):
@@ -27,20 +27,21 @@ def run_bugs() -> str:
         except SyntaxError as e:
             if fpath not in errors_by_file:
                 errors_by_file[fpath] = []
-            errors_by_file[fpath].append(f"|_ Line {e.lineno} - SyntaxError: {e.msg}")
+            msg = e.msg or "Syntax error"
+            errors_by_file[fpath].append(f"Line {e.lineno} - SyntaxError: {msg}")
         except Exception as e:
             if fpath not in errors_by_file:
                 errors_by_file[fpath] = []
-            errors_by_file[fpath].append(f"|_ Check failed - {str(e)}")
+            errors_by_file[fpath].append(f"Check failed - {str(e)}")
 
     if not errors_by_file:
         return "No syntax errors found."
 
-    output = []
+    output = ["bugs:"]
     for fpath, errs in errors_by_file.items():
-        output.append(f"├─ {fpath}")
-        for j, err in enumerate(errs):
-            branch = "└─" if j == len(errs) - 1 else "├─"
-            output.append(f"│  {branch} {err[4:]}")
+        clean_path = os.path.normpath(fpath)
+        output.append(f"  └ {clean_path}")
+        for err in errs:
+            output.append(f"      └ {err}")
 
     return "\n".join(output)

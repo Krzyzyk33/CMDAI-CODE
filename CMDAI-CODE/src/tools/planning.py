@@ -17,7 +17,7 @@ def save_plan(content: str, restricted_dir: str = None, **kwargs) -> str:
     except Exception as e:
         return f"Error: {e}"
 
-def mark_plan_step_done(step_number: int, restricted_dir: str = None, **kwargs) -> str:
+def mark_plan_step_done(step_number: Optional[int] = None, restricted_dir: Optional[str] = None, **kwargs) -> str:
     try:
         path = "plan.md"
         if restricted_dir:
@@ -28,24 +28,42 @@ def mark_plan_step_done(step_number: int, restricted_dir: str = None, **kwargs) 
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
             
-        import re
         lines = content.split('\n')
-        step_str = str(step_number)
         
+        if step_number is None:
+            for k in ["step", "step_idx", "step_index", "idx", "number", "index"]:
+                if k in kwargs and kwargs[k] is not None:
+                    try:
+                        step_number = int(kwargs[k])
+                        break
+                    except (ValueError, TypeError):
+                        pass
+                        
         found = False
-        for i, line in enumerate(lines):
-                                                                   
-            if re.search(r'(?:^|\s)' + step_str + r'\..*?\[ \]', line):
-                lines[i] = line.replace('[ ]', '[x]', 1)
-                found = True
-                break
+        if step_number is not None:
+            step_str = str(step_number)
+            for i, line in enumerate(lines):
+                if re.search(r'(?:^|\s)' + step_str + r'\..*?\[ \]', line):
+                    lines[i] = line.replace('[ ]', '[x]', 1)
+                    found = True
+                    break
+        else:
+            for i, line in enumerate(lines):
+                if '[ ]' in line:
+                    lines[i] = line.replace('[ ]', '[x]', 1)
+                    found = True
+                    m = re.search(r'(\d+)\.', line)
+                    step_number = int(m.group(1)) if m else (i + 1)
+                    break
                 
         if found:
             with open(path, "w", encoding="utf-8") as f:
                 f.write('\n'.join(lines))
             return f"Step {step_number} marked as done in plan.md"
         else:
-            return f"Could not find uncompleted step {step_number} with '[ ]' in plan.md"
+            if step_number is not None:
+                return f"Could not find uncompleted step {step_number} with '[ ]' in plan.md"
+            return "No uncompleted steps with '[ ]' found in plan.md"
     except Exception as e:
         return f"Error: {e}"
 
@@ -73,6 +91,4 @@ def submit_plan(**kwargs) -> str:
     return save_plan(content, **kwargs)
 
 def todo_write(items: List[str]) -> str:
-                                               
     return "Todo list updated."
-

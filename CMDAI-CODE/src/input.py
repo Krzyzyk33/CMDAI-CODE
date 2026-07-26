@@ -6,15 +6,19 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.lexers import PygmentsLexer
+from pygments.lexer import RegexLexer
+from pygments.token import Keyword, Text, String
+
 COMMANDS = {
     "/progress": "show the current progress of the AI Assistant plan",
     "/auto": "switch to automatic mode (without asking for file permissions)",
     "/clear": "clear the entire chat history and the console screen buffer",
     "/code": "switch to coding mode (asks for permission before editing)",
+    "/cd": "change current working directory",
     "/commit": "commit all current modifications to the git repository",
     "/compact": "summarize the conversation so far to save tokens",
     "/diff": "show local changes against the git repository",
-
     "/ide": "display the current connection status with your IDE environment",
     "/init": "scan the entire repository and build a file knowledge base",
     "/llama": "change the Llama engine (e.g. llama cpp, llama vulcan, llama diffusion)",
@@ -28,9 +32,6 @@ COMMANDS = {
     "/undo": "stash the recent code modifications to revert them"
 }
 
-from prompt_toolkit.lexers import PygmentsLexer
-from pygments.lexer import RegexLexer
-from pygments.token import Keyword, Text, String
 
 class CMDAILexer(RegexLexer):
     tokens = {
@@ -41,24 +42,32 @@ class CMDAILexer(RegexLexer):
             (r'.', Text),
         ]
     }
+
+
 class CMDAICompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        
         if "@" in text:
-                                    
-            prefix = text.split("@")[-1]
+            prefix = text.split("@")[-1].lower()
+            cwd = os.getcwd()
+            skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "build", "appdata", ".gemini", ".cmdai_code"}
+            matches_count = 0
             try:
-                dirname = os.path.dirname(prefix) or "."
-                basename = os.path.basename(prefix)
-                for f in os.listdir(dirname):
-                    if f.startswith(basename):
-                        path = os.path.join(dirname, f).replace("\\", "/")
-                        if path.startswith("./"):
-                            path = path[2:]
-                        yield Completion(path, start_position=-len(basename))
+                for root, dirs, files in os.walk(cwd):
+                    dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith(".")]
+                    for f in files:
+                        if f.startswith("."):
+                            continue
+                        rel_path = os.path.relpath(os.path.join(root, f), cwd).replace("\\", "/")
+                        if prefix in f.lower() or prefix in rel_path.lower():
+                            yield Completion(rel_path, start_position=-len(prefix))
+                            matches_count += 1
+                            if matches_count >= 15:
+                                return
             except Exception:
                 pass
+
+
 class InputHandler:
     def _get_matches(self, text):
         is_slash = text.startswith("/")
@@ -70,28 +79,36 @@ class InputHandler:
                 matches = [(word, COMMANDS[word])]
             return matches
         elif is_file:
-            prefix = text.split("@")[-1]
+            prefix = text.split("@")[-1].lower()
             matches = []
+            cwd = os.getcwd()
+            skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "build", "appdata", ".gemini", ".cmdai_code"}
+            seen = set()
             try:
-                import os
-                dirname = os.path.dirname(prefix) or "."
-                basename = os.path.basename(prefix)
-                for f in os.listdir(dirname):
-                    if f.startswith(basename) and not f.startswith(".cmdai_code_project"):
-                        full_path = os.path.join(dirname, f)
-                        if os.path.isfile(full_path):
-                            path = full_path.replace("\\", "/")
-                            if path.startswith("./"): path = path[2:]
-                            matches.append(("@" + path, "File"))
+                for root, dirs, files in os.walk(cwd):
+                    dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith(".")]
+                    for f in files:
+                        if f.startswith("."):
+                            continue
+                        if prefix in f.lower() or prefix in os.path.join(root, f).lower():
+                            rel_path = os.path.relpath(os.path.join(root, f), cwd).replace("\\", "/")
+                            item = "@" + rel_path
+                            if item not in seen:
+                                seen.add(item)
+                                matches.append((item, "File"))
+                                if len(matches) >= 15:
+                                    break
+                    if len(matches) >= 15:
+                        break
             except Exception:
                 pass
-            return matches
+            return matches[:15]
         return []
 
     def __init__(self, history_file="~/.cmdai_code/history", thinking_idx=1):
         self.history_file = os.path.expanduser(history_file)
         os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
-        
+
         self.bindings = KeyBindings()
         self.mode_index = 0
         self.modes = ["code", "auto", "plan"]
@@ -108,55 +125,35 @@ class InputHandler:
         self._cached_width = 0
         self._cached_top = ""
         self._cached_engine = ""
-        
+
         self.cmd_index = 0
         self.cmd_scroll = 0
-        
+
         from prompt_toolkit.filters import Condition
-        
+        from prompt_toolkit.application import get_app
+
         @Condition
         def is_dropdown_active():
-            text = self.session.default_buffer.text if hasattr(self, 'session') else ""
-            return text.startswith("/") or ("@" in text and not text.startswith("/"))
+            try:
+                text = get_app().current_buffer.text
+                return bool(text and (text.startswith("/") or ("@" in text and not text.startswith("/"))))
+            except Exception:
+                return False
 
-        def get_matches(text):
-            if text.startswith("/"):
-                word = text.lstrip()
-                m = [cmd for cmd in COMMANDS.keys() if cmd.startswith(word)]
-                if not m and word in COMMANDS:
-                    m = [word]
-                return m
-            elif "@" in text:
-                prefix = text.split("@")[-1]
-                m = []
-                import os
-                try:
-                    dirname = os.path.dirname(prefix) or "."
-                    basename = os.path.basename(prefix)
-                    for f in os.listdir(dirname):
-                        if f.startswith(basename):
-                            path = os.path.join(dirname, f).replace("\\\\", "/")
-                            if path.startswith("./"): path = path[2:]
-                            m.append("@" + path)
-                except Exception:
-                    pass
-                return m
-            return []
-        
         @self.bindings.add('s-tab')
         def _(event):
             self.mode_index = (self.mode_index + 1) % len(self.modes)
             event.app.invalidate()
-            
+
         @self.bindings.add('c-e')
         def _(event):
             self.thinking_expanded = not self.thinking_expanded
-            
+
         @self.bindings.add('c-t')
         def _(event):
             self.thinking_idx = (self.thinking_idx + 1) % len(self.thinking_levels)
             event.app.invalidate()
-            
+
         @self.bindings.add('tab', filter=is_dropdown_active)
         def _(event):
             text = event.app.current_buffer.text
@@ -164,31 +161,33 @@ class InputHandler:
             if matches and 0 <= self.cmd_index < len(matches):
                 val = matches[self.cmd_index][0]
                 if "@" in text and not text.startswith("/"):
-                    parts = text.split("@")
-                    parts[-1] = val[1:]
-                    event.app.current_buffer.text = "@".join(parts) + " "
+                    idx = text.rfind("@")
+                    event.app.current_buffer.text = text[:idx] + val + " "
                 else:
                     event.app.current_buffer.text = val + " "
                 event.app.current_buffer.cursor_position = len(event.app.current_buffer.text)
+
         @self.bindings.add('up', filter=is_dropdown_active)
         def _(event):
             text = event.app.current_buffer.text
             matches = self._get_matches(text)
             if matches:
                 self.cmd_index = max(0, self.cmd_index - 1)
-                
+                event.app.invalidate()
+
         @self.bindings.add('down', filter=is_dropdown_active)
         def _(event):
             text = event.app.current_buffer.text
             matches = self._get_matches(text)
             if matches:
                 self.cmd_index = min(len(matches) - 1, self.cmd_index + 1)
-                
+                event.app.invalidate()
+
         @self.bindings.add('enter', filter=is_dropdown_active)
         def _(event):
             text = event.app.current_buffer.text
             matches = self._get_matches(text)
-            
+
             if text.lstrip() in COMMANDS:
                 event.app.current_buffer.validate_and_handle()
                 return
@@ -196,9 +195,8 @@ class InputHandler:
             if matches and 0 <= self.cmd_index < len(matches):
                 val = matches[self.cmd_index][0]
                 if "@" in text and not text.startswith("/"):
-                    parts = text.split("@")
-                    parts[-1] = val[1:]
-                    event.app.current_buffer.text = "@".join(parts) + " "
+                    idx = text.rfind("@")
+                    event.app.current_buffer.text = text[:idx] + val + " "
                 else:
                     event.app.current_buffer.text = val + " "
                 event.app.current_buffer.cursor_position = len(event.app.current_buffer.text)
@@ -208,17 +206,17 @@ class InputHandler:
         @self.bindings.add('enter', filter=~is_dropdown_active)
         def _(event):
             event.app.current_buffer.validate_and_handle()
-            
+
         @self.bindings.add('escape', 'enter')
         def _(event):
             event.app.current_buffer.insert_text('\n')
-            
+
         @self.bindings.add('c-v')
         def _(event):
             try:
                 import ctypes
                 ctypes.windll.user32.OpenClipboard(0)
-                handle = ctypes.windll.user32.GetClipboardData(13)                       
+                handle = ctypes.windll.user32.GetClipboardData(13)
                 if handle:
                     ptr = ctypes.windll.kernel32.GlobalLock(handle)
                     data = ctypes.c_wchar_p(ptr).value
@@ -231,6 +229,7 @@ class InputHandler:
                     ctypes.windll.user32.CloseClipboard()
                 except:
                     pass
+
         self.session = PromptSession(
             history=FileHistory(self.history_file),
             completer=CMDAICompleter(),
@@ -240,12 +239,13 @@ class InputHandler:
                 'prompt': 'white bold',
                 'bottom-toolbar': 'default',
                 'pygments.keyword.special': 'bg:#00aaaa fg:#ffffff bold',
-                'pygments.keyword.type': '#00ff00',
+                'pygments.keyword.type': '#ffffff',
             }),
             complete_style=CompleteStyle.READLINE_LIKE,
             complete_while_typing=False,
             erase_when_done=True
         )
+
     def get_input(self, model_name: str = "model", tokens: int = 0, max_tokens: int = 128000) -> str:
         import shutil
         import json, os
@@ -339,7 +339,11 @@ class InputHandler:
                     filled_len = min(bar_len, max(0, int((pct / 100) * bar_len)))
                     bar = "█" * filled_len + "░" * (bar_len - filled_len)
 
-                    pct_str = f"{_model_name}: ctx [{bar}] {pct:.0f}% ({_tokens}/{_max_tokens})"
+                    tokens_disp = f"{_tokens}" if _tokens < 1000 else f"{_tokens//1000}k"
+                    max_tok_val = 128000 if _max_tokens > 1000000 else _max_tokens
+                    max_tokens_disp = f"{max_tok_val//1000}k" if max_tok_val >= 1000 else f"{max_tok_val}"
+
+                    pct_str = f"{_model_name}: ctx [{bar}] {pct:.0f}% ({tokens_disp}/{max_tokens_disp})"
                     pct_style = 'fg:red' if pct >= 80 else ('fg:white' if pct >= 50 else 'fg:gray')
 
                     new_fragments.append(('fg:gray', f"  {mode_sym} ·  {_engine_short} ·  {think_name} ·  "))
@@ -392,13 +396,11 @@ class InputHandler:
                 self.cmd_index = 0
                 self.cmd_scroll = 0
 
-            empty_lines = 2 - len(lines)
-            if empty_lines < 0:
-                empty_lines = 0
-
-            prompt_str = "\n" * empty_lines
             if lines:
-                prompt_str += "\n".join(lines) + "\n"
+                empty_lines = max(0, 4 - len(lines))
+                prompt_str = "\n" * empty_lines + "\n".join(lines) + "\n"
+            else:
+                prompt_str = "\n\n\n\n"
 
             prompt_str += f"<style fg='white'>{top}</style>\n<style fg='white'>│ </style><b>&gt; </b>"
             result = HTML(prompt_str)
@@ -431,6 +433,6 @@ class InputHandler:
             if type(e).__name__ == "NoConsoleScreenBufferError":
                 return input("> ")
             raise
-            
+
     def get_mode(self) -> str:
         return self.modes[self.mode_index]

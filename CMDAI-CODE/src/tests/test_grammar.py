@@ -3,10 +3,10 @@ import sys
 import json
 import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from main import load_state
-from llama import LlamaModel
-from tools import TOOLS_DEFINITIONS
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.main import load_state
+from src.llama import LlamaModel
+from src.tools import TOOLS_DEFINITIONS
 
 PROMPTS = [
     "Wylistuj mi zawartość katalogu D:\\testy",

@@ -28,20 +28,20 @@ def execute_tool(
         return "Error: " + args["__json_error__"]
     import os
 
-    if "path" not in args:
-        for k in ["file", "filename", "file_path", "filepath"]:
-            if k in args:
+    if "path" not in args or not args["path"]:
+        for k in ["file", "filename", "file_path", "filepath", "target", "target_file", "file_name", "path_to_file", "p", "doc", "uri"]:
+            if k in args and args[k]:
                 args["path"] = args[k]
                 break
-    if "query" not in args:
-        for k in ["pattern", "search", "term", "text", "q"]:
-            if k in args:
+    if "query" not in args or not args["query"]:
+        for k in ["pattern", "search", "term", "text", "q", "query_text", "keyword"]:
+            if k in args and args[k]:
                 args["query"] = args[k]
                 break
     for k in ["path", "pattern"]:
         if k in args and isinstance(args[k], str):
             p = args[k].strip()
-            if p == "/" or p == "\\":
+            if p in ("/", "\\", "C:\\", "C:/", "D:\\", "D:/") or p == os.path.splitdrive(p)[0] + os.sep:
                 args[k] = "."
             elif (
                 (p.startswith("/") or p.startswith("\\"))
@@ -101,12 +101,12 @@ def execute_tool(
         filtered_args = {k: v for k, v in args.items() if k in sig.parameters}
         return func(**filtered_args)
     except TypeError as e:
-        if not args:
-            return f"Error executing {name}: You called this tool without any arguments! Please provide the required arguments defined in the tool schema."
-        return f"Error executing {name}: Invalid arguments. {str(e)}"
+        if not args or "missing" in str(e).lower():
+            missing_arg = "path" if "path" in str(e) else "required arguments"
+            return f"Error executing '{name}': Missing {missing_arg}. Please provide the required parameters (e.g. {name}(path='...'))"
+        return f"Error executing '{name}': Invalid arguments ({e})"
     except Exception as e:
-        from rich.markup import escape
-        return f"Error executing {name}: {escape(str(e))}"
+        return f"Error executing '{name}': {e}"
 
 
 TOOLS_DEFINITIONS = [
@@ -376,33 +376,37 @@ TOOLS_DEFINITIONS = [
         "function": {
             "name": "bugs",
             "description": "Skanuje cały projekt w poszukiwaniu błędów składniowych i zwraca ich listę. Nie przyjmuje żadnych parametrów.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
         },
     },
     {
         "type": "function",
         "function": {
             "name": "wakeup_subagents",
-            "description": "Delegates a task to a background sub-agent. This requires the user to have selected a subagent model via /subagents.",
+            "description": "Wake up one or more subagents to run tasks. ALWAYS use native JSON function calling to invoke this tool! Each subagent dictionary MUST include 'name', 'task', and optional 'thinking_level' ('low', 'medium', 'high', 'auto').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "subagents": {
                         "type": "array",
-                        "description": "List of subagents to spawn. Recommended 1-4.",
+                        "description": "List of subagents to spawn.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "name": {
                                     "type": "string",
-                                    "description": "Name of the subagent role, e.g. BackendDeveloper",
+                                    "description": "Role or name of the subagent, e.g. PlanRefiner, CodeArchitect",
                                 },
                                 "task": {
                                     "type": "string",
-                                    "description": "Specific task for this subagent",
+                                    "description": "Detailed task description for the subagent",
                                 },
                                 "thinking_level": {
                                     "type": "string",
-                                    "description": "Requested thinking level for this subagent (e.g. Low, Medium, High). Leave empty for default.",
+                                    "description": "Requested thinking level for this subagent: 'low', 'medium', 'high', 'ultra', 'extreme', or 'auto'. If omitted, defaults to 'auto'.",
                                 },
                                 "context_files": {
                                     "type": "array",

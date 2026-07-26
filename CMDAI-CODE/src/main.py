@@ -94,6 +94,7 @@ def get_default_model():
 
 def print_chat_history(context):
     import re
+    import textwrap
     from rich.markdown import Markdown
     from .ui import (
         console,
@@ -105,6 +106,35 @@ def print_chat_history(context):
         print_diff,
     )
     import os
+
+    def print_saved_subagent_reports(subagents):
+        from .ui import MUTED_COLOR, SUCCESS_COLOR, ERROR_COLOR
+        from rich.markup import escape
+
+        wrap_width = max(40, console.width - 14)
+        for subagent in subagents:
+            name = escape(str(subagent.get("name", "Subagent")))
+            task = str(subagent.get("task", "")).replace("\n", " ")
+            level = escape(str(subagent.get("thinking_level", "Auto") or "Auto"))
+            status = subagent.get("status", "done")
+            icon = "✓" if status == "done" else "✗"
+            icon_color = SUCCESS_COLOR if status == "done" else ERROR_COLOR
+            console.print(f"\n[{MUTED_COLOR}]╭ {name}[/{MUTED_COLOR}]")
+            for index, line in enumerate(textwrap.wrap(task, width=wrap_width)):
+                label = "Role: " if index == 0 else "      "
+                console.print(f"[{MUTED_COLOR}]│   [dim]{label}{escape(line)}[/dim][/{MUTED_COLOR}]")
+            console.print(f"[{MUTED_COLOR}]│   [dim]Level thinking: {level}[/dim][/{MUTED_COLOR}]")
+            console.print(f"[{MUTED_COLOR}]│ ● Agent Note[/{MUTED_COLOR}]")
+            note = str(subagent.get("note", "") or "Task completed.")
+            for note_line in note.splitlines() or [note]:
+                for index, line in enumerate(textwrap.wrap(note_line, width=wrap_width) or [""]):
+                    prefix = f"|_ {icon} " if index == 0 else "|_    "
+                    style = icon_color if index == 0 else MUTED_COLOR
+                    console.print(f"[{MUTED_COLOR}]│   {prefix}[{style}]{escape(line)}[/][/{MUTED_COLOR}]")
+            files = subagent.get("files_edited", [])
+            if files:
+                console.print(f"[{MUTED_COLOR}]│   [dim]Files: {', '.join(escape(str(path)) for path in files)}[/dim][/{MUTED_COLOR}]")
+            console.print(f"[{MUTED_COLOR}]╰[/{MUTED_COLOR}]")
 
     tool_queue = []
     for msg in context.messages:
@@ -126,12 +156,22 @@ def print_chat_history(context):
                 name = tc.get("function", {}).get("name", "unknown")
                 args = tc.get("function", {}).get("arguments", {})
                 if isinstance(args, str):
-                    import json
-
                     try:
                         args = json.loads(args)
                     except:
                         args = {}
+
+                arg_summary = ""
+                if isinstance(args, dict):
+                    arg_summary = (
+                        args.get("path")
+                        or args.get("command")
+                        or args.get("query")
+                        or args.get("pattern")
+                        or ""
+                    )
+
+                print_tool_call(name, arg_summary)
 
                 name_lower = name.lower()
                 if name_lower in ["read_file", "view_file"]:
@@ -193,20 +233,34 @@ def print_chat_history(context):
                                     f"[bright_black]  |_ {line_esc}[/bright_black]",
                                     highlight=False,
                                 )
+                elif name_lower == "wakeup_subagents":
+                    subagents_data = msg.get("subagents", [])
+                    if subagents_data:
+                        print_saved_subagent_reports(subagents_data)
+                else:
+                    if "error" in name_lower or "Error" in res_str or "Traceback" in res_str:
+                        for line in res_str.splitlines():
+                            if line.strip():
+                                print_tool_result(line, escape_text=True)
+                    else:
+                        print_tool_result(
+                            res_str[:120].replace("\n", " ") + "..."
+                            if len(res_str) > 120
+                            else res_str.replace("\n", " "),
+                            escape_text=True,
+                        )
+            else:
+                if "Error" in res_str or "Traceback" in res_str:
+                    for line in res_str.splitlines():
+                        if line.strip():
+                            print_tool_result(line, escape_text=True)
                 else:
                     print_tool_result(
-                        res_str[:60].replace("\n", " ") + "..."
-                        if len(res_str) > 60
+                        res_str[:120].replace("\n", " ") + "..."
+                        if len(res_str) > 120
                         else res_str.replace("\n", " "),
                         escape_text=True,
                     )
-            else:
-                print_tool_result(
-                    res_str[:60].replace("\n", " ") + "..."
-                    if len(res_str) > 60
-                    else res_str.replace("\n", " "),
-                    escape_text=True,
-                )
         elif role == "user":
             if "[COMPRESSED SESSION CONTEXT]" in content:
                 m = re.search(
@@ -220,16 +274,21 @@ def print_chat_history(context):
                     tree = ThinkingTree(
                         expanded=True, simulate=False, title="Summarizing"
                     )
-                    tree.start()
                     for line in m.group(1).strip().splitlines():
                         tree.add_line(line)
-                    tree.stop()
+                    tree.print_tree()
                 else:
                     from .ui import MUTED_COLOR
 
                     console.print(f"[{MUTED_COLOR}]  ⎿  [Compacted context loaded][/]")
                 continue
-            print_user_msg(content)
+            clean_content = content.split("\n\n[USER ATTACHED FILE:")[0].strip()
+            print_user_msg(clean_content)
+            attached = msg.get("attached_files")
+            if attached:
+                from .ui import MUTED_COLOR
+                for af in attached:
+                    console.print(f"[{MUTED_COLOR}]  |_ Attached file: {af}[/]")
         elif role == "assistant":
             if "tool_calls" in msg and msg["tool_calls"]:
                 tool_queue.extend(msg["tool_calls"])
@@ -266,25 +325,28 @@ def print_chat_history(context):
             text = re.sub(
                 r'\{\s*"name"\s*:.*?"arguments"\s*:.*?\}', "", text, flags=re.DOTALL
             )
-            text = re.sub(r"<\|tool_call>.*?<tool_call\|>", "", text, flags=re.DOTALL)
-            text = re.sub(r"<\|tool_call>.*", "", text, flags=re.DOTALL)
+            text = re.sub(r"<\|?tool_call\|?>.*?(?:</tool_call>|<tool_call\|>|<\|tool_call\|>|$)", "", text, flags=re.DOTALL)
+            text = re.sub(r"call:[a-zA-Z0-9_]+\s*\{.*?\}(?:<\|?tool_call\|?>)?", "", text, flags=re.DOTALL)
             text = text.strip()
             if text:
-                console.print(f"\n")
                 console.print(Markdown(text))
 
             if "tool_calls" in msg and msg["tool_calls"]:
+                seen_calls = set()
                 for tc in msg["tool_calls"]:
                     func = tc.get("function", {})
                     name = func.get("name", "unknown")
                     args = func.get("arguments", {})
                     if isinstance(args, str):
-                        import json
-
                         try:
                             args = json.loads(args)
                         except:
                             args = {}
+
+                    call_key = f"{name}:{json.dumps(args, sort_keys=True) if isinstance(args, dict) else str(args)}"
+                    if call_key in seen_calls:
+                        continue
+                    seen_calls.add(call_key)
 
                     display_name = name.capitalize()
                     if name.endswith("_file"):
@@ -318,7 +380,9 @@ def print_chat_history(context):
                         )
                         arg_summary = f'"{p[:30]}..."'
 
-                    print_tool_call(display_name, arg_summary)
+                    name_lower = name.lower()
+                    if name_lower not in ["write_file", "create_file", "append_file", "replace_lines", "edit_file", "bash", "run_python"]:
+                        print_tool_call(display_name, arg_summary)
 
                     if name in ["write_file", "create_file"]:
                         print_code_panel(
@@ -377,6 +441,28 @@ def main():
 
     ide_server = IDEServer()
     ide_server.start()
+
+    import sys
+
+    # Restore saved cwd from state if available (from /cd command)
+    saved_cwd = saved_state.get("cwd")
+    if saved_cwd and os.path.isdir(saved_cwd):
+        try:
+            os.chdir(saved_cwd)
+        except Exception:
+            pass
+
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        arg_path = sys.argv[1].strip().strip('"\'')
+        if os.path.exists(arg_path):
+            if os.path.isfile(arg_path):
+                arg_dir = os.path.dirname(os.path.abspath(arg_path))
+            else:
+                arg_dir = os.path.abspath(arg_path)
+            try:
+                os.chdir(arg_dir)
+            except Exception:
+                pass
 
     cwd = os.getcwd()
 
@@ -462,6 +548,25 @@ def main():
             from .ui import MUTED_COLOR
 
             console.print(f"[{MUTED_COLOR}]  ⎿  Committed successfully: {res}[/]")
+            continue
+        elif user_input.startswith("/cd ") or user_input == "/cd":
+            target_dir = user_input[3:].strip()
+            if not target_dir:
+                target_dir = os.path.expanduser("~")
+            else:
+                target_dir = os.path.abspath(os.path.expanduser(target_dir))
+            
+            console.print(f"\n● [white]/cd {target_dir}[/white]")
+            from .ui import MUTED_COLOR
+            if os.path.exists(target_dir) and os.path.isdir(target_dir):
+                os.chdir(target_dir)
+                cwd = target_dir
+                state = load_state()
+                state["cwd"] = cwd
+                save_state(state)
+                console.print(f"[{MUTED_COLOR}]  ⎿  Changed working directory to: {cwd}[/]")
+            else:
+                console.print(f"[{MUTED_COLOR}]  ⎿  Error: Directory '{target_dir}' does not exist.[/]")
             continue
         elif user_input == "/compact":
             context.trigger_compaction(model)
@@ -918,9 +1023,6 @@ def main():
 
                 del agent.model
                 del model
-                import gc
-
-                gc.collect()
 
                 model_path = new_model_path
                 n_gpu_layers = state.get("n_gpu_layers", -1)
@@ -940,12 +1042,11 @@ def main():
                     f"[{MUTED_COLOR}]  |_ Model: {m_val['name']} [{provider_name}][/{MUTED_COLOR}]"
                 )
 
-                if hasattr(model, "llm"):
+                try:
                     del agent.model
                     del model
-                    import gc
-
-                    gc.collect()
+                except Exception:
+                    pass
 
                 from .api_model import OpenAIAPIModel
 
@@ -978,6 +1079,13 @@ def main():
             except Exception as e:
                 console.print(f"[{MUTED_COLOR}]  ⎿  Scan error: {e}[/]")
             user_input = "Carefully review all markdown files (.md) in the project (especially CMDAI.md and plan.md). Analyze them and immediately begin executing any plans or instructions found within them."
+            hide_prompt = True
+        elif user_input.startswith("/runsubagents"):
+            task_prompt = user_input.replace("/runsubagents", "").strip() or "Kontynuuj budowę i rozwój aplikacji."
+            console.print(f"\n● [white]/runsubagents[/white]")
+            from .ui import MUTED_COLOR
+            console.print(f"[{MUTED_COLOR}]  ⎿ Uruchamianie subagentów dla zadania: {task_prompt}[/]")
+            user_input = f"Użyj narzędzia wakeup_subagents, aby wywołać subagenta do wykonania zadania: {task_prompt}"
             hide_prompt = True
         elif user_input.startswith("/"):
             console.print(f"Unknown command or not implemented: {user_input}")
