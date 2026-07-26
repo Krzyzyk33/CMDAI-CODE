@@ -21,7 +21,7 @@ When your conversation history approaches 90% of your context window limit, CMDA
 
 ### 🌐 Zero Vendor Lock-in (Local & Cloud Agnostic)
 You are completely free. You can instantly switch the "brain" of your assistant between:
-* OpenAI (GPT-4o) & Anthropic (Claude 3.5 Sonnet)
+* OpenAI 
 * OpenRouter
 * Blazing-fast free models on Groq & Cerebras
 * **Fully local models via LocalLLMAPI/Ollama**
