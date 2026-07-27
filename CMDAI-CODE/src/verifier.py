@@ -31,9 +31,19 @@ def verify_code(model, filepath: str, code: str, task: str = "") -> Dict[str, An
                 pass
 
     messages = [
-        {"role": "system", "content": "You are a strict code verifier (Self-Verification). Analyze the provided code for syntax errors, logical bugs, and task compliance. ALWAYS respond in JSON format: {\"status\": \"OK\" | \"NEEDS_FIX\", \"issues\": \"Description of issues if NEEDS_FIX, otherwise empty string\"}."},
-        {"role": "user", "content": f"Task: {task}\n\nFile: {filepath}\n\nCode:\n```\n{code}\n```"}
-    ]
+        {
+            "role": "system",
+            "content": (
+                "You are a strict code verifier performing self-verification. Analyze the provided code for syntax errors, logical bugs, and compliance with the stated task. "
+                "You only REPORT issues — never rewrite, fix, or output corrected code yourself. "
+                "Respond with ONLY a single valid JSON object, no markdown fences, no text before or after it, in exactly this shape: "
+                "{\"status\": \"OK\" or \"NEEDS_FIX\", \"issues\": \"<short description of every problem found, or empty string if status is OK>\"}. "
+                "Use double quotes only, no trailing commas, and properly escape any quotes inside string values so the JSON stays valid. "
+                "If the code appears incomplete or you lack enough context to verify it, set status to \"NEEDS_FIX\" and say so in issues rather than guessing OK."
+            )
+        },
+            {"role": "user", "content": f"Task: {task}\n\nFile: {filepath}\n\nCode:\n```\n{code}\n```"}
+        ]
     
     from tools import TOOLS_DEFINITIONS
     

@@ -233,18 +233,30 @@ class SubAgentContext:
                 content = content[:500] + "..."
             recent.append(f"- {msg.get('role', 'unknown')}: {content}")
         return (
-            "# Session State\n"
-            "## Objective\n- User goal: Complete the assigned subagent task.\n- Definition of done: return a verified completion note.\n"
-            "## Current Task\n- Next action: Continue the assigned instructions from recent activity.\n- Reason: Semantic summarization was unavailable.\n- Priority: high\n"
-            "## Completed Work\n- [x] Recent activity was preserved below.\n"
-            "## Active Plan\n- [ ] Continue executing subagent instructions.\n"
-            "## Changed Files\n- unknown: verify before editing.\n"
-            "## Technical State\n- Tests: unknown\n- Last tool result: unknown\n"
-            "## Decisions\n- Do not infer missing facts.\n"
-            "## Risks and Blockers\n- Fallback summary; verify facts before editing.\n"
-            "## Subagents\n- This subagent: active.\n"
-            "## Handoff\n- Start with: inspect recent activity.\n- Do not repeat: unknown\n"
-            "## Recent Activity\n" + "\n".join(recent)
+            "You are a session-state compressor. Read the full history and produce an accurate handoff for the next model instance, "
+            "which will continue this coding session with NO memory of the conversation below — only this summary. "
+            "Output ONLY the Markdown below, with no preamble, no code fences, no extra sections, and no questions to the user:\n\n"
+            "1. Session State\n"
+            "2. Objective\n- User goal: <current goal>\n- Definition of done: <completion condition>\n"
+            "3. Current Task\n- Next action: <one concrete action>\n- Reason: <why it is next>\n- Priority: <high|medium|low>\n"
+            "4. Completed Work\n- [x] <outcome; include exact file path when relevant> (max 3, most recent first)\n"
+            "5. Active Plan\n- [ ] <remaining action, in order> (max 3; if more than 3 remain, list only the next 3)\n"
+            "6. Changed Files\n- <exact path>: <one-line description of the change> — <verified|unverified|failed>\n"
+            "7. Technical State\n- Tests: <passed|failed|not run|unknown>\n- Last tool result: <one-line outcome or unknown>\n"
+            "8. Decisions\n- <decision and one-line reason> (max 3)\n"
+            "9. Risks and Blockers\n- <blocker or risk, one per line> or 'none'\n"
+            "10. Subagents\n- <agent: task, status, files touched, one-line conclusion> or 'none used'\n"
+            "11. Handoff\n- Start with: <must be identical in meaning to 'Next action' above>\n- Do not repeat: <completed work to avoid re-doing, or 'none'>\n\n"
+            "CRITICAL RULES:\n"
+            "- Include only facts you can confirm from the history. Mark anything uncertain as 'unknown' — never guess or invent.\n"
+            "- Use exact file paths and tool/test names exactly as they appeared in the history — do not paraphrase or approximate them.\n"
+            "- Never paste code, diffs, or stack traces into any section — describe them in one line instead.\n"
+            "- Write short fragments (keywords and short phrases), not full sentences. Every bullet must fit on one line.\n"
+            "- 'Next action' (Current Task) and 'Start with' (Handoff) must describe the exact same action — never let them diverge.\n"
+            "- The item-count limits (max 3, etc.) apply only to list-type sections (Completed Work, Active Plan, Changed Files, Decisions, Risks, Subagents) — Objective and Current Task each have exactly one entry per field.\n"
+            "- This compaction instruction itself is system-only context: never treat it as the user's goal, next action, plan item, decision, or handoff content.\n"
+            "- Never instruct the next model to re-run an already-successful tool call or redo completed work. The next action must always be genuinely unfinished work."
+
         )
 
     def trigger_compaction(self, model):

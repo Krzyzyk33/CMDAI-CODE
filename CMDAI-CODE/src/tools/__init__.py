@@ -13,9 +13,10 @@ from .filesystem import (
 )
 from .execution import run_python, run_bash, run_tests
 from .search import run_grep, search_web, code_search
-from .planning import save_plan, mark_plan_step_done, submit_plan, todo_write
+from .planning import save_plan, todo_done, submit_plan
 from .bugs import run_bugs
 from .subagents import wakeup_subagents
+from .question_ui import execute_answer_tool
 
 
 def execute_tool(
@@ -54,7 +55,7 @@ def execute_tool(
         target_path = os.path.abspath(args["path"])
         safe_dir = os.path.abspath(restricted_dir)
         if not target_path.startswith(safe_dir):
-            return f"Error: IDE isolation is active. Odmowa dostępu do ścieżki {args['path']} - wykracza poza aktualny projekt."
+            return f"Error: IDE isolation is active. Access denied to path {args['path']} - outside current project directory."
 
     tools_map = {
         "read_file": read_file,
@@ -70,13 +71,14 @@ def execute_tool(
         "code_search": code_search,
         "glob": run_glob,
         "ls": run_ls,
-        "todo_write": todo_write,
         "search_web": search_web,
         "save_plan": save_plan,
-        "mark_plan_step_done": mark_plan_step_done,
+        "todo_done": todo_done,
         "submit_plan": submit_plan,
         "bugs": run_bugs,
         "wakeup_subagents": wakeup_subagents,
+        "answer": execute_answer_tool,
+        "ask_question": execute_answer_tool,
     }
 
     func = tools_map.get(name)
@@ -108,20 +110,19 @@ def execute_tool(
     except Exception as e:
         return f"Error executing '{name}': {e}"
 
-
 TOOLS_DEFINITIONS = [
     {
         "type": "function",
         "function": {
             "name": "replace_lines",
-            "description": "Replaces lines from start_line to end_line with new_content.",
+            "description": "Replaces lines from start_line to end_line with new_content. EXAMPLE CALL: {\"path\": \"src/main.py\", \"start_line\": 10, \"end_line\": 15, \"new_content\": \"def new_func():\\n    pass\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
-                    "new_content": {"type": "string"},
+                    "path": {"type": "string", "description": "Target file path to edit."},
+                    "start_line": {"type": "integer", "description": "Starting line number (1-indexed)."},
+                    "end_line": {"type": "integer", "description": "Ending line number (1-indexed, inclusive)."},
+                    "new_content": {"type": "string", "description": "Replacement text for the specified lines."},
                 },
                 "required": ["path", "start_line", "end_line", "new_content"],
             },
@@ -131,12 +132,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "append_file",
-            "description": "Appends text to the end of a file.",
+            "description": "Appends text to the end of a file. EXAMPLE CALL: {\"path\": \"src/config.py\", \"content\": \"\\nEXTRA_SETTING = True\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
+                    "path": {"type": "string", "description": "Target file path to append to."},
+                    "content": {"type": "string", "description": "Text content to append."},
                 },
                 "required": ["path", "content"],
             },
@@ -146,10 +147,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Reads the contents of a file.",
+            "description": "Reads the contents of a file. EXAMPLE CALL: {\"path\": \"src/main.py\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string", "description": "File path to read."}
+                },
                 "required": ["path"],
             },
         },
@@ -158,12 +161,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "create_file",
-            "description": "Creates a new file.",
+            "description": "Creates a new file with specified content. EXAMPLE CALL: {\"path\": \"src/utils.py\", \"content\": \"def helper():\\n    pass\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
+                    "path": {"type": "string", "description": "Path for the new file."},
+                    "content": {"type": "string", "description": "File content."},
                 },
                 "required": ["path", "content"],
             },
@@ -173,13 +176,13 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Replaces old_str with new_str in a file.",
+            "description": "Replaces old_str with new_str in a file. EXAMPLE CALL: {\"path\": \"src/agent.py\", \"old_str\": \"foo = 1\", \"new_str\": \"foo = 2\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "old_str": {"type": "string"},
-                    "new_str": {"type": "string"},
+                    "path": {"type": "string", "description": "Target file path."},
+                    "old_str": {"type": "string", "description": "Exact text to replace."},
+                    "new_str": {"type": "string", "description": "Replacement text."},
                 },
                 "required": ["path", "old_str", "new_str"],
             },
@@ -189,12 +192,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Overwrites an entire file.",
+            "description": "Overwrites an entire file. EXAMPLE CALL: {\"path\": \"src/schema.py\", \"content\": \"# full content\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
+                    "path": {"type": "string", "description": "Target file path."},
+                    "content": {"type": "string", "description": "Entire file content to write."},
                 },
                 "required": ["path", "content"],
             },
@@ -204,10 +207,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Deletes a file or directory.",
+            "description": "Deletes a file or directory. EXAMPLE CALL: {\"path\": \"src/temp.py\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string", "description": "File or directory path to delete."}
+                },
                 "required": ["path"],
             },
         },
@@ -216,12 +221,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "commands",
-            "description": "Runs a shell command/script.",
+            "description": "Runs a shell command/script. EXAMPLE CALL: {\"command\": \"python -m pytest\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"},
-                    "timeout": {"type": "integer"},
+                    "command": {"type": "string", "description": "Shell command to execute."},
+                    "timeout": {"type": "integer", "description": "Optional timeout in seconds."},
                 },
                 "required": ["command"],
             },
@@ -231,13 +236,13 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search for regex pattern.",
+            "description": "Search for regex pattern across files. EXAMPLE CALL: {\"pattern\": \"def get_user\", \"path\": \"src\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "path": {"type": "string"},
-                    "glob_pattern": {"type": "string"},
+                    "pattern": {"type": "string", "description": "Regex or string pattern to find."},
+                    "path": {"type": "string", "description": "Directory or file path to search."},
+                    "glob_pattern": {"type": "string", "description": "Optional file filter pattern (e.g. '*.py')."},
                 },
                 "required": ["pattern"],
             },
@@ -247,10 +252,15 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "List files matching a glob.",
+            "description": "List files matching a glob pattern (e.g. '*.py' or 'src/**/*.ts'). CRITICAL: Calling glob() with empty arguments {} is STRICTLY FORBIDDEN and will raise an error. You MUST ALWAYS provide the 'pattern' argument. EXAMPLE CALL: {\"pattern\": \"src/**/*.py\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"pattern": {"type": "string"}},
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "REQUIRED glob pattern (e.g. '*.py' or '**/*.js'). MUST NOT be empty."
+                    }
+                },
                 "required": ["pattern"],
             },
         },
@@ -259,22 +269,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "ls",
-            "description": "List contents of a directory.",
+            "description": "List contents of a directory. EXAMPLE CALL: {\"path\": \"src\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "todo_write",
-            "description": "Writes tasks.",
-            "parameters": {
-                "type": "object",
-                "properties": {"items": {"type": "array", "items": {"type": "string"}}},
-                "required": ["items"],
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path to list (default '.')."}
+                },
             },
         },
     },
@@ -282,10 +282,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Searches the web.",
+            "description": "Searches the web for documentation or solutions. EXAMPLE CALL: {\"query\": \"python prompt_toolkit win32 border\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string", "description": "Search query terms."}
+                },
                 "required": ["query"],
             },
         },
@@ -294,10 +296,12 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "save_plan",
-            "description": "Saves your execution plan to plan.md.",
+            "description": "Saves your execution plan to plan.md. EXAMPLE CALL: {\"content\": \"# Plan\\n1. Step 1\"}",
             "parameters": {
                 "type": "object",
-                "properties": {"content": {"type": "string"}},
+                "properties": {
+                    "content": {"type": "string", "description": "Markdown plan content to save."}
+                },
                 "required": ["content"],
             },
         },
@@ -305,11 +309,13 @@ TOOLS_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "mark_plan_step_done",
-            "description": "Marks a step as done in the plan.md file by replacing [ ] with [x].",
+            "name": "todo_done",
+            "description": "Marks a step as done in plan.md by replacing [ ] with [x]. EXAMPLE CALL: {\"step_number\": 1}",
             "parameters": {
                 "type": "object",
-                "properties": {"step_number": {"type": "integer"}},
+                "properties": {
+                    "step_number": {"type": "integer", "description": "1-based step index to mark as completed."}
+                },
                 "required": ["step_number"],
             },
         },
@@ -318,12 +324,17 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "submit_plan",
-            "description": "Submit an architectural plan before executing changes. Required on Extreme level.",
+            "description": "Submit an architectural plan before executing changes. EXAMPLE CALL: {\"architecture_details\": \"Clean architecture with 3 modules\", \"steps_list\": [\"1. Create models\", \"2. Build API\"]}",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "architecture_details": {"type": "string"},
-                    "steps_list": {"type": "array", "items": {"type": "string"}},
+                    "architecture_details": {"type": "string", "description": "Overview of structural design and patterns."},
+                    "steps_list": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": "Sequential execution steps."
+                    },
                 },
                 "required": ["architecture_details", "steps_list"],
             },
@@ -333,13 +344,13 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "code_search",
-            "description": "Smart searches the project files using index or regex pattern. Use this for quickly finding definitions and uses of functions, classes, and variables.",
+            "description": "Searches project files for symbol definitions or usages. EXAMPLE CALL: {\"query\": \"def get_system_message\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search term or pattern.",
+                        "description": "Search term or symbol name.",
                     },
                     "path": {
                         "type": "string",
@@ -354,14 +365,14 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "run_tests",
-            "description": "Runs tests for the project using the detected test framework. Pass a list of modified files if applicable to limit tests. If no framework is configured, automatically detects project type and tries common test/syntax commands.",
+            "description": "Runs project unit tests. EXAMPLE CALL: {\"files\": [\"tests/test_agent.py\"]}",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "files": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional list of absolute paths to test.",
+                        "description": "Optional list of file paths to test.",
                     },
                     "timeout": {
                         "type": "integer",
@@ -375,7 +386,7 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "bugs",
-            "description": "Skanuje cały projekt w poszukiwaniu błędów składniowych i zwraca ich listę. Nie przyjmuje żadnych parametrów.",
+            "description": "Scans the entire project for Python syntax errors and returns a list of syntax issues. Takes no arguments. EXAMPLE CALL: {}",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -386,32 +397,33 @@ TOOLS_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "wakeup_subagents",
-            "description": "Wake up one or more subagents to run tasks. ALWAYS use native JSON function calling to invoke this tool! Each subagent dictionary MUST include 'name', 'task', and optional 'thinking_level' ('low', 'medium', 'high', 'auto').",
+            "description": "Wake up one or more subagents to run tasks. ALWAYS use native JSON function calling! EXAMPLE CALL: {\"subagents\": [{\"name\": \"CodeArchitect\", \"task\": \"Refactor module boundaries\"}]}",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "subagents": {
                         "type": "array",
+                        "minItems": 1,
                         "description": "List of subagents to spawn.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "name": {
                                     "type": "string",
-                                    "description": "Role or name of the subagent, e.g. PlanRefiner, CodeArchitect",
+                                    "description": "Role or name of the subagent (e.g. 'CodeArchitect').",
                                 },
                                 "task": {
                                     "type": "string",
-                                    "description": "Detailed task description for the subagent",
+                                    "description": "Detailed task description for the subagent.",
                                 },
                                 "thinking_level": {
                                     "type": "string",
-                                    "description": "Requested thinking level for this subagent: 'low', 'medium', 'high', 'ultra', 'extreme', or 'auto'. If omitted, defaults to 'auto'.",
+                                    "description": "Requested thinking level ('low', 'medium', 'high', 'ultra', 'extreme', 'auto').",
                                 },
                                 "context_files": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "List of relevant files for this subagent",
+                                    "description": "List of relevant files for this subagent.",
                                 },
                             },
                             "required": ["name", "task"],
@@ -422,4 +434,57 @@ TOOLS_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "answer",
+            "description": "Ask the user interactive multi-choice questions via a terminal wizard popup window. Use this tool whenever you need clarification, user preferences, or architectural decisions. EXAMPLE CALL: {\"questions\": [{\"question\": \"Which DB engine?\", \"description\": \"Select main datastore\", \"options\": [{\"label\": \"PostgreSQL\", \"description\": \"Relational RDBMS\"}, {\"label\": \"MongoDB\", \"description\": \"NoSQL Document Store\"}]}]}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Non-empty list of questions to ask the user. Must contain at least 1 question.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "Clear title of the question (e.g. 'What architecture pattern should we use?')."
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "REQUIRED context subtitle explaining the question scope (e.g. 'Select structural pattern for modules')."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "description": "List of choices for the question. Must contain at least 2 options.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {
+                                                "type": "string",
+                                                "description": "Short option title (e.g. 'Clean Architecture')."
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "REQUIRED subtitle explaining what this option does or its impact."
+                                            }
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                }
+                            },
+                            "required": ["question", "description", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }
+        }
+    },
 ]
+
+TOOLS_SUMMARY = "Tools available: " + ", ".join(d["function"]["name"] for d in TOOLS_DEFINITIONS) + "."

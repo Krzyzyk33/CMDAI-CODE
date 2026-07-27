@@ -190,20 +190,17 @@ class Agent:
             elif level_idx == 4:
                 thinking_desc = "IF you generate thoughts, you MUST wrap them inside <think> and </think> tags.\nTHINKING BEHAVIOR - EXTREME:\nAt the beginning of EACH turn, analyze the entire project. Generate an exhaustive THINK strictly inside <think> and </think> tags:\n<think>\n  |_ UNDERSTAND: <what the task is about on a project scale>\n  |_ CONTEXT: <conclusions from logs, file structures, and architecture>\n  |_ OPTIONS: <extensive list of options and paths>\n  |_ CHOICE: <final choice + impact on other modules>\n  |_ RISK: <detailed list of edge cases, security, and performance>\n  |_ PLAN: <very detailed list of steps>\n\nFor EACH PLAN point, you must write a multi-level sub-tree. In the first iteration, you MUST use the 'submit_plan' tool.\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nAfter EACH action, perform a deep evaluation:\n<think>\n  |_ EVALUATION: <detailed analysis of the returned result, error diagnosis, plan corrections>\n  |_ NEXT_ACTION: <what you will do next, or 'none' if task is fully complete>\n</think>\n\nForced actions: ALWAYS search all dependencies. ALWAYS run build and unit tests after EACH file edit. Perform a re-validation procedure at the end.\nCRITICAL: ALWAYS respond to the user in their own language (e.g., Polish)."
 
-            thinking_desc += f"\n\nCRITICAL: For THIS CURRENT TURN, your THINKING TOKEN BUDGET is exactly {level_info[1]} tokens. If you feel you have only 10% of your thinking capacity left, you MUST IMMEDIATELY stop planning, close the <think> block, and output the JSON tool call! Never run out of tokens before generating the tool.\nCRITICAL: NEVER write 'TOOL: None' unless you are absolutely 100% finished with the user's task and have no code left to write. If the user asks for code, you MUST use a tool (e.g. write_file)!\nCRITICAL: Writing 'TOOL: <name>' in your thought block is NOT enough. You MUST actually trigger the native JSON function calling mechanism immediately after closing the <think> block!\nCRITICAL: IF YOU DO NOT KNOW something (a function name, file path, how a library works, how to fix a specific error), DO NOT GUESS! ALWAYS search before taking action.\nCRITICAL Tool Usage Guide:\n1) 'read_file': use ONLY to read the content of a specific file.\n2) 'glob': use to search for FILE PATHS by name or pattern.\n3) 'code_search': use ONLY to search for text/symbols/functions INSIDE files.\nDO NOT pass file paths as the query into 'code_search'! It searches file contents, not paths.\n4) 'bugs': use to scan the project for syntax errors and retrieve line numbers for broken files marked with a red dot.\n5) 'replace_lines': use to precisely edit fragments by providing start_line and end_line. ALWAYS use this instead of write_file for editing existing files!\n6) 'append_file': use to quickly add new code to the very end of a file.\nNEVER use write_file to modify an existing file! write_file is ONLY for completely new files.\n7) NEVER add any comments (e.g., lines starting with #) to the code you write or edit. The code MUST be completely clean and free of any annotations or comments."
-
-            messages = self.context.get_messages(
-                self.get_tool_desc(), thinking_desc=thinking_desc
-            )
-
             if mode == "plan":
+                thinking_desc += "\n\nCRITICAL: You are in PLAN MODE. You can ONLY use read_file, list_dir, glob, grep, save_plan, and submit_plan. You do NOT have write_file, edit_file, delete_file, bash, code_search, search_web, replace_lines, append_file, run_python, bugs, run_tests, wakeup_subagents, or any other modifying tool. You CANNOT modify code or execute commands."
                 allowed_tools = [
                     "read_file",
                     "list_dir",
+                    "glob",
                     "grep",
-                    "search_web",
                     "save_plan",
-                    "wakeup_subagents",
+                    "submit_plan",
+                    "answer",
+                    "ask_question",
                 ]
                 filtered_tools = [
                     t
@@ -211,6 +208,7 @@ class Agent:
                     if t["function"]["name"] in allowed_tools
                 ]
             else:
+                thinking_desc += f"\n\nCRITICAL: For THIS CURRENT TURN, your THINKING TOKEN BUDGET is exactly {level_info[1]} tokens. If you feel you have only 10% of your thinking capacity left, you MUST IMMEDIATELY stop planning, close the <think> block, and output the JSON tool call! Never run out of tokens before generating the tool.\nCRITICAL: NEVER write 'TOOL: None' unless you are absolutely 100% finished with the user's task and have no code left to write. If the user asks for code, you MUST use a tool (e.g. write_file)!\nCRITICAL: Writing 'TOOL: <name>' in your thought block is NOT enough. You MUST actually trigger the native JSON function calling mechanism immediately after closing the <think> block!\nCRITICAL: IF YOU DO NOT KNOW something (a function name, file path, how a library works, how to fix a specific error), DO NOT GUESS! ALWAYS search before taking action.\nCRITICAL Tool Usage Guide:\n1) 'read_file': use ONLY to read the content of a specific file.\n2) 'glob': use to search for FILE PATHS by name or pattern.\n3) 'code_search': use ONLY to search for text/symbols/functions INSIDE files.\nDO NOT pass file paths as the query into 'code_search'! It searches file contents, not paths.\n4) 'bugs': use to scan the project for syntax errors and retrieve line numbers for broken files marked with a red dot.\n5) 'replace_lines': use to precisely edit fragments by providing start_line and end_line. ALWAYS use this instead of write_file for editing existing files!\n6) 'append_file': use to quickly add new code to the very end of a file.\nNEVER use write_file to modify an existing file! write_file is ONLY for completely new files.\n7) NEVER add any comments (e.g., lines starting with #) to the code you write or edit. The code MUST be completely clean and free of any annotations or comments."
                 disallowed_tools = ["save_plan"]
                 if level_idx >= 3 and iteration == 1:
                     allowed = [
@@ -220,6 +218,8 @@ class Agent:
                         "search_web",
                         "submit_plan",
                         "wakeup_subagents",
+                        "answer",
+                        "ask_question",
                     ]
                     filtered_tools = [
                         t for t in TOOLS_DEFINITIONS if t["function"]["name"] in allowed
@@ -232,6 +232,10 @@ class Agent:
                         for t in TOOLS_DEFINITIONS
                         if t["function"]["name"] not in disallowed_tools
                     ]
+
+            messages = self.context.get_messages(
+                self.get_tool_desc(), thinking_desc=thinking_desc
+            )
 
             use_native_tools = level_idx == 0
             if not use_native_tools:
@@ -864,6 +868,18 @@ class Agent:
                     arg_summary = f'"{args["pattern"]}"'
                 elif "query" in args:
                     arg_summary = f'"{args["query"]}"'
+                elif "step_number" in args:
+                    arg_summary = str(args["step_number"])
+                elif "questions" in args:
+                    qs = args["questions"]
+                    if isinstance(qs, list) and len(qs) > 0:
+                        first_q = qs[0].get("question", "") if isinstance(qs[0], dict) else str(qs[0])
+                        if len(qs) > 1:
+                            arg_summary = f'"{first_q}" (+{len(qs)-1} more)'
+                        else:
+                            arg_summary = f'"{first_q}"'
+                    else:
+                        arg_summary = "questions"
 
                 spinner = None
                 if name_lower in ["grep", "search_web"]:
@@ -873,7 +889,8 @@ class Agent:
                         args.get("query", args.get("pattern", "")), tool_name=name
                     )
                     spinner.start()
-                print_tool_call(display_name, arg_summary)
+                if not spinner:
+                    print_tool_call(display_name, arg_summary)
 
                 is_md_in_plan = (
                     mode == "plan"
@@ -1185,8 +1202,21 @@ class Agent:
                         elif name_lower == "bugs":
                             res_str = str(result)
                             for line in res_str.splitlines():
-                                from rich.markup import escape
-                                console.print(f"[bright_black]  {escape(line)}[/bright_black]", highlight=False)
+                                if line.strip():
+                                    console.print(f"  [{MUTED_COLOR}]|_ {line}[/{MUTED_COLOR}]")
+                        elif name_lower in ["answer", "ask_question"]:
+                            res_str = str(result)
+                            from rich.markup import escape
+                            if "error" in res_str.lower() or "cancelled" in res_str.lower():
+                                print_tool_result(res_str)
+                            else:
+                                lines = res_str.splitlines()
+                                for idx, line in enumerate(lines):
+                                    if line.strip():
+                                        if idx == 0:
+                                            console.print(f"  [{MUTED_COLOR}]|_ {escape(line)}[/{MUTED_COLOR}]")
+                                        else:
+                                            console.print(f"     [{MUTED_COLOR}]{escape(line)}[/{MUTED_COLOR}]")
                         elif name_lower == "wakeup_subagents":
                             res_str = str(result)
                             if res_str.startswith("Error:"):
@@ -1222,9 +1252,17 @@ class Agent:
         )
 
         prompt = (
-            "You are a helpful AI. Read the following understanding of the user's task and generate a short, concise, and descriptive name for this coding session. "
-            "The name should be 2 to 5 words long. Return ONLY the name, with no quotes, no extra text, and no punctuation at the end. Use snake_case or kebab-case if you want, but simple words separated by spaces is fine. Keep it in the same language as the text if possible.\n\n"
-            f"Understanding: {understand_text}"
+            "Read the following understanding of a coding task and generate a short, descriptive name for this coding session.\n\n"
+            "FORMAT RULES:\n"
+            "- 2 to 5 words.\n"
+            "- Plain words separated by single spaces (e.g. 'fix login redirect bug'). Do NOT use snake_case, kebab-case, camelCase, or underscores/hyphens as separators.\n"
+            "- No punctuation anywhere (no periods, commas, colons, quotes, or trailing symbols).\n"
+            "- No markdown, no code fences, no labels like 'Name:' — output only the name itself.\n"
+            "- Same language as the 'Understanding' text below.\n"
+            "- Be specific to this task, not generic. Avoid words like 'task', 'session', 'coding', 'fix code' unless no more specific term applies.\n"
+            "- If the understanding is too vague or empty to name specifically, output exactly: general coding session\n\n"
+            f"Understanding: {understand_text}\n\n"
+            "Output only the name, nothing else."
         )
         sys_msg = "You generate short titles. Only output the title."
         messages = [

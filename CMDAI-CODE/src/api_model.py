@@ -62,16 +62,22 @@ class OpenAIAPIModel:
         import json
 
         tool_defs = json.dumps(tools, indent=2, ensure_ascii=False)
-        return f"""Masz dostęp do następujących narzędzi. Gdy chcesz wywołać narzędzie, odpowiedz TYLKO tym JSON-em i niczym więcej:
+        return f"""You have access to the following tools. When you decide to call a tool, your ENTIRE response must be exactly one fenced JSON block in this exact format — nothing before it, nothing after it:
 
 ```json
-{{"name": "<nazwa_narzędzia>", "arguments": {{<parametry>}}}}
+{{"name": "<tool_name>", "arguments": {{<parameters>}}}}
 ```
 
-Dostępne narzędzia:
+Available tools:
 {tool_defs}
 
-WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tłumacz. Nie komentuj."""
+RULES:
+1. Call at most ONE tool per response. Never output more than one JSON object.
+2. If you are not calling a tool, do NOT output any JSON block — just respond normally in plain text.
+3. The JSON must be strictly valid and parseable: double quotes only, no trailing commas, no comments, no single quotes.
+4. When calling a tool, output nothing except the ```json``` block above — no preamble, no explanation, no text like "Calling tool:", no summary after it.
+5. "arguments" must contain exactly the parameters defined for that tool: correct types, all required parameters present, and no invented parameters that aren't in the tool's definition.
+6. Never split a single tool call across multiple JSON blocks or mix a tool call with regular text in the same response."""
 
     def get_context_limit(self) -> int:
         return 10000000
@@ -103,7 +109,7 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                     messages.insert(0, {"role": "system", "content": tool_injection})
 
                 if messages and messages[-1]["role"] == "user":
-                    warning = "\n\n[CRITICAL SYSTEM WARNING: Twoim bezwzględnym zadaniem w tej turze jest wywołanie narzędzia, ale ZANIM to zrobisz, MUSISZ przeprowadzić głęboką, analityczną analizę. Dopiero po dogłębnym myśleniu wygeneruj blok ```json z narzędziem!]"
+                    warning = "\n\n[SYSTEM NOTE: If you decide to call a tool this turn, think it through first inside a <think> block before generating the ```json``` call — but you do not have to include a <think> block every single time. Skip it for simple, obvious actions where no real analysis is needed. If you do use <think>, always finish and close the block before outputting the tool call — never call a tool while still reasoning inside it.]"
                     messages[-1]["content"] += warning
 
                 openai_tools = None
@@ -114,13 +120,13 @@ WAŻNE: Nie pisz nic poza blokiem ```json``` gdy wywołujesz narzędzie. Nie tł
                 sys_content = messages[0].get("content", "") if messages else ""
                 req = ""
                 if "THINKING BEHAVIOR - EXTREME" in sys_content:
-                    req = "\n\n[CRITICAL FORMATTING REQUIREMENT: Rozbuduj swoje myślenie. Inside your <think> block, you MUST use the exact prefixes: |_ UNDERSTAND:, |_ CONTEXT:, |_ OPTIONS:, |_ CHOICE:, |_ RISK:, and |_ PLAN:. Generate a massive, multi-level tree. Do NOT skip the thinking phase!]"
+                    req = "\n\n[FORMATTING REQUIREMENT: This session uses EXTREME thinking depth. Expand your reasoning fully. Inside your <think> block, use the exact prefixes: |_ UNDERSTAND:, |_ CONTEXT:, |_ OPTIONS:, |_ CHOICE:, |_ RISK:, and |_ PLAN:. Build a deep, multi-level tree, not free-form paragraphs. At this level, ALWAYS include a full <think> block before any tool call or final answer — the 'skip thinking for simple actions' allowance does not apply here.]"
                 elif "THINKING BEHAVIOR - ULTRA" in sys_content:
-                    req = "\n\n[CRITICAL FORMATTING REQUIREMENT: Inside your <think> block, you MUST use the exact prefixes: |_ UNDERSTAND:, |_ CONTEXT:, |_ OPTIONS:, |_ CHOICE:, |_ RISK:, and |_ PLAN:. Do not use free-form paragraphs.]"
+                    req = "\n\n[FORMATTING REQUIREMENT: This session uses ULTRA thinking depth. Inside your <think> block, use the exact prefixes: |_ UNDERSTAND:, |_ CONTEXT:, |_ OPTIONS:, |_ CHOICE:, |_ RISK:, and |_ PLAN:. Do not use free-form paragraphs. At this level, ALWAYS include a full <think> block before any tool call or final answer.]"
                 elif "THINKING BEHAVIOR - HIGH" in sys_content:
-                    req = "\n\n[CRITICAL FORMATTING REQUIREMENT: Inside your <think> block, you MUST use the exact prefixes: |_ UNDERSTAND:, |_ OPTIONS:, |_ CHOICE:, and |_ PLAN:. Do not use free-form paragraphs.]"
+                    req = "\n\n[FORMATTING REQUIREMENT: Inside your <think> block, use the exact prefixes: |_ UNDERSTAND:, |_ OPTIONS:, |_ CHOICE:, and |_ PLAN:. Do not use free-form paragraphs.]"
                 elif "THINKING BEHAVIOR - MEDIUM" in sys_content:
-                    req = "\n\n[CRITICAL FORMATTING REQUIREMENT: Inside your <think> block, you MUST use the exact prefixes: |_ UNDERSTAND:, and |_ PLAN:. Keep it concise.]"
+                    req = "\n\n[FORMATTING REQUIREMENT: Inside your <think> block, use the exact prefixes: |_ UNDERSTAND: and |_ PLAN:. Keep it concise — one short line per prefix where possible.]"
 
                 if req and messages and messages[-1]["role"] == "user":
                     messages[-1]["content"] += req

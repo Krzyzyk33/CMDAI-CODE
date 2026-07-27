@@ -17,7 +17,7 @@ def save_plan(content: str, restricted_dir: str = None, **kwargs) -> str:
     except Exception as e:
         return f"Error: {e}"
 
-def mark_plan_step_done(step_number: Optional[int] = None, restricted_dir: Optional[str] = None, **kwargs) -> str:
+def todo_done(step_number: int = None, restricted_dir: str = None, **kwargs) -> str:
     try:
         path = "plan.md"
         if restricted_dir:
@@ -40,16 +40,19 @@ def mark_plan_step_done(step_number: Optional[int] = None, restricted_dir: Optio
                         pass
                         
         found = False
+        line_text = ""
         if step_number is not None:
             step_str = str(step_number)
             for i, line in enumerate(lines):
                 if re.search(r'(?:^|\s)' + step_str + r'\..*?\[ \]', line):
+                    line_text = line.strip()
                     lines[i] = line.replace('[ ]', '[x]', 1)
                     found = True
                     break
         else:
             for i, line in enumerate(lines):
                 if '[ ]' in line:
+                    line_text = line.strip()
                     lines[i] = line.replace('[ ]', '[x]', 1)
                     found = True
                     m = re.search(r'(\d+)\.', line)
@@ -59,7 +62,8 @@ def mark_plan_step_done(step_number: Optional[int] = None, restricted_dir: Optio
         if found:
             with open(path, "w", encoding="utf-8") as f:
                 f.write('\n'.join(lines))
-            return f"Step {step_number} marked as done in plan.md"
+            clean = re.sub(r'^[-\s*#]*\[x\]\s*', '', line_text)
+            return f"[x] {clean}"
         else:
             if step_number is not None:
                 return f"Could not find uncompleted step {step_number} with '[ ]' in plan.md"
@@ -89,6 +93,3 @@ def submit_plan(**kwargs) -> str:
     for i, step in enumerate(steps_list):
         content += f"{i+1}. [ ] {step}\n"
     return save_plan(content, **kwargs)
-
-def todo_write(items: List[str]) -> str:
-    return "Todo list updated."

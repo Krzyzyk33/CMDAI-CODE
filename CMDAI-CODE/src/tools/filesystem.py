@@ -178,11 +178,17 @@ def run_ls(path: str = ".") -> str:
         
     return "\n".join(result)
 
-def run_glob(pattern: str = "") -> str:
+def run_glob(pattern: str = "", **kwargs) -> str:
     import glob as pyglob
     
     if not pattern:
-        return "Error: You must provide a 'pattern' argument to the glob tool."
+        for k in ["glob_pattern", "query", "path", "search", "term", "file_pattern", "p", "q"]:
+            if k in kwargs and kwargs[k]:
+                pattern = str(kwargs[k])
+                break
+
+    if not pattern:
+        return "System Error: You called the 'glob' tool without providing the 'pattern' parameter! Calling glob() with empty arguments {} is strictly FORBIDDEN. You MUST provide a non-empty 'pattern' argument (e.g. glob(pattern='*.py') or glob(pattern='src/**/*.js')). Please retry calling 'glob' now with the required pattern."
         
     if pattern == "*":
         pattern = "**/*"

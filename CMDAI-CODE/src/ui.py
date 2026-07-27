@@ -142,7 +142,9 @@ def print_tool_call(tool_name: str, arg_summary: str, source_id: str = None):
         _cprint(f"\n[bold]● Edit: {arg_summary}[/bold]", source_id=source_id)
     elif name_lower in ["write_file", "create_file", "write", "create"]:
         _cprint(f"\n[bold]● New file: {arg_summary}[/bold]", source_id=source_id)
-    elif name_lower in ["todo_write", "save_plan", "mark_plan_step_done"]:
+    elif name_lower in ["todo_done"]:
+        _cprint(f"\n[bold]● Todo done: step {arg_summary}[/bold]", source_id=source_id)
+    elif name_lower in ["save_plan", "submit_plan"]:
         _cprint(f"\n[bold]● Plan: {arg_summary}[/bold]", source_id=source_id)
     elif name_lower in ["bash", "commands", "run_bash"]:
         _cprint(f"\n[bold]● Command: {arg_summary}[/bold]", source_id=source_id)
@@ -164,6 +166,8 @@ def print_tool_call(tool_name: str, arg_summary: str, source_id: str = None):
         _cprint(f"\n[bold]● Waking Subagents[/bold]", source_id=source_id)
     elif name_lower in ["bugs", "run_bugs"]:
         _cprint("\n[bold]● Bugs:[/bold]", source_id=source_id)
+    elif name_lower in ["answer", "ask_question"]:
+        _cprint("\n[bold]● Answer:[/bold]", source_id=source_id)
     else:
         _cprint(
             f"\n[bold]● Tool ({tool_name}): {arg_summary}[/bold]", source_id=source_id
@@ -456,7 +460,7 @@ class ThinkingTree:
 
         self.start_time = time.time()
         self.live = Live(
-            get_renderable=self.render, refresh_per_second=5, transient=True
+            get_renderable=self.render, refresh_per_second=5, transient=False
         )
 
     def start(self):
@@ -531,7 +535,6 @@ class ThinkingTree:
         import sys
 
         sys.stdout.flush()
-        self.print_tree()
         print("", end="", flush=True)
 
     def print_tree(self):
