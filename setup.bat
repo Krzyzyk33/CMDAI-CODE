@@ -18,6 +18,6 @@ if exist "%USERPROFILE%\.cmdai2" (
     )
 )
 
-echo Gotowe! Mozesz teraz uruchomic aplikacje wpisujac:
+echo All set! You can now launch the application by typing:
 echo CMDAI CODE
 pause
