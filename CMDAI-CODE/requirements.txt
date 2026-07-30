@@ -1,7 +1,27 @@
-llama-cpp-python
-prompt_toolkit
-rich
-websockets
-pytest
-pytesseract
-Pillow
+# Core Engine & LLM Inference
+llama-cpp-python>=0.2.80
+openai>=1.12.0
+httpx>=0.25.0
+requests>=2.31.0
+tiktoken>=0.5.0
+
+# Terminal UI & Interactive Prompting
+prompt_toolkit>=3.0.40
+rich>=13.7.0
+questionary>=2.0.0
+pygments>=2.17.0
+pyfiglet>=1.0.0
+
+# Web Search & Utilities
+duckduckgo_search>=5.0.0
+jinja2>=3.1.0
+websockets>=12.0
+pytesseract>=0.3.10
+pillow>=10.0.0
+
+# Code Indexing & Parsing
+tree-sitter>=0.21.0
+
+# Testing & Quality Assurance
+pytest>=7.0.0
+pytest-asyncio>=0.23.0
