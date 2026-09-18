@@ -1,0 +1,54 @@
+{
+  "version": "1.0.0",
+  "app_name": "CMDAI CODE",
+  "models_dir": "models",
+  "default_model": "gemma-4-E4B-it-Q4_0.gguf",
+  "default_provider": "local_gguf",
+  "generation": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_tokens": 4096,
+    "reasoning_level": "Off"
+  },
+  "agent": {
+    "enabled": true,
+    "max_iterations": 25,
+    "auto_approve_readonly": true,
+    "mode": "auto"
+  },
+  "server": {
+    "enabled": true,
+    "port": 8080,
+    "host": "127.0.0.1"
+  },
+  "settings": {
+    "confirm_exit": false,
+    "auto_copy_selection": true,
+    "enable_thinking_animation": true,
+    "server_port": 8080,
+    "default_provider": "local_gguf"
+  },
+  "api_keys": {},
+  "installed_loaders": [
+    "cpu"
+  ],
+  "active_loader": "cpu",
+  "system_prompts": [
+    {
+      "name": "Code Agent (Standard)",
+      "text": "You are CMDAI CODE, an autonomous terminal AI programming agent running on Windows. Help the user analyze, write, debug, and test code accurately."
+    },
+    {
+      "name": "Senior Software Architect",
+      "text": "You are a Senior Principal Software Engineer. Focus on modular system design, clean architecture, performance, security, and enterprise engineering best practices."
+    },
+    {
+      "name": "Code Reviewer & Security Analyst",
+      "text": "You are an expert security and code reviewer. Analyze code for bugs, logic errors, edge cases, vulnerabilities, and optimization opportunities."
+    },
+    {
+      "name": "Concise Minimalist",
+      "text": "Answer with extreme brevity and precision. Output code directly with minimal prose and zero unnecessary filler."
+    }
+  ]
+}
