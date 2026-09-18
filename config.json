@@ -1,8 +1,8 @@
 {
-  "version": "1.0.0",
+  "version": "3.0",
   "app_name": "CMDAI CODE",
   "models_dir": "models",
-  "default_model": "Qwable-9B-Claude-Fable-5-Q4_K_M.gguf",
+  "default_model": null,
   "default_provider": "local_gguf",
   "generation": {
     "temperature": 0.6,
@@ -28,7 +28,15 @@
     "server_port": 8080,
     "default_provider": "local_gguf"
   },
-  "api_keys": {},
+  "api_keys": {
+    "openrouter": "",
+    "openai": "",
+    "anthropic": "",
+    "gemini": "",
+    "groq": "",
+    "deepseek": "",
+    "opencode_zen": ""
+  },
   "installed_loaders": [
     "cpu"
   ],
