@@ -123,7 +123,7 @@ Type `/` in the prompt input to open the interactive autocomplete menu:
 | <kbd>Ctrl</kbd> + <kbd>C</kbd> | Copy selected code to clipboard or interrupt generation. |
 | <kbd>Esc</kbd> / <kbd>Esc</kbd> <kbd>Esc</kbd> | Close active modal / cancel ongoing model turn. |
 | <kbd>↑</kbd> / <kbd>↓</kbd> (in empty input) | Navigate prompt history. |
-| <kbd>→</kbd> / <kbd>←</kbd> (hovering over code) | Horizontally shift long lines of code in narrow terminal windows. |
+| <kbd>←</kbd> / <kbd>→</kbd> (hovering over code) | Horizontally shift long lines of code in narrow terminal windows. |
 | <kbd>Ctrl</kbd> + <kbd>Q</kbd> | Cleanly exit application. |
 
 ---
