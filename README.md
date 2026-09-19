@@ -128,36 +128,6 @@ Type `/` in the prompt input to open the interactive autocomplete menu:
 
 ---
 
-## 🏗️ Project Architecture
-
-```text
-CMDAI CODE/
-├── cmdai.py                     # Main CLI entrypoint and command router
-├── cmdai.bat                    # Windows startup launcher
-├── install.bat                  # Automated dependency and environment installer
-├── installer.bat                # Compatible alias forwarding to install.bat
-├── editor.bat                   # Standalone code editor launcher
-├── config.example.json          # Starter configuration template
-├── requirements.txt             # Core Python package dependencies
-├── README.md                    # Project documentation
-├── API.md                       # Complete API providers, OpenCode Zen, and gateway guide
-├── CODE_OF_CONDUCT.md           # Community guidelines and contribution policy
-├── LICENSE                      # Proprietary custom license and terms of use
-├── .gitignore                   # Local configuration and cache exclusion rules
-├── app/
-│   └── sessions/                # Local conversation history storage
-└── src/
-    └── cmdai/
-        ├── agent/               # Autonomous agent runner, tools, and subagents
-        ├── core/                # Engine, model worker, resource limits, and sessions
-        ├── editor/              # Integrated terminal code editor and diff viewer
-        ├── grammars/            # GBNF tool-calling grammars for llama.cpp
-        ├── indexer/             # AST code indexer and symbol database
-        └── tui/                 # Terminal UI application, widgets, and modals
-```
-
----
-
 ## 📄 License & Terms of Use
 
 **Custom Proprietary License — All Rights Reserved.**
