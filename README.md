@@ -15,6 +15,36 @@
 
 ---
 
+## Installation
+
+### PowerShell
+```bash
+irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/tools/install-remote.ps1 | iex
+```
+
+### npm
+```bash
+npm install -g cmdai-code
+```
+
+### npx
+```bash
+npx -y cmdai-code code
+```
+
+### pip
+```bash
+pip install git+[https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git)
+```
+
+### pipx
+```bash
+git clone [https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git) $env:USERPROFILE\CMDAI-CODE
+cd $env:USERPROFILE\CMDAI-CODE
+```
+
+---
+
 ## 🌟 Key Features
 
 ### 1. 🎨 Modern Dark Terminal Interface
@@ -44,38 +74,6 @@
 - **Uncapped action loop**: The agent executes multi-step workflows (inspect → plan → edit multiple files → test → verify) until completion.
 - **Safe clipboard**: <kbd>Ctrl</kbd>+<kbd>C</kbd> safely copies expanded code blocks to the clipboard without crashing the application.
 - **Dynamic context compaction**: Intelligent token budgeting ensures prompt and generation never exceed model context windows (`exceed context window` prevention).
-
----
-
-## 🚀 Quick Setup & Installation
-
-### Step 1: Clone the Repository
-```powershell
-git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
-cd CMDAI-CODE
-```
-
-### Step 2: Run the Installer
-Launch the automated setup script:
-```cmd
-install.bat
-```
-*(or run `installer.bat`)*
-
-The installer automatically:
-1. Verifies Python 3.10+ and system prerequisites.
-2. Installs required packages from `requirements.txt`.
-3. Creates a starter `config.json` from `config.example.json`.
-
-### Step 3: Launch CMDAI CODE
-Start the assistant by running:
-```powershell
-.\cmdai.bat
-```
-or:
-```powershell
-python cmdai.py
-```
 
 ---
 
