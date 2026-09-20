@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 REPO = "Krzyzyk33/CMDAI-CODE"
 API_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=50"
-MIN_TAG = (3, 0, "alpha")
+MIN_TAG = (3, 0, 0, "alpha")
 
 
 def _app_root() -> str:
@@ -17,13 +17,15 @@ def _cache_path() -> str:
     return os.path.join(_app_root(), "cache", "releases.json")
 
 
-def parse_tag(tag: str) -> Tuple[int, int, str]:
+def parse_tag(tag: str) -> Tuple[int, int, int, str]:
     t = tag.strip().lstrip("vV")
-    m = re.match(r"(\d+)\.(\d+)(?:[-.]([A-Za-z0-9.]+))?", t)
+    m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?(?:[-.]([A-Za-z0-9.]+))?", t)
     if not m:
-        return (0, 0, "")
-    major, minor, suffix = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
-    return (major, minor, suffix)
+        return (0, 0, 0, "")
+    major, minor = int(m.group(1)), int(m.group(2))
+    patch = int(m.group(3)) if m.group(3) is not None else 0
+    suffix = (m.group(4) or "").lower()
+    return (major, minor, patch, suffix)
 
 
 def _suffix_rank(suffix: str) -> int:
@@ -39,11 +41,11 @@ def _suffix_rank(suffix: str) -> int:
 
 
 def is_included(tag: str) -> bool:
-    major, minor, suffix = parse_tag(tag)
-    mm, nn, ss = MIN_TAG
-    if (major, minor) < (mm, nn):
+    major, minor, patch, suffix = parse_tag(tag)
+    mm, nn, pp, ss = MIN_TAG
+    if (major, minor, patch) < (mm, nn, pp):
         return False
-    if (major, minor) > (mm, nn):
+    if (major, minor, patch) > (mm, nn, pp):
         return True
     return _suffix_rank(suffix) >= _suffix_rank(ss)
 
@@ -73,7 +75,7 @@ def fetch_releases(timeout: float = 8.0) -> List[Dict[str, Any]]:
                 "url": r.get("html_url") or "",
             }
         )
-    out.sort(key=lambda x: parse_tag(x["tag"]), reverse=False)
+    out.sort(key=lambda x: _tag_sort_key(x["tag"]), reverse=False)
     return out
 
 
@@ -111,19 +113,66 @@ def get_releases(refresh: bool = True) -> Tuple[List[Dict[str, Any]], str]:
     return [], "none"
 
 
+def _tag_sort_key(tag: str) -> Tuple[int, int, int, int, str]:
+    major, minor, patch, suffix = parse_tag(tag)
+    return (major, minor, patch, _suffix_rank(suffix), str(tag))
+
+
+def get_local_git_version() -> str:
+    """Newest local git tag (e.g. v3.0.1-alpha). Empty string when unavailable."""
+    import subprocess
+
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+        desc = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=root, text=True, capture_output=True, timeout=10,
+        )
+        candidates = []
+        if desc.returncode == 0 and (desc.stdout or "").strip():
+            candidates.append((desc.stdout or "").strip())
+        tags = subprocess.run(
+            ["git", "tag", "--list"],
+            cwd=root, text=True, capture_output=True, timeout=10,
+        )
+        if tags.returncode == 0:
+            candidates.extend(t.strip() for t in (tags.stdout or "").splitlines() if t.strip())
+        candidates = [c for c in candidates if is_included(c)]
+        if not candidates:
+            return ""
+        return sorted(candidates, key=_tag_sort_key)[-1].strip()
+    except Exception:
+        return ""
+
+
 def get_display_version() -> str:
+    candidates: List[str] = []
     try:
         cached = load_cache()
         if cached:
-            cached_sorted = sorted(cached, key=lambda r: parse_tag(str(r.get("tag", ""))))
-            return str(cached_sorted[-1].get("tag", "")).strip()
+            cached_sorted = sorted(cached, key=lambda r: _tag_sort_key(str(r.get("tag", ""))))
+            tag = str(cached_sorted[-1].get("tag", "")).strip()
+            if tag:
+                candidates.append(tag)
+    except Exception:
+        pass
+    try:
+        local_tag = get_local_git_version()
+        if local_tag:
+            candidates.append(local_tag)
     except Exception:
         pass
     try:
         with open(os.path.join(_app_root(), "config.json"), "r", encoding="utf-8") as f:
-            return str(json.load(f).get("version", "")).strip()
+            ver = str(json.load(f).get("version", "")).strip()
+            if ver:
+                candidates.append(ver)
     except Exception:
+        pass
+    if not candidates:
         return ""
+    return sorted(candidates, key=_tag_sort_key)[-1].strip()
 
 
 def render_changelog_md(releases: List[Dict[str, Any]]) -> str:
