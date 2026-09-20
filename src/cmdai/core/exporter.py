@@ -291,7 +291,6 @@ HTML_EXPORTER_TEMPLATE = """<!DOCTYPE html>
 
 
 def _format_markdown_simple(text: str) -> str:
-    """Simple safe HTML formatter for agent markdown responses."""
     escaped = html.escape(text)
 
     def _code_block(match):
@@ -323,7 +322,6 @@ def export_session_to_html(
     workdir: str,
     output_path: Optional[str] = None,
 ) -> str:
-    """Export current or saved chat session to a standalone interactive HTML file."""
     if not output_path:
         out_dir = os.path.join(workdir, "exports")
         os.makedirs(out_dir, exist_ok=True)

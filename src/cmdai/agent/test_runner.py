@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 
 
 def detect_test_runner(workdir: str, target_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Auto-detects the project's test framework (pytest, npm, cargo, go, unittest)."""
     abs_workdir = os.path.abspath(workdir)
 
     tests_dir = os.path.join(abs_workdir, "tests")
@@ -76,7 +75,6 @@ def detect_test_runner(workdir: str, target_file: Optional[str] = None) -> Optio
 
 
 def run_project_tests(workdir: str, target_file: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
-    """Runs auto-detected project tests and returns structured results."""
     runner_info = detect_test_runner(workdir, target_file)
     if not runner_info:
         return {"has_tests": False, "passed": True, "summary": "No test suite detected in workspace."}

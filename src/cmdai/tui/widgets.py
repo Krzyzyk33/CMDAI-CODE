@@ -24,7 +24,7 @@ from ..core.capabilities import clean_model_name
 
 
 class UserMessageCard(Vertical):
-    """User message card with in-card label and prompt text (Swift style)."""
+    """User message card with in-card label and prompt text (Swift style). Click opens copy/revert/delete."""
 
     DEFAULT_CSS = """
     UserMessageCard {
@@ -33,11 +33,12 @@ class UserMessageCard(Vertical):
     }
     """
 
-    def __init__(self, prompt: str = "", **kwargs):
+    def __init__(self, prompt: str = "", turn_id: int = -1, **kwargs):
         classes = kwargs.pop("classes", "")
         classes = f"user-card {classes}".strip()
         super().__init__(classes=classes, **kwargs)
         self.prompt = prompt
+        self.turn_id = turn_id
         self._header = Static("[bold #58a6ff]user[/]", classes="card-label")
         self._body = Static(Text(prompt, style="white"), classes="card-body")
 
@@ -49,6 +50,14 @@ class UserMessageCard(Vertical):
         self.prompt = text
         self._body.update(Text(text, style="white"))
 
+    def on_click(self, event: events.Click) -> None:
+        try:
+            app = getattr(self, "app", None)
+            if app and hasattr(app, "show_user_actions"):
+                app.show_user_actions(self.turn_id)
+        except Exception:
+            pass
+
 
 class LoadingBlock(Vertical):
     """Model loading block with ⌬ / ✻ glyph and braille animation before thinking starts."""
@@ -57,7 +66,7 @@ class LoadingBlock(Vertical):
     LoadingBlock {
         width: 100%;
         height: auto;
-        margin: 0 0 1 0;
+        margin: 0;
     }
     """
 
@@ -151,6 +160,19 @@ class AssistantTurnCard(Vertical):
         self.current_body_widget: Static = self.body_widget
         self.body_widgets: List[Static] = [self.body_widget]
         self.footer_widget = Static("", classes="card-footer")
+        # Textual's default Vertical sizing can claim all remaining space in a
+        # scroll view.  Keep each turn content-sized so tool rows never get
+        # pushed to the bottom of an otherwise empty screen.
+        self.styles.height = "auto"
+        for container in (self.loading_container, self.thinking_container, self.flow_container):
+            container.styles.height = "auto"
+            container.styles.min_height = 0
+        self.footer_widget.styles.height = 1
+        self.thinking_container.styles.display = "none"
+        # An empty Vertical container can consume the remaining viewport in a
+        # scrollable parent. It is shown only once it contains chat content.
+        self.flow_container.styles.display = "none"
+        self.body_widget.styles.display = "none"
 
         self.loading_block: Optional[LoadingBlock] = None
         self.thinking_block: Optional[ThinkingBlock] = None
@@ -240,13 +262,19 @@ class AssistantTurnCard(Vertical):
             except Exception:
                 pass
             return
+        if self.current_body_widget is not None and not getattr(self, "raw_text", "").strip():
+            try:
+                self.current_body_widget.styles.display = "none"
+            except Exception:
+                pass
+        from ..agent.render import render_tool_header
         frame = self.DOT_SPINNERS[self._spinner_idx % len(self.DOT_SPINNERS)]
-        t = Text()
-        t.append(f"{frame}  ", style="bold #8b949e")
-        t_name = self.generating_tool_name.capitalize()
-        t.append(f"{t_name}", style="bold #8b949e")
-        if self.generating_tool_target:
-            t.append(f" {self.generating_tool_target}", style="#8b949e")
+        t = render_tool_header(
+            self.generating_tool_name,
+            self.generating_tool_target,
+            is_running=True,
+            spinner_frame=frame,
+        )
         self.current_live_tool_text = t.plain
         try:
             self.live_tool_widget.styles.display = "block"
@@ -278,6 +306,7 @@ class AssistantTurnCard(Vertical):
     def start_thinking(self, message: str = "Thinking…") -> Optional[ThinkingBlock]:
         if not self.has_thinking:
             return None
+        self.thinking_container.styles.display = "block"
         if self.loading_block and not self.loading_block.is_finished:
             self.loading_block.finish()
         if self.thinking_block is None:
@@ -310,37 +339,8 @@ class AssistantTurnCard(Vertical):
                 self.thinking_block.finish()
 
 
-    def add_subagent(
-        self,
-        role: str,
-        goal: str,
-        system_prompt: str,
-        current_tool: str = "read",
-        tool_arg: str = "scanning context...",
-        status: str = "running",
-        agent_index: Optional[int] = None,
-        agent_total: Optional[int] = None,
-    ) -> 'SubagentBlock':
-        subagents = list(self.tools_container.query(SubagentBlock))
-        idx = agent_index if agent_index is not None else (len(subagents) + 1)
-        tot = agent_total if agent_total is not None else max(idx, len(subagents) + 1)
-        block = SubagentBlock(
-            role=role,
-            goal=goal,
-            system_prompt=system_prompt,
-            current_tool=current_tool,
-            tool_arg=tool_arg,
-            status=status,
-            agent_index=idx,
-            agent_total=tot,
-        )
-        self.tools_container.mount(block)
-        for b in subagents:
-            if b.agent_total < tot:
-                b.agent_total = tot
-        return block
-
     def add_tool(self, tool_name: str, target: str) -> ToolBlock:
+        self.flow_container.styles.display = "block"
         self.clear_generating_tool()
         block = ToolBlock(tool_name, target)
         self.tool_blocks.append(block)
@@ -432,6 +432,7 @@ class AssistantTurnCard(Vertical):
         """Appends a new chronological text commentary block into flow_container."""
         if not text.strip():
             return
+        self.flow_container.styles.display = "block"
         new_body = Static("", classes="card-body")
         self.current_body_widget = new_body
         self.body_widgets.append(new_body)
@@ -482,6 +483,8 @@ class AssistantTurnCard(Vertical):
             if self.current_body_widget is not None:
                 self.current_body_widget.update("")
             return
+
+        self.flow_container.styles.display = "block"
 
         if self.current_body_widget is None:
             new_body = Static("", classes="card-body")
@@ -726,7 +729,7 @@ class ToolBlock(Vertical):
     ToolBlock {
         width: 100%;
         height: auto;
-        margin: 1 0;
+        margin: 0 0 1 0;
     }
     ToolBlock .tool-details {
         width: 100%;
@@ -741,6 +744,8 @@ class ToolBlock(Vertical):
 
     def __init__(self, tool_name: str, target: str, **kwargs):
         super().__init__(classes="tool-block", **kwargs)
+        import uuid as _uuid
+        self.tool_uid = _uuid.uuid4().hex[:8]
         if tool_name.lower() in ("bugs", "tool_bugs", "debug", "scan_bugs") or "syntax error" in str(target).lower() or "scanning project" in str(target).lower():
             target = ""
         self.tool_name = tool_name
@@ -758,6 +763,7 @@ class ToolBlock(Vertical):
 
         self.header_widget = Static("", classes="tool-header")
         self.details_widget = Static("", classes="tool-details")
+        self.details_widget.styles.display = "none"
         self.details_widget.styles.text_wrap = "nowrap"
         self.details_widget.styles.text_overflow = "clip"
         self.details_widget.styles.overflow_x = "hidden"
@@ -894,6 +900,10 @@ class ToolBlock(Vertical):
             err_msg = str(result.get("error") or result.get("stderr") or "Tool execution failed.")
             txt = Text(no_wrap=False)
             txt.append("  ● Execution Failed:\n", style="bold #f85149")
+            if result.get("missing"):
+                txt.append(f"    Missing: {result['missing']}\n", style="bold #e6edf3")
+            if result.get("example"):
+                txt.append(f"    Example: {result['example']}\n", style="#58a6ff")
             if self.target:
                 txt.append(f"    Target:  {self.target}\n", style="bold #e6edf3")
             txt.append(f"    Reason:  {err_msg}\n", style="#ff7b72")
@@ -901,6 +911,9 @@ class ToolBlock(Vertical):
                 txt.append("\n  ● Standard Output:\n", style="bold #8b949e")
                 for l in str(result["stdout"]).splitlines()[:20]:
                     txt.append(f"    {l}\n", style="#8b949e")
+            if result.get("missing") and not self.target:
+                self.target = f"missing '{result['missing']}'"
+            self.update_header()
             self._safe_update_details(txt)
             try:
                 self.refresh(layout=True)
@@ -1024,6 +1037,30 @@ class ToolBlock(Vertical):
                     txt.append(f"{sig}\n", style="bold #e6edf3")
             else:
                 txt.append(f"  No symbols found for query: {self.target}\n", style="dim #8b949e")
+            self._safe_update_details(txt)
+        elif self.tool_name == "screenshot":
+            txt = Text(no_wrap=True)
+            if result.get("path"):
+                if "(" not in self.target:
+                    self.target = f"{self.target} ({(result.get('size_bytes', 0) // 1024)} KB)"
+                    self.update_header()
+                txt.append(f"  {result['path']}\n", style="#e6edf3")
+                txt.append("  (open the file to view; call <tool:vision> to analyze it)\n", style="dim #8b949e")
+            else:
+                txt.append(f"  Screenshot failed: {result.get('error', 'unknown')}\n", style="#f85149")
+            self._safe_update_details(txt)
+        elif self.tool_name in ("vision", "mcps"):
+            txt = Text(no_wrap=True)
+            if self.tool_name == "vision" and result.get("path"):
+                txt.append(f"  {result['path']}\n", style="#e6edf3")
+                if result.get("question"):
+                    txt.append(f"  question: {result['question']}\n", style="#8b949e")
+            else:
+                for s in result.get("servers", [result.get("note", "")]):
+                    if s:
+                        txt.append(f"  {s}\n", style="#8b949e")
+                if result.get("note") and result.get("servers"):
+                    txt.append(f"  {result['note']}\n", style="dim #484f58")
             self._safe_update_details(txt)
         elif "content" in result:
             lines = str(result["content"]).splitlines()
@@ -1172,6 +1209,18 @@ class ToolBlock(Vertical):
     def on_click(self, event: events.Click) -> None:
         if self.tool_running:
             return
+        if self.tool_name == "screenshot" and self.result_data and self.result_data.get("path"):
+            import os as _os
+            import subprocess as _sp
+            p = self.result_data["path"]
+            try:
+                if _os.name == "nt":
+                    _os.startfile(p)
+                else:
+                    _sp.Popen(["xdg-open", p])
+                return
+            except Exception:
+                pass
         w = getattr(event, "widget", None)
         if w is not None:
             if w == self.details_widget:
@@ -1731,135 +1780,3 @@ class ApprovalDiffPreview(VerticalScroll):
     def hide_diff(self) -> None:
         self.styles.display = "none"
         self.diff_widget.update("")
-
-
-
-
-class SubagentBlock(Vertical):
-    """Subagent block with blue ⌬ benzene animation (or ○ hollow dot if waiting in queue):
-    ⌬ Code Reviewer read src/cmdai/...
-    Clicking it opens SubagentChatModal (read-only chat with System Prompt in input dock).
-    """
-
-    DEFAULT_CSS = """
-    SubagentBlock {
-        width: 100%;
-        height: auto;
-        margin: 0 0 1 0;
-    }
-    .subagent-line {
-        color: #8b949e;
-        height: 1;
-        padding: 0 1;
-    }
-    .subagent-line:hover {
-        background: #161b22;
-    }
-    """
-
-    HEX_FRAMES = ["⌬", "⬡"]
-
-    def __init__(
-        self,
-        role: str,
-        goal: str,
-        system_prompt: str,
-        current_tool: str = "read",
-        tool_arg: str = "analyzing context...",
-        findings: Optional[List[str]] = None,
-        history: Optional[List[Dict[str, Any]]] = None,
-        status: str = "running",
-        agent_index: int = 1,
-        agent_total: int = 1,
-        **kwargs,
-    ):
-        super().__init__(classes="subagent-block", **kwargs)
-        self.role = role
-        self.goal = goal
-        self.system_prompt = system_prompt
-        self.current_tool = current_tool
-        self.tool_arg = tool_arg
-        self.findings = findings or []
-        self.history = history or []
-        self.status = status
-        self.agent_index = agent_index
-        self.agent_total = agent_total
-        self.subagent_running = (status == "running")
-        self.frame_idx = 0
-        self.timer = None
-        self.label_widget = Static("", classes="subagent-line")
-
-    def compose(self) -> ComposeResult:
-        yield self.label_widget
-
-    def on_mount(self) -> None:
-        self.update_display()
-        if self.subagent_running:
-            self.timer = self.set_interval(0.25, self._spin)
-
-    def _spin(self) -> None:
-        if self.subagent_running:
-            self.frame_idx = (self.frame_idx + 1) % len(self.HEX_FRAMES)
-            self.update_display()
-
-    def set_status(self, status: str) -> None:
-        self.status = status
-        if status == "running":
-            self.subagent_running = True
-            if not self.timer and self.is_mounted:
-                self.timer = self.set_interval(0.25, self._spin)
-        else:
-            self.subagent_running = False
-            if self.timer:
-                self.timer.stop()
-                self.timer = None
-        self.update_display()
-
-    def update_progress(self, current_tool: str, tool_arg: str, thought: Optional[str] = None) -> None:
-        self.current_tool = current_tool
-        self.tool_arg = tool_arg
-        self.update_display()
-
-    def finish(self, findings: Optional[List[str]] = None, history: Optional[List[Dict[str, Any]]] = None) -> None:
-        self.status = "completed"
-        self.subagent_running = False
-        if self.timer:
-            self.timer.stop()
-            self.timer = None
-        if findings is not None:
-            self.findings = findings
-        if history is not None:
-            self.history = history
-        self.update_display()
-
-    def update_display(self) -> None:
-        t = Text()
-        if self.status == "pending":
-            t.append("○ ", style="#8b949e")
-            t.append(f"{self.role} ", style="bold #8b949e")
-            t.append(f"{self.current_tool} {self.tool_arg}", style="#8b949e")
-        elif self.status == "running" or self.subagent_running:
-            frame = self.HEX_FRAMES[self.frame_idx]
-            t.append(f"{frame} ", style="bold #58a6ff")
-            t.append(f"{self.role} ", style="bold #e6edf3")
-            t.append(f"{self.current_tool} {self.tool_arg}", style="#8b949e")
-        else:
-            t.append("● ", style="#8b949e")
-            t.append(f"{self.role} ", style="bold #8b949e")
-            tool_info = f"{self.current_tool} {self.tool_arg}" if self.current_tool else "completed"
-            t.append(f"{tool_info} · click to inspect", style="#8b949e")
-        self.label_widget.update(t)
-
-    def on_click(self, event: events.Click) -> None:
-        from .modals.subagent_chat import SubagentChatModal
-        self.app.push_screen(
-            SubagentChatModal(
-                role=self.role,
-                goal=self.goal,
-                system_prompt=self.system_prompt,
-                history=self.history,
-                findings=self.findings,
-                agent_index=self.agent_index,
-                agent_total=self.agent_total,
-            )
-        )

@@ -24,6 +24,10 @@ class ModelCapability:
     default_level: str
     max_budget: int = 32768
     thinking_tags: Tuple[str, str] = ("<think>", "</think>")
+    vision: bool = False
+    image_param_style: str = "none"                                       
+    mmproj_path: Optional[str] = None
+    confidence: str = "high"                                             
 
 
 BUDGET_MAP = {
@@ -77,52 +81,125 @@ def _save_cache(cache: Dict[str, dict]) -> None:
         pass
 
 
-def inspect_gguf_chat_template(gguf_path: str) -> Optional[ModelCapability]:
-    """Inspects GGUF file tokenizer.chat_template for thinking tokens and exact levels."""
-    if not GGUFReader or not os.path.exists(gguf_path) or "gemma" in gguf_path.lower():
+def _field_text(field) -> str:
+    try:
+        raw = field.parts[field.data[0]] if field.data else b""
+        if isinstance(raw, (bytes, bytearray)):
+            return raw.decode("utf-8", errors="ignore")
+        if hasattr(raw, "tobytes"):
+            return raw.tobytes().decode("utf-8", errors="ignore")
+        if hasattr(raw, "__iter__"):
+            return bytes(raw).decode("utf-8", errors="ignore")
+        return str(raw)
+    except Exception:
+        return ""
+
+
+def find_mmproj_sidecar(gguf_path: str) -> Optional[str]:
+    try:
+        d = os.path.dirname(os.path.abspath(gguf_path))
+        base = os.path.splitext(os.path.basename(gguf_path))[0].lower()
+        for f in os.listdir(d):
+            fl = f.lower()
+            if fl.endswith(".gguf") and "mmproj" in fl:
+                if base.split("-")[0] in fl or fl.split("-")[0] in base:
+                    return os.path.join(d, f)
+                return os.path.join(d, f)
+    except Exception:
+        pass
+    return None
+
+
+def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
+    if not GGUFReader or not os.path.exists(gguf_path):
         return None
     try:
         reader = GGUFReader(gguf_path)
-        for field in reader.fields.values():
-            if field.name == "tokenizer.chat_template":
-                raw = field.parts[field.data[0]] if field.data else b""
-                if isinstance(raw, (bytes, bytearray)):
-                    template_str = raw.decode("utf-8", errors="ignore")
-                elif hasattr(raw, "tobytes"):
-                    template_str = raw.tobytes().decode("utf-8", errors="ignore")
-                elif hasattr(raw, "__iter__"):
-                    template_str = bytes(raw).decode("utf-8", errors="ignore")
-                else:
-                    template_str = str(raw)
+        fields = reader.fields
 
-                template_lower = template_str.lower()
-                has_thinking = any(
-                    kw in template_lower
-                    for kw in [
-                        "enable_thinking",
-                        "<think>",
-                        "thinking_mode",
-                        "reasoning_content",
-                        "think_budget",
-                        "<|channel>thought",
-                        "<|think|>",
-                    ]
-                )
-                if has_thinking:
-                    levels = ["Off", "Low", "Medium", "High", "xHigh", "Max"]
-                    default_level = "Medium"
+                                            
+        vision = any(n.startswith("clip.") or "vision" in n.lower() for n in fields)
+        mmproj_path = None
+        if not vision:
+            mmproj_path = find_mmproj_sidecar(gguf_path)
+            if mmproj_path and os.path.exists(mmproj_path):
+                try:
+                    mr = GGUFReader(mmproj_path)
+                    arch_f = mr.fields.get("general.architecture")
+                    arch = _field_text(arch_f).strip().lower() if arch_f else ""
+                    if arch == "clip" or any(n.startswith("clip.") for n in mr.fields):
+                        vision = True
+                    else:
+                        mmproj_path = None
+                except Exception:
+                    mmproj_path = None
 
-                    return ModelCapability(
-                        model_id=os.path.basename(gguf_path),
-                        thinking=True,
-                        param_style="chat_template_kwargs",
-                        levels=levels,
-                        default_level=default_level,
-                        max_budget=32768,
-                        thinking_tags=("<think>", "</think>") if "<think>" in template_str else ("<|think|>", "<|turn>model"),
-                    )
+                                                          
+        template_str = ""
+        tpl_f = fields.get("tokenizer.chat_template")
+        if tpl_f is not None:
+            template_str = _field_text(tpl_f)
+        template_lower = template_str.lower()
+        template_hit = any(
+            kw in template_lower
+            for kw in [
+                "enable_thinking",
+                "<think>",
+                "thinking_mode",
+                "reasoning_content",
+                "think_budget",
+                "<|channel|>thought",
+                "<|think|>",
+            ]
+        )
+        think_token_hit = False
+        try:
+            tf = fields.get("tokenizer.ggml.tokens")
+            yf = fields.get("tokenizer.ggml.token_type")
+            if tf is not None and yf is not None:
+                toks = [t.tobytes().decode("utf-8", errors="ignore") if hasattr(t, "tobytes") else bytes(t).decode("utf-8", errors="ignore") for t in tf.parts]
+                types = list(yf.data)
+                think_token_hit = any("think" in t.lower() for t, y in zip(toks, types) if y in (3, 4, 5))
+        except Exception:
+            pass
+
+        has_thinking = bool(template_hit or think_token_hit)
+        if has_thinking:
+            levels = ["Off", "Low", "Medium", "High", "xHigh", "Max"]
+            return ModelCapability(
+                model_id=os.path.basename(gguf_path),
+                thinking=True,
+                param_style="chat_template_kwargs",
+                levels=levels,
+                default_level="Medium",
+                max_budget=32768,
+                thinking_tags=("<think>", "</think>") if "<think>" in template_str else ("<|think|>", "<|turn|>model"),
+                vision=vision,
+                image_param_style="mmproj" if vision else "none",
+                mmproj_path=mmproj_path,
+                confidence="high",
+            )
+        return ModelCapability(
+            model_id=os.path.basename(gguf_path),
+            thinking=False,
+            param_style="none",
+            levels=[],
+            default_level="Off",
+            vision=vision,
+            image_param_style="mmproj" if vision else "none",
+            mmproj_path=mmproj_path,
+            confidence="high",
+        )
     except Exception:
-        pass
+        return None
+
+
+def inspect_gguf_chat_template(gguf_path: str) -> Optional[ModelCapability]:
+    if "gemma" in gguf_path.lower():
+        return None
+    cap = inspect_gguf_metadata(gguf_path)
+    if cap and cap.thinking:
+        return cap
     return None
 
 
@@ -136,7 +213,6 @@ def get_model_capability(
     model_path: str = "",
     timeout: float = 3.0,
 ) -> ModelCapability:
-    """Universal thinking level and capability detector. Zero hardcoded mocks."""
     cache_key = f"{provider_id}:{model_id}" if provider_id else model_id
 
     if "gemma" in model_id.lower():
@@ -160,17 +236,22 @@ def get_model_capability(
 
     if cache_key in cache:
         item = cache[cache_key]
-        cap = ModelCapability(
-            model_id=item.get("model_id", model_id),
-            thinking=item.get("thinking", False),
-            param_style=item.get("param_style", "none"),
-            levels=item.get("levels", []),
-            default_level=item.get("default_level", "Medium" if item.get("thinking") else "Off"),
-            max_budget=item.get("max_budget", 32768),
-            thinking_tags=tuple(item.get("thinking_tags", ("<think>", "</think>"))),
-        )
-        _MEM_CACHE[cache_key] = cap
-        return cap
+        if "confidence" in item and "vision" in item:
+            cap = ModelCapability(
+                model_id=item.get("model_id", model_id),
+                thinking=item.get("thinking", False),
+                param_style=item.get("param_style", "none"),
+                levels=item.get("levels", []),
+                default_level=item.get("default_level", "Medium" if item.get("thinking") else "Off"),
+                max_budget=item.get("max_budget", 32768),
+                thinking_tags=tuple(item.get("thinking_tags", ("<think>", "</think>"))),
+                vision=item.get("vision", False),
+                image_param_style=item.get("image_param_style", "none"),
+                mmproj_path=item.get("mmproj_path"),
+                confidence=item.get("confidence", "low"),
+            )
+            _MEM_CACHE[cache_key] = cap
+            return cap
 
     if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)) or model_id.endswith(".gguf"):
         actual_path = model_path
@@ -188,7 +269,7 @@ def get_model_capability(
                     break
 
         if actual_path and os.path.exists(actual_path):
-            cap = inspect_gguf_chat_template(actual_path)
+            cap = inspect_gguf_metadata(actual_path)
             if cap:
                 cache[cache_key] = asdict(cap)
                 _save_cache(cache)
@@ -207,6 +288,7 @@ def get_model_capability(
                 default_level="Medium",
                 max_budget=32768,
                 thinking_tags=("<think>", "</think>"),
+                confidence="low",
             )
         else:
             cap = ModelCapability(
@@ -215,6 +297,7 @@ def get_model_capability(
                 param_style="none",
                 levels=[],
                 default_level="Off",
+                confidence="low",
             )
         cache[cache_key] = asdict(cap)
         _save_cache(cache)
@@ -233,6 +316,9 @@ def get_model_capability(
                 for m in data.get("data", []):
                     if m.get("id") == model_id:
                         params = m.get("supported_parameters", [])
+                        arch = m.get("architecture") or {}
+                        modalities = arch.get("input_modalities") or []
+                        has_vision = "image" in [str(x).lower() for x in modalities]
                         if "reasoning" in params or "include_reasoning" in params:
                             mid_low = model_id.lower()
                             if any(k in mid_low for k in ["o1", "o3", "o4"]):
@@ -254,6 +340,23 @@ def get_model_capability(
                                 param_style=param_style,
                                 levels=levels,
                                 default_level="Medium" if "Medium" in levels else levels[0],
+                                vision=has_vision,
+                                image_param_style="inline_base64" if has_vision else "none",
+                                confidence="high",
+                            )
+                            cache[cache_key] = asdict(cap)
+                            _save_cache(cache)
+                            return cap
+                        if has_vision:
+                            cap = ModelCapability(
+                                model_id=model_id,
+                                thinking=False,
+                                param_style="none",
+                                levels=[],
+                                default_level="Off",
+                                vision=True,
+                                image_param_style="inline_base64",
+                                confidence="high",
                             )
                             cache[cache_key] = asdict(cap)
                             _save_cache(cache)
@@ -296,6 +399,7 @@ def get_model_capability(
             levels=levels,
             default_level="Medium",
             max_budget=64000,
+            confidence="low",
         )
         cache[cache_key] = asdict(cap)
         _save_cache(cache)
@@ -309,6 +413,7 @@ def get_model_capability(
             param_style="reasoning_effort",
             levels=levels,
             default_level="Medium",
+            confidence="low",
         )
         cache[cache_key] = asdict(cap)
         _save_cache(cache)
@@ -322,6 +427,7 @@ def get_model_capability(
             param_style="tag_based" if provider_id != "deepseek" else "reasoning_effort",
             levels=levels,
             default_level="Medium",
+            confidence="low",
         )
         cache[cache_key] = asdict(cap)
         _save_cache(cache)
@@ -333,6 +439,7 @@ def get_model_capability(
         param_style="none",
         levels=[],
         default_level="Off",
+        confidence="low",
     )
     cache[cache_key] = asdict(cap)
     _save_cache(cache)
@@ -340,13 +447,6 @@ def get_model_capability(
 
 
 def clean_model_name(raw_name: str) -> str:
-    """Cleans up raw model filenames or identifiers into polished human-readable display names.
-    Examples:
-        'gemma-4-E4B-it-Q4_0.gguf' -> 'Gemma 4 E4B IT'
-        'Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf' -> 'Qwen 2.5 Coder 7B Instruct'
-        'deepseek-ai/DeepSeek-R1' -> 'DeepSeek R1'
-        'meta-llama/Llama-3.1-8B-Instruct' -> 'Llama 3.1 8B Instruct'
-    """
     if not raw_name:
         return "Model"
     name = raw_name.strip()

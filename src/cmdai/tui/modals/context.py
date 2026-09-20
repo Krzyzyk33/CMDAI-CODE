@@ -16,7 +16,6 @@ from ...core.settings import get_settings
 
 
 class ContextDirectoryTree(DirectoryTree):
-    """Workspace directory tree with live pinned-file status indicator and space-bar pin/unpin."""
 
     BINDINGS = [
         Binding("space", "toggle_pin", "Toggle Pin", priority=True),
@@ -65,7 +64,6 @@ class ContextDirectoryTree(DirectoryTree):
 
 
 class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
-    """Clean split modal inspecting context window budget and picking workspace files into context."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),

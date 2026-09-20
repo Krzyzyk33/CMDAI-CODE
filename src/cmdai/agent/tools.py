@@ -15,6 +15,7 @@ class AgentContext:
         self.workdir = os.path.abspath(workdir)
         self.todo_list: List[str] = []
         self.mode: str = "auto"
+        self.pending_images: List[Dict[str, str]] = []
 
     def resolve_path(self, path: str) -> str:
         if os.path.isabs(path):
@@ -65,7 +66,6 @@ def tool_read(ctx: AgentContext, path: str, lines: Optional[str] = None) -> Dict
 def tool_edit(
     ctx: AgentContext, path: str, old: str, new: str
 ) -> Dict[str, Any]:
-    """Replaces `old` with `new` and generates OpenCode style diff lines without `|` or `+/-`."""
     full_path = ctx.resolve_path(path)
     if not os.path.exists(full_path):
         return {"success": False, "error": f"File not found: {path}"}
@@ -114,8 +114,18 @@ def tool_edit(
             f.write(new_content)
 
         is_valid, verify_err = verify_code_syntax(full_path, new_content)
+        if not is_valid:
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {
+                "success": False,
+                "error": f"Syntax verification failed: {verify_err}",
+                "path": ctx.rel_path(full_path),
+                "verification": "FAILED",
+                "verification_error": verify_err,
+            }
 
-        test_res = run_project_tests(ctx.workdir, target_file=full_path) if is_valid else {}
+        test_res = run_project_tests(ctx.workdir, target_file=full_path)
         test_status = ""
         if test_res.get("has_tests"):
             if test_res["passed"]:
@@ -133,8 +143,8 @@ def tool_edit(
             "success": True,
             "path": ctx.rel_path(full_path),
             "diff_entries": diff_entries,
-            "verification": "OK" if is_valid else "FAILED",
-            "verification_error": verify_err if not is_valid else "",
+            "verification": "OK",
+            "verification_error": "",
             "test_result": test_res,
         }
         if test_status:
@@ -152,8 +162,16 @@ def tool_write(ctx: AgentContext, path: str, content: str) -> Dict[str, Any]:
             f.write(content)
 
         is_valid, verify_err = verify_code_syntax(full_path, content)
+        if not is_valid:
+            return {
+                "success": False,
+                "error": f"Syntax verification failed: {verify_err}",
+                "path": ctx.rel_path(full_path),
+                "verification": "FAILED",
+                "verification_error": verify_err,
+            }
 
-        test_res = run_project_tests(ctx.workdir, target_file=full_path) if is_valid else {}
+        test_res = run_project_tests(ctx.workdir, target_file=full_path)
         test_status = ""
         if test_res.get("has_tests"):
             if test_res["passed"]:
@@ -172,8 +190,8 @@ def tool_write(ctx: AgentContext, path: str, content: str) -> Dict[str, Any]:
             "path": ctx.rel_path(full_path),
             "lines": len(content.splitlines()),
             "content": content,
-            "verification": "OK" if is_valid else "FAILED",
-            "verification_error": verify_err if not is_valid else "",
+            "verification": "OK",
+            "verification_error": "",
             "test_result": test_res,
         }
         if test_status:
@@ -367,7 +385,6 @@ def tool_web(ctx: AgentContext, url_or_query: str) -> Dict[str, Any]:
 
 
 def tool_bugs(ctx: AgentContext) -> Dict[str, Any]:
-    """Skanuje projekt pod kątem błędów składniowych (Python, JSON, TOML)."""
     from .verifier import scan_project_bugs
     report = scan_project_bugs(ctx.workdir)
     return {
@@ -378,7 +395,6 @@ def tool_bugs(ctx: AgentContext) -> Dict[str, Any]:
 
 
 def tool_code_search(ctx: AgentContext, query: str) -> Dict[str, Any]:
-    """Przeszukuje bazę symboli AST / SQLite FTS5 projektu."""
     try:
         from ..indexer.ast_indexer import ProjectIndexer
         indexer = ProjectIndexer(ctx.workdir)
@@ -403,7 +419,6 @@ def tool_scratch(
     new_text: str = "",
     todos: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Manages the TODO queue displayed above the input box (max 3 visible at once, scrollable)."""
     action_lower = action.lower().strip()
     if action_lower in ("add", "push"):
         if note:
@@ -455,3 +470,102 @@ def tool_scratch(
 
 
 tool_todo = tool_scratch
+
+
+SCREENSHOT_MAX_BYTES = 2_000_000
+SCREENSHOT_MAX_DIM = 1920
+
+
+def _screenshot_dir() -> str:
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "cmdai_screenshots")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _find_window_rect(title_sub: str = "") -> Optional[Dict[str, int]]:
+    if os.name != "nt":
+        return None
+    try:
+        import win32gui
+    except ImportError:
+        return None
+    needle = (title_sub or "").strip().lower()
+    found: Dict[str, int] = {}
+
+    def _cb(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        try:
+            text = win32gui.GetWindowText(hwnd) or ""
+        except Exception:
+            return
+        if needle and needle not in text.lower():
+            return
+        try:
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            return
+        if r - l > 50 and b - t > 50 and not found:
+            found.update({"left": l, "top": t, "width": r - l, "height": b - t})
+
+    try:
+        if not needle:
+            import win32gui as _wg
+            hwnd = _wg.GetForegroundWindow()
+            l, t, r, b = _wg.GetWindowRect(hwnd)
+            if r - l > 50 and b - t > 50:
+                return {"left": l, "top": t, "width": r - l, "height": b - t}
+            return None
+        win32gui.EnumWindows(_cb, None)
+    except Exception:
+        return None
+    return found or None
+
+
+def tool_screenshot(ctx: AgentContext, target: str = "active_window") -> Dict[str, Any]:
+    import uuid
+    target = (target or "active_window").strip()
+    rect = _find_window_rect("" if target.lower() == "active_window" else target)
+    try:
+        import mss
+    except ImportError:
+        return {"success": False, "error": "mss package not installed (pip install mss)"}
+    try:
+        out = os.path.join(_screenshot_dir(), f"{uuid.uuid4().hex}.png")
+        with mss.mss() as sct:
+            monitor = {"left": rect["left"], "top": rect["top"], "width": rect["width"], "height": rect["height"]} if rect else sct.monitors[0]
+            shot = sct.grab(monitor)
+            try:
+                from PIL import Image
+                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                img.thumbnail((SCREENSHOT_MAX_DIM, SCREENSHOT_MAX_DIM))
+                img.save(out, "PNG")
+            except ImportError:
+                import mss.tools
+                mss.tools.to_png(shot.rgb, shot.size, output=out)
+        size = os.path.getsize(out)
+        if size > SCREENSHOT_MAX_BYTES:
+            try:
+                from PIL import Image
+                img = Image.open(out)
+                img.thumbnail((1280, 1280))
+                img.save(out, "PNG", optimize=True)
+                size = os.path.getsize(out)
+            except ImportError:
+                pass
+        return {"success": True, "path": out, "size_bytes": size, "target": target}
+    except Exception as e:
+        return {"success": False, "error": f"screenshot failed: {e}"}
+
+
+def tool_vision(ctx: AgentContext, image_path: str = "", question: str = "") -> Dict[str, Any]:
+    p = (image_path or "").strip()
+    if not p or not os.path.exists(p):
+        return {"success": False, "error": f"image not found: {image_path}"}
+    if os.path.getsize(p) > SCREENSHOT_MAX_BYTES * 2:
+        return {"success": False, "error": "image too large (>4MB)"}
+    entry = {"path": os.path.abspath(p), "question": (question or "").strip()}
+    ctx.pending_images.append(entry)
+    return {"success": True, "path": entry["path"], "question": entry["question"],
+            "note": "image queued, it will be attached to the next model request"}

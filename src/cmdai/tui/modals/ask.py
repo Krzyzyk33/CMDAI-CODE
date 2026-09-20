@@ -10,13 +10,6 @@ from textual.widgets.option_list import Option
 
 
 class AskModal(ModalScreen[Any]):
-    """Interactive question/confirmation modal matching OpenCode design.
-    Features:
-    - Q1, Q2, Q3... Summary stepper tabs at top
-    - Left/Right arrow key navigation between questions
-    - Dynamic custom write-in input
-    - Final Confirmation & Summary view with Q&A overview and Start execution
-    """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),

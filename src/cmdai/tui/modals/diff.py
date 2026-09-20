@@ -12,7 +12,6 @@ from textual.widgets.option_list import Option
 
 
 class DiffModal(ModalScreen[None]):
-    """Editor-styled split diff viewer: file tree/list on left, file diff on right."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),

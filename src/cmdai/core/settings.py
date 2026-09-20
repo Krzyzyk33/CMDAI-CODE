@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "version": "1.0.0",
@@ -9,9 +9,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "default_model": "",
     "default_provider": "openrouter",
     "generation": {
-        "temperature": 0.6,
+        "temperature": 0.3,
         "top_p": 0.95,
-        "max_tokens": 4096,
+        "max_tokens": 0,
+        "repetition_penalty": 1.1,
         "reasoning_level": "Medium",
     },
     "agent": {
@@ -30,13 +31,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enable_thinking_animation": True,
     },
     "api_keys": {},
+    "custom_models": {},
     "installed_loaders": ["vulkan", "cpu"],
     "active_loader": "cpu",
 }
 
 
 class SettingsManager:
-    """Manages persistent settings and configuration for CMDAI CODE."""
 
     def __init__(self, base_dir: Optional[str] = None):
         if base_dir:
@@ -125,6 +126,22 @@ class SettingsManager:
     def set(self, key: str, value: Any) -> bool:
         self.config[key] = value
         return self.save_config()
+
+    def get_custom_models(self, provider_id: str) -> List[str]:
+        c_dict = self.config.get("custom_models", {})
+        if not isinstance(c_dict, dict):
+            return []
+        return list(c_dict.get(provider_id, []))
+
+    def add_custom_model(self, provider_id: str, model_id: str) -> bool:
+        if "custom_models" not in self.config or not isinstance(self.config["custom_models"], dict):
+            self.config["custom_models"] = {}
+        prov_list = self.config["custom_models"].setdefault(provider_id, [])
+        clean_id = model_id.strip()
+        if clean_id and clean_id not in prov_list:
+            prov_list.append(clean_id)
+            return self.save_config()
+        return True
 
 
 _instance: Optional[SettingsManager] = None

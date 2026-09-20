@@ -8,7 +8,6 @@ from textual.widgets.option_list import Option
 
 
 class ActionMenuModal(ModalScreen[str]):
-    """Context action menu for message cards."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Close"),
@@ -16,24 +15,25 @@ class ActionMenuModal(ModalScreen[str]):
     ]
 
     ACTIONS = [
-        ("copy", "Copy message text to clipboard"),
-        ("regenerate", "Regenerate response"),
-        ("undo", "Undo last turn"),
+        ("copy", "Copy only this user message"),
+        ("revert", "Remove user + response and revert files"),
+        ("delete", "Remove user + response only"),
     ]
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Message Actions", id="modal-title")
                 yield Static("[esc]", id="modal-esc")
-
             yield OptionList(
-                Option("  Copy text to clipboard"),
-                Option("  Regenerate assistant response"),
-                Option("  Undo user message & response"),
+                Option("  Copy user message"),
+                Option("  Revert turn + files"),
+                Option("  Delete turn"),
                 id="modal-list",
             )
-
             with Horizontal(id="modal-footer"):
                 yield Static("[enter: Execute action]  [esc: Close]")
 

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import threading
 import subprocess
@@ -74,7 +74,6 @@ def _send_linux_notification(title: str, message: str) -> None:
 
 
 def send_desktop_notification(title: str, message: str) -> None:
-    """Send cross-platform desktop notification asynchronously in background thread."""
     def _worker():
         try:
             if sys.platform == "win32":

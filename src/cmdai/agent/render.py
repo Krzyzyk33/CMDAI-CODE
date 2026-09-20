@@ -13,15 +13,6 @@ def render_tool_header(
     spinner_frame: str = "",
     is_error: bool = False,
 ) -> Text:
-    """Renders the single line for a tool (gray when normal, bold red when failed).
-    
-    Requirements:
-    - Exactly 1 line
-    - Gray text (#8b949e) when normal, Red (#f85149) when failed/error
-    - Animated spinner (⠋ ⠙ ⠹...) when running
-    - Full dot ● when collapsed, hollow dot ○ when expanded
-    - ZERO elapsed time!
-    """
     text = Text()
 
     tl = tool_name.lower()
@@ -48,26 +39,29 @@ def render_tool_header(
         glyph = "○  " if is_expanded else "●  "
         text.append(glyph, style="bold #f85149")
         text.append(f"{t_name}", style="bold #f85149")
-        if summary:
+        if summary and str(summary).strip().lower() not in ("failed", "execution failed"):
             text.append(f" {summary}", style="#ff7b72")
         text.append(" [failed]", style="dim #f85149")
         return text
 
+    is_sum = tl in ("summarizing", "summarize", "compact", "context_compact")
     if is_running:
-        glyph = spinner_frame or "●"
-        text.append(f"{glyph}  ", style="bold #8b949e")
+        glyph = spinner_frame or ("⌬" if is_sum else "●")
+        text.append(f"{glyph}  ", style="bold #58a6ff" if is_sum else "bold #8b949e")
         text.append(f"{t_name}", style="bold #8b949e")
         if summary:
             text.append(f" {summary}", style="#c9d1d9")
     elif is_expanded:
-        text.append("○  ", style="#8b949e")
+        glyph = "⌬  " if is_sum else "○  "
+        text.append(glyph, style="bold #58a6ff" if is_sum else "#8b949e")
         if summary:
             text.append(f"{t_name} ", style="bold #8b949e")
             text.append(summary, style="#8b949e")
         else:
             text.append(f"{t_name}", style="bold #8b949e")
     else:
-        text.append("●  ", style="#8b949e")
+        glyph = "⌬  " if is_sum else "●  "
+        text.append(glyph, style="bold #58a6ff" if is_sum else "#8b949e")
         if summary:
             text.append(f"{t_name} ", style="bold #8b949e")
             text.append(summary, style="#8b949e")
@@ -78,7 +72,6 @@ def render_tool_header(
 
 
 def render_edit_diff_opencode(diff_entries: List[tuple], target_file: str = "") -> Text:
-    """Renders OpenCode style unified diff with marker background highlight and no +/- symbols."""
     output = Text(no_wrap=True)
     if target_file:
         base_name = target_file.split(" (")[0].strip()
@@ -117,7 +110,6 @@ def render_edit_diff_side_by_side(diff_entries: List[tuple], target_file: str = 
 
 
 def render_command_output(stdout: str, stderr: str, cmd: str = "") -> Text:
-    """Renders clean command output with terminal prompt matching OpenCode."""
     output = Text()
     if cmd:
         output.append("  $ ", style="bold #58a6ff")

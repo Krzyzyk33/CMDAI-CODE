@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 
 
 class BackgroundHTTPServer:
-    """Daemon background HTTP server providing Ollama and OpenAI compatible endpoints."""
 
     def __init__(
         self,

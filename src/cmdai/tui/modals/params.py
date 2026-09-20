@@ -20,7 +20,6 @@ REASONING_LEVELS = ["Off", "Low", "Medium", "High", "xHigh", "Max"]
 
 
 class ParamEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
-    """Modal for typing and editing a specific generation parameter value (Swift style)."""
 
     BINDINGS = [
         Binding("escape", "cancel_edit", "Cancel"),
@@ -82,7 +81,6 @@ class ParamEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
 
 class ParamsModal(ModalScreen[None]):
-    """Generation parameters modal matching Swift ParamsModal with immediate editing and persistence."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),
@@ -121,7 +119,7 @@ class ParamsModal(ModalScreen[None]):
 
         for idx, spec in enumerate(GEN_PARAM_SPECS):
             key = spec[0]
-            default_val = 0.6 if key == "temperature" else (0.95 if key == "top_p" else (2048 if key == "max_tokens" else 1.1))
+            default_val = 0.3 if key == "temperature" else (0.95 if key == "top_p" else (0 if key == "max_tokens" else 1.1))
             val = self.gen.get(key, default_val)
             if key == "max_tokens" and val == 0:
                 display = "[dim]0 (unlimited)[/]"
@@ -167,7 +165,7 @@ class ParamsModal(ModalScreen[None]):
             spec = GEN_PARAM_SPECS[idx]
             key, _alias, cast, lo, hi = spec
             self._edit_idx = idx
-            current_val = self.gen.get(key, 0.6 if key == "temperature" else (0.95 if key == "top_p" else 2048))
+            current_val = self.gen.get(key, 0.3 if key == "temperature" else (0.95 if key == "top_p" else (0 if key == "max_tokens" else 1.1)))
             self.app.push_screen(ParamEditScreen(key, current_val, lo, hi, cast), self._on_param_edited)
         else:
             cap = get_model_capability(self.current_model, self.current_provider)

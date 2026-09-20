@@ -17,6 +17,14 @@ class SubagentProgress:
     tool_arg: Optional[str] = None
     thought: Optional[str] = None
     tokens_count: int = 0
+    goal: str = ""
+    system_prompt: str = ""
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    findings: List[str] = field(default_factory=list)
+    error: str = ""
+    missing: str = ""
+    example: str = ""
+    success: bool = True
 
 @dataclass
 class SubagentResult:
@@ -26,3 +34,5 @@ class SubagentResult:
     findings: List[str] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
     system_prompt: str = ""
+    tokens_in: int = 0
+    tokens_out: int = 0

@@ -25,8 +25,6 @@ import subprocess
 
 
 class SimpleGGUFLoader:
-    """Manages loading and running local GGUF models in an isolated out-of-process worker
-    to prevent UI freezing, memory lock, and GIL contention."""
 
     def __init__(self, models_dir: Optional[str] = None):
         if not models_dir:
@@ -96,7 +94,6 @@ class SimpleGGUFLoader:
             return False
 
     def unload(self) -> None:
-        """Unloads current model from memory in the worker process."""
         with self._lock:
             if self._proc and self._proc.poll() is None:
                 try:
@@ -110,7 +107,6 @@ class SimpleGGUFLoader:
             self.current_loader = None
 
     def close(self) -> None:
-        """Closes and terminates background worker process."""
         with self._lock:
             if self._proc:
                 try:

@@ -33,7 +33,6 @@ from ..core.settings import get_settings
 from ..core.notifier import send_desktop_notification
 from ..core.exporter import export_session_to_html
 from .modals.actions import ActionMenuModal
-from .modals.api_key import ApiKeyModal
 from .modals.approval import EditInspectModal
 from .modals.ask import AskModal
 from .modals.commit import CommitModal
@@ -48,6 +47,7 @@ from .modals.prompts import SystemPromptModal
 from .modals.sessions import SessionsModal
 from .modals.settings import LoaderModal, SettingsModal
 from .modals.stats import StatsModal
+from .modals.releases import ReleasesModal, UpdateNoticeModal
 from .styles import SWIFT_CSS
 from .widgets import (
     ApprovalBar,
@@ -58,7 +58,6 @@ from .widgets import (
     ThinkingBlock,
     TodoPreviewBar,
     ToolBlock,
-    SubagentBlock,
     UserMessageCard,
     copy_text_to_clipboard,
 )
@@ -95,13 +94,6 @@ CODE_PARTS = [
 
 
 def get_hero_logo(d: Optional[datetime.date] = None) -> str:
-    """Return daily rotating ANSI logo matching original CMDAI CODE repo:
-    cycle 0: whole logo white
-    cycle 1: CMDAI gray, CODE white
-    cycle 2: CMDAI white, CODE gray
-    cycle 3: both gray
-    Then cycles back to whole logo white.
-    """
     if d is None:
         d = datetime.date.today()
     day_of_year = d.timetuple().tm_yday
@@ -129,26 +121,75 @@ LOGO_HERO = get_hero_logo()
 
 
 class ChatScroll(VerticalScroll):
-    """Chat container that immediately pauses auto-scroll upon any scroll-up event, eliminating bounce."""
+
+    def _scroll_target_y(self) -> float:
+        try:
+            t = getattr(self, "scroll_target_y", None)
+            if t is not None:
+                return float(t)
+        except Exception:
+            pass
+        try:
+            return float(self.scroll_y)
+        except Exception:
+            return 0.0
+
+    def _is_at_bottom(self, target_y: Optional[float] = None) -> bool:
+        try:
+            y = float(target_y) if target_y is not None else self._scroll_target_y()
+            return bool(y >= (float(self.max_scroll_y) - 2)) or bool(
+                getattr(self, "is_vertical_scroll_end", False)
+            )
+        except Exception:
+            return False
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         app = getattr(self, "app", None)
         if app is not None:
             app.auto_scroll_enabled = False
             app._last_user_scroll_time = time.time()
-        self.scroll_relative(y=-3, animate=False)
+        try:
+            target = max(0.0, self._scroll_target_y() - 3)
+            self.scroll_to(y=target, animate=False, immediate=True)
+        except Exception:
+            try:
+                self.scroll_relative(y=-3, animate=False, immediate=True)
+            except TypeError:
+                self.scroll_relative(y=-3, animate=False)
+        event.prevent_default()
         event.stop()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self.scroll_relative(y=3, animate=False)
+        try:
+            target = min(float(self.max_scroll_y), self._scroll_target_y() + 3)
+            self.scroll_to(y=target, animate=False, immediate=True)
+        except Exception:
+            try:
+                self.scroll_relative(y=3, animate=False, immediate=True)
+            except TypeError:
+                self.scroll_relative(y=3, animate=False)
         app = getattr(self, "app", None)
-        if app is not None and (self.scroll_y >= (self.max_scroll_y - 2) or getattr(self, "is_vertical_scroll_end", False)):
-            app.auto_scroll_enabled = True
+        if app is not None:
+            try:
+                if self._is_at_bottom():
+                    app.auto_scroll_enabled = True
+                    app._last_user_scroll_time = 0.0
+                    try:
+                        app._set_follow_hint(False)
+                    except Exception:
+                        pass
+                else:
+                    # User is manually working back down: stay manual for a
+                    # moment so streaming does not yank the view away.
+                    app.auto_scroll_enabled = False
+                    app._last_user_scroll_time = time.time()
+            except Exception:
+                pass
+        event.prevent_default()
         event.stop()
 
 
 class CMDAICodeTUI(App):
-    """Swift-identical Textual TUI for CMDAI CODE."""
 
     CSS = SWIFT_CSS
     HINTS_VISIBLE_ROWS: int = 5
@@ -162,6 +203,8 @@ class CMDAICodeTUI(App):
         Binding("backtab", "cycle_mode", "Cycle Mode", show=False, priority=True),
         Binding("pageup", "scroll_chat_up", "Scroll chat up", show=False, priority=True),
         Binding("pagedown", "scroll_chat_down", "Scroll chat down", show=False, priority=True),
+        Binding("home", "scroll_chat_top", "Scroll to chat start", show=False, priority=True),
+        Binding("end", "scroll_chat_bottom", "Scroll to chat end", show=False, priority=True),
         Binding("shift+up", "scroll_chat_line_up", "Scroll line up", show=False, priority=True),
         Binding("shift+down", "scroll_chat_line_down", "Scroll line down", show=False, priority=True),
         Binding("ctrl+up", "scroll_chat_line_up", "Scroll line up", show=False, priority=True),
@@ -175,6 +218,7 @@ class CMDAICodeTUI(App):
         self.workdir = os.path.abspath(workdir)
         self.session_manager = SessionManager(project_dir=self.workdir)
         self.current_session_id: str = f"session_{int(time.time())}"
+        self.session_title: str = ""
         self._last_escape_time: float = 0.0
 
         self.current_provider: str = self.settings.config.get("default_provider", "openrouter")
@@ -218,14 +262,19 @@ class CMDAICodeTUI(App):
             "- <tool:web>url_or_query</tool:web> : Web fetch or search\n"
             "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue\n"
             "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation\n"
+            "- <tool:mcps /> : List configured MCP servers (connected ones unlock <server>_<tool>)\n"
+            "- <tool:screenshot target=\"active_window\" /> + <tool:vision image_path=\"file.png\" question=\"...\" /> : Only listed in the agent section below when the loaded model supports vision\n"
         )
 
         self.messages: List[Dict[str, Any]] = []
+        self._turn_counter: int = 0
         self.in_chat_mode: bool = False
         self.is_generating: bool = False
         self.abort_requested: bool = False
         self.auto_scroll_enabled: bool = True
         self._last_user_scroll_time: float = 0.0
+        self._last_auto_scroll_time: float = 0.0
+        self._follow_hint_visible: bool = False
 
         self._hint_matches: List[str] = []
         self._hint_sel: int = -1
@@ -237,9 +286,15 @@ class CMDAICodeTUI(App):
         self.agent_ctx.mode = self.agent_mode
         self.pinned_files: Dict[str, str] = {}
         self._last_modified_files: List[str] = []
+        try:
+            from ..mcp.client import MCPClient
+            self.mcp_client = MCPClient()
+        except Exception:
+            self.mcp_client = None
         self.agent_runner = AgentRunner(
             ctx=self.agent_ctx,
             on_todo_updated=self._on_todo_updated,
+            mcp_client=self.mcp_client,
         )
         self._current_assistant_card: Optional[AssistantTurnCard] = None
 
@@ -264,6 +319,7 @@ class CMDAICodeTUI(App):
         with Vertical(id="hero-view"):
             with Vertical(id="hero-card"):
                 yield Static(LOGO_HERO, id="hero-logo")
+                yield Static("", id="hero-version")
                 with Vertical(id="hero-input-box"):
                     yield VerticalScroll(id="hero-cmd-hints")
                     yield AutoExpandingInput(id="hero-prompt-input")
@@ -313,7 +369,13 @@ class CMDAICodeTUI(App):
             on_tool_finish=self._on_tool_finish,
             on_todo_updated=self._on_todo_updated,
             ask_handler=self._handle_agent_ask,
+            mcp_client=self.mcp_client,
         )
+        try:
+            if self.mcp_client is not None:
+                self.mcp_client.connect_autostart(getattr(self.settings, "base_dir", os.getcwd()))
+        except Exception:
+            pass
 
         port = self.settings.config.get("server", {}).get("port", 8080)
         self.http_server = BackgroundHTTPServer(port=port, app_ref=self)
@@ -321,6 +383,38 @@ class CMDAICodeTUI(App):
 
         hero_inp = self.query_one("#hero-prompt-input", AutoExpandingInput)
         self.set_focus(hero_inp)
+        self._update_terminal_title()
+        self.set_timer(0.6, self._maybe_show_update_notice)
+        self._refresh_hero_version()
+        self._refresh_hero_version_live()
+
+    def _refresh_hero_version(self) -> None:
+        try:
+            from ..core.releases import get_display_version
+            ver = get_display_version()
+            if ver and not ver.lower().startswith("v"):
+                ver = f"v{ver}"
+            base = get_hero_logo()
+            lines = base.split("\n")
+            if ver and lines:
+                lines[-1] = lines[-1] + f"  [#888888]{ver}[/]"
+            self.query_one("#hero-logo", Static).update("\n".join(lines))
+            try:
+                self.query_one("#hero-version", Static).update("")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    @work(thread=True)
+    def _refresh_hero_version_live(self) -> None:
+        try:
+            from ..core.releases import get_releases
+            rels, src = get_releases(refresh=True)
+            if rels:
+                self.call_from_thread(self._refresh_hero_version)
+        except Exception:
+            pass
 
     def _refresh_capabilities(self) -> None:
         try:
@@ -441,8 +535,8 @@ class CMDAICodeTUI(App):
 
     def _open_diff_window(self) -> None:
         try:
-            diff_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "editor", "diff_app.py")
-            self._spawn_terminal_window(diff_py, "CMDAI CODE Diff", self.workdir)
+            from .modals.diff import DiffModal
+            self.push_screen(DiffModal(workdir=self.workdir))
         except Exception as e:
             self.notify(f"Failed to launch diff: {e}", severity="error")
 
@@ -471,8 +565,8 @@ class CMDAICodeTUI(App):
                 self._pending_approval_evt.set()
             elif getattr(self, "_post_turn_approval_active", False):
                 self._post_turn_approval_active = False
-                self._cmd_undo()
-                self._last_modified_files.clear()
+                files_hint = msg.details.get("files", []) if msg.details else []
+                self._revert_files(files_hint)
                 self.notify("Changes rejected and reverted.", severity="warning", timeout=2.5)
         elif msg.action == "diff":
             self._open_diff_window()
@@ -501,7 +595,6 @@ class CMDAICodeTUI(App):
         options: List[str],
         details: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Called from agent runner thread in Code mode or on ask tool."""
         evt = threading.Event()
         res: List[str] = [options[0] if options else "Yes, proceed"]
 
@@ -587,86 +680,192 @@ class CMDAICodeTUI(App):
     def on_thinking_clicked(self, event: events.Click) -> None:
         self.cycle_thinking()
 
+    def _chat_target_y(self, cs) -> float:
+        try:
+            t = getattr(cs, "scroll_target_y", None)
+            if t is not None:
+                return float(t)
+        except Exception:
+            pass
+        try:
+            return float(cs.scroll_y)
+        except Exception:
+            return 0.0
+
+    def _chat_is_at_bottom(self, cs, target_y: Optional[float] = None) -> bool:
+        try:
+            y = float(target_y) if target_y is not None else self._chat_target_y(cs)
+            return bool(y >= (float(cs.max_scroll_y) - 2)) or bool(
+                getattr(cs, "is_vertical_scroll_end", False)
+            )
+        except Exception:
+            return False
+
+    def _mark_scrolled_up(self) -> None:
+        self.auto_scroll_enabled = False
+        self._last_user_scroll_time = time.time()
+
+    def _mark_scrolled_down(self, cs, target_y: Optional[float] = None) -> None:
+        try:
+            if self._chat_is_at_bottom(cs, target_y):
+                self.auto_scroll_enabled = True
+                self._last_user_scroll_time = 0.0
+                self._set_follow_hint(False)
+            else:
+                self.auto_scroll_enabled = False
+                self._last_user_scroll_time = time.time()
+        except Exception:
+            pass
+
+    def _set_follow_hint(self, visible: bool) -> None:
+        if visible == getattr(self, "_follow_hint_visible", False):
+            return
+        self._follow_hint_visible = visible
+        try:
+            if visible:
+                self.query_one("#input-meta-right", Static).update(
+                    "[dim]esc: cancel[/]  [b #58a6ff]v nowe [/][dim]— End aby wrocic[/dim]"
+                )
+            else:
+                self.query_one("#input-meta-right", Static).update("[dim]esc: cancel[/dim]")
+        except Exception:
+            pass
+
     def _scroll_chat_to_end_if_enabled(self, force: bool = False) -> None:
         try:
             cs = self.query_one("#chat-scroll", VerticalScroll)
             if force:
                 self.auto_scroll_enabled = True
                 self._last_user_scroll_time = 0.0
-                cs.scroll_end(animate=False)
+                self._last_auto_scroll_time = time.time()
+                self._set_follow_hint(False)
+                try:
+                    cs.scroll_end(animate=False, immediate=True)
+                except TypeError:
+                    cs.scroll_end(animate=False)
                 return
 
             if not getattr(self, "auto_scroll_enabled", True):
-                return
-
-            if time.time() - getattr(self, "_last_user_scroll_time", 0.0) < 2.0:
                 return
 
             if getattr(cs, "is_vertical_scrollbar_grabbed", False):
                 self.auto_scroll_enabled = False
                 return
 
-            if cs.max_scroll_y > 0 and cs.scroll_y < (cs.max_scroll_y - 2):
-                self.auto_scroll_enabled = False
+            # User is reading above: never yank the view while they scroll.
+            # Down-to-bottom clears this lockout via _mark_scrolled_down.
+            if time.time() - getattr(self, "_last_user_scroll_time", 0.0) < 2.0:
+                self._set_follow_hint(True)
                 return
 
-            cs.scroll_end(animate=False)
+            # Follow only when already near the bottom; otherwise leave the
+            # user's reading position alone and just hint about new content.
+            try:
+                pos = self._chat_target_y(cs)
+                if float(cs.max_scroll_y) > 0 and pos < (float(cs.max_scroll_y) - 6):
+                    self._set_follow_hint(True)
+                    return
+            except Exception:
+                pass
+
+            # Throttle: token streams call this very often; 5x/s is enough.
+            now = time.time()
+            if now - getattr(self, "_last_auto_scroll_time", 0.0) < 0.2:
+                return
+            self._last_auto_scroll_time = now
+            self._set_follow_hint(False)
+            try:
+                cs.scroll_end(animate=False, immediate=True)
+            except TypeError:
+                cs.scroll_end(animate=False)
         except Exception:
             pass
 
-    def action_scroll_chat_up(self) -> None:
-        self.auto_scroll_enabled = False
-        self._last_user_scroll_time = time.time()
+    def _chat_scroll_by(self, delta: float, is_up: bool) -> None:
         try:
-            self.query_one("#chat-scroll", VerticalScroll).scroll_page_up(animate=False)
+            cs = self.query_one("#chat-scroll", VerticalScroll)
+        except Exception:
+            return
+        if is_up:
+            self._mark_scrolled_up()
+        try:
+            base = self._chat_target_y(cs)
+            if is_up:
+                target = max(0.0, base + delta)
+            else:
+                try:
+                    target = min(float(cs.max_scroll_y), base + delta)
+                except Exception:
+                    target = base + delta
+            try:
+                cs.scroll_to(y=target, animate=False, immediate=True)
+            except TypeError:
+                cs.scroll_relative(y=delta, animate=False)
+        except Exception:
+            pass
+        if not is_up:
+            self._mark_scrolled_down(cs)
+
+    def action_scroll_chat_up(self) -> None:
+        try:
+            cs = self.query_one("#chat-scroll", VerticalScroll)
+            self._mark_scrolled_up()
+            try:
+                cs.scroll_page_up(animate=False)
+            except TypeError:
+                cs.scroll_page_up()
         except Exception:
             pass
 
     def action_scroll_chat_down(self) -> None:
         try:
             cs = self.query_one("#chat-scroll", VerticalScroll)
-            cs.scroll_page_down(animate=False)
-            if cs.scroll_y >= (cs.max_scroll_y - 2) or getattr(cs, "is_vertical_scroll_end", False):
-                self.auto_scroll_enabled = True
+            try:
+                cs.scroll_page_down(animate=False)
+            except TypeError:
+                cs.scroll_page_down()
+            # Page scroll is deferred: decide from the requested target.
+            self.call_after_refresh(self._mark_scrolled_down, cs)
+        except Exception:
+            pass
+
+    def action_scroll_chat_top(self) -> None:
+        """Always provide a reliable route back to the first message."""
+        self._mark_scrolled_up()
+        try:
+            self.query_one("#chat-scroll", VerticalScroll).scroll_home(animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_chat_bottom(self) -> None:
+        try:
+            cs = self.query_one("#chat-scroll", VerticalScroll)
+            try:
+                cs.scroll_end(animate=False, immediate=True)
+            except TypeError:
+                cs.scroll_end(animate=False)
+            self.auto_scroll_enabled = True
+            self._last_user_scroll_time = 0.0
+            self._set_follow_hint(False)
         except Exception:
             pass
 
     def action_scroll_chat_line_up(self) -> None:
-        self.auto_scroll_enabled = False
-        self._last_user_scroll_time = time.time()
-        try:
-            self.query_one("#chat-scroll", VerticalScroll).scroll_relative(y=-2, animate=False)
-        except Exception:
-            pass
+        self._chat_scroll_by(-2, is_up=True)
 
     def action_scroll_chat_line_down(self) -> None:
-        try:
-            cs = self.query_one("#chat-scroll", VerticalScroll)
-            cs.scroll_relative(y=2, animate=False)
-            if cs.scroll_y >= (cs.max_scroll_y - 2) or getattr(cs, "is_vertical_scroll_end", False):
-                self.auto_scroll_enabled = True
-        except Exception:
-            pass
+        self._chat_scroll_by(2, is_up=False)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self.auto_scroll_enabled = False
-        self._last_user_scroll_time = time.time()
-        try:
-            self.query_one("#chat-scroll", VerticalScroll).scroll_relative(y=-3, animate=False)
-        except Exception:
-            pass
+        # ChatScroll already handles + stops wheel events over the chat.
+        # This is only a fallback for wheel events over the input dock.
+        self._chat_scroll_by(-3, is_up=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        try:
-            cs = self.query_one("#chat-scroll", VerticalScroll)
-            cs.scroll_relative(y=3, animate=False)
-            if cs.scroll_y >= (cs.max_scroll_y - 2) or getattr(cs, "is_vertical_scroll_end", False):
-                self.auto_scroll_enabled = True
-        except Exception:
-            pass
+        # Fallback for wheel events outside ChatScroll (e.g. over input).
+        self._chat_scroll_by(3, is_up=False)
 
     def action_toggle_tools(self) -> None:
-        """Toggle tool blocks expansion/collapse via Ctrl+T."""
         try:
             blocks = list(self.query(ToolBlock))
             if not blocks:
@@ -689,15 +888,6 @@ class CMDAICodeTUI(App):
         self.exit()
 
     def action_handle_interrupt(self) -> None:
-        """Handles Ctrl+C safely without crashing the app:
-        - If generating: safely cancel generation.
-        - If text is selected in focused widget: copy selection to clipboard.
-        - If any ToolBlock is expanded: copy expanded tool details/diff/code to clipboard.
-        - If any ThinkingBlock is expanded: copy thinking to clipboard.
-        - If a modal is open: dismiss or copy its content.
-        - If prompt input has text: copy prompt text to clipboard (preserving input).
-        - If prompt is empty: copy latest assistant message to clipboard.
-        """
         try:
             if self.is_generating:
                 self.abort_requested = True
@@ -914,7 +1104,6 @@ class CMDAICodeTUI(App):
             pass
 
     def _switch_to_chat_view(self) -> None:
-        """Alias for backwards compatibility."""
         self._switch_to_chat()
 
     def _add_msg(self, css_class: str, text: str) -> Static:
@@ -923,6 +1112,20 @@ class CMDAICodeTUI(App):
         container.mount(w)
         container.scroll_end(animate=False)
         return w
+
+    def _feedback(self, text: str) -> None:
+        if self.in_chat_mode:
+            try:
+                self._add_msg("system-msg", text)
+                return
+            except Exception:
+                pass
+        try:
+            import re
+            plain = re.sub(r"\[.*?\]", "", text).strip()
+            self.notify(plain[:220], timeout=3.0)
+        except Exception:
+            pass
 
 
     @on(AutoExpandingInput.Submitted, "#hero-prompt-input")
@@ -1131,7 +1334,7 @@ class CMDAICodeTUI(App):
                 "/clear", "/reset", "/exit", "/tools", "/status",
                 "/diff", "/changes", "/commit", "/ci", "/plan", "/tasks",
                 "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
-                "/cd"
+                "/cd", "/changelog", "/mcp"
             )
             if cmd in modal_cmds:
                 pass
@@ -1149,7 +1352,8 @@ class CMDAICodeTUI(App):
 
         try:
             chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
-            user_msg = UserMessageCard(prompt)
+            self._turn_counter += 1
+            user_msg = UserMessageCard(prompt, turn_id=self._turn_counter)
             chat_scroll.mount(user_msg)
             chat_scroll.scroll_end(animate=False)
         except Exception:
@@ -1158,20 +1362,11 @@ class CMDAICodeTUI(App):
         in_toks = max(1, len(prompt.split()) * 4 // 3)
         self.stats["tokens_in"] += in_toks
 
-        self.messages.append({"role": "user", "content": prompt})
-        try:
-            self.session_manager.save_session(
-                session_id=self.current_session_id,
-                messages=self.messages,
-                model_id=self.current_model_id,
-                stats=self.stats,
-            )
-        except Exception:
-            pass
+        self.messages.append({"role": "user", "content": prompt, "turn_id": self._turn_counter})
+        self._save_current_session()
         self.start_generation(prompt)
 
     def handle_submit(self, text: str) -> None:
-        """Compatibility wrapper."""
         self._handle_submit(text, from_hero=(not self.in_chat_mode))
 
     def _dispatch_command(self, raw: str) -> bool:
@@ -1195,8 +1390,6 @@ class CMDAICodeTUI(App):
             "/diff": self._cmd_diff,
             "/changes": self._cmd_diff,
             "/editor": self._cmd_editor,
-            "/undo": self._cmd_undo,
-            "/rollback": self._cmd_undo,
             "/test": self._cmd_test,
             "/commit": self._cmd_commit,
             "/ci": self._cmd_commit,
@@ -1213,7 +1406,6 @@ class CMDAICodeTUI(App):
             "/drop": self._cmd_drop,
             "/cd": self._cmd_cd,
             "/models": self._cmd_models,
-            "/agent": self._cmd_agent,
             "/tools": self._cmd_tools,
             "/status": self._cmd_status,
             "/init": self._cmd_init,
@@ -1226,10 +1418,10 @@ class CMDAICodeTUI(App):
             "/summarize": self._cmd_summarize,
             "/compact": self._cmd_summarize,
             "/stats": self._cmd_stats,
+            "/changelog": self._cmd_releases,
+            "/mcp": self._cmd_mcp,
             "/modelinfo": self._cmd_modelinfo,
             "/loader": self._cmd_loader,
-            "/api-key": self._cmd_apikey,
-            "/key": self._cmd_apikey,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
         }
@@ -1241,10 +1433,6 @@ class CMDAICodeTUI(App):
             return True
         handler(arg)
         return True
-
-    def _cmd_apikey(self, arg: str = "") -> None:
-        provider = arg.strip().lower() or self.current_provider
-        self.push_screen(ApiKeyModal(provider), lambda _: None)
 
     def _cmd_quit(self, arg: str = "") -> None:
         self.action_quit_app()
@@ -1300,21 +1488,19 @@ class CMDAICodeTUI(App):
         modal_cmds = ("/models", "/system", "/sessions", "/stats", "/modelinfo",
                       "/quit", "/new", "/params", "/help", "/loader", "/settings",
                       "/tools", "/status", "/diff", "/changes", "/commit", "/ci",
-                      "/plan", "/tasks", "/context", "/ctx", "/export", "/add", "/mode", "/thinking")
+                      "/plan", "/tasks", "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
+                      "/changelog", "/mcp")
         if not self.in_chat_mode and cmd not in modal_cmds:
             self._switch_to_chat()
         self._dispatch_command(cmd)
 
     def _cmd_new(self, arg: str = "") -> None:
         if self.messages:
-            self.session_manager.save_session(
-                session_id=self.current_session_id,
-                messages=self.messages,
-                model_id=self.current_model_id,
-                stats=self.stats,
-            )
+            self._save_current_session()
         self.messages.clear()
         self.current_session_id = f"session_{int(time.time())}"
+        self.session_title = ""
+        self._update_terminal_title()
         self.stats = {
             "tokens_in": 0,
             "tokens_out": 0,
@@ -1331,26 +1517,84 @@ class CMDAICodeTUI(App):
     def reset_session(self) -> None:
         self._cmd_new()
 
+    def _save_current_session(self) -> None:
+        try:
+            self.session_manager.save_session(
+                session_id=self.current_session_id,
+                messages=self.messages,
+                model_id=self.current_model_id,
+                stats=self.stats,
+                title=self.session_title,
+            )
+        except Exception:
+            pass
+
+    def _update_terminal_title(self) -> None:
+        try:
+            if os.name != "nt":
+                return
+            import ctypes
+            name = self.session_title.strip() or "new session"
+            ctypes.windll.kernel32.SetConsoleTitleW(f"CC \u25cf {name}")
+        except Exception:
+            pass
+
+    def _maybe_auto_name_session(self) -> None:
+        try:
+            if self.session_title.strip() or len(self.messages) < 2 or self.is_generating:
+                if self.session_title.strip():
+                    self.call_from_thread(self._update_terminal_title)
+                return
+            first_u = next((m.get("content", "") for m in self.messages if m.get("role") == "user"), "")
+            first_a = next((m.get("content", "") for m in self.messages if m.get("role") == "assistant" and m.get("content")), "")
+            if not first_u:
+                return
+            self._name_session_worker(first_u[:500], first_a[:500])
+        except Exception:
+            pass
+
+    @work(thread=True)
+    def _name_session_worker(self, user_text: str, assistant_text: str) -> None:
+        try:
+            title = ""
+            naming = [
+                {"role": "system", "content": "You name chat sessions. Reply with a short title only, max 6 words, no quotes, no punctuation at the end."},
+                {"role": "user", "content": f"User: {user_text}\nAssistant: {assistant_text}"},
+            ]
+            if self.current_provider == "local_gguf":
+                title, _ = self.gguf_loader.stream_chat(messages=naming, temperature=0.3, max_tokens=32, model_filename=self.current_model_id)
+            else:
+                from ..core.providers import stream_chat_completion
+                title, _ = stream_chat_completion(
+                    provider_id=self.current_provider, model_id=self.current_model_id,
+                    messages=naming, api_key=self.settings.get_api_key(self.current_provider),
+                    generation_params={"temperature": 0.3, "max_tokens": 32},
+                )
+            title = " ".join(str(title or "").strip().strip("\"'").split())[:80]
+            if not title or len(title) < 3 or "error" in title.lower()[:20]:
+                return
+            self.session_title = title
+            self.call_from_thread(self._apply_session_title, title)
+        except Exception:
+            pass
+
+    def _apply_session_title(self, title: str) -> None:
+        try:
+            self.session_title = title
+            self._save_current_session()
+            self._update_terminal_title()
+        except Exception:
+            pass
+
     def _cmd_models(self, arg: str = "") -> None:
         self.push_screen(
             ModelSelectModal(self.current_provider, self.current_model_id),
             self._on_model_selected,
         )
 
-    def _cmd_agent(self, arg: str = "") -> None:
-        agent_enabled = self.settings.config.get("agent", {}).get("enabled", True)
-        new_val = not agent_enabled
-        self.settings.config.setdefault("agent", {})["enabled"] = new_val
-        self.settings.save_config()
-        if not self.in_chat_mode:
-            self._switch_to_chat()
-        self._add_msg("system-msg", f"[b #58a6ff]/agent {'ON' if new_val else 'OFF'}[/]")
-
     def _cmd_sessions(self, arg: str = "") -> None:
         if self.is_generating:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", "[yellow]Generation in progress — stop it first (Esc).[/]")
+            self._feedback("[yellow]Generation in progress — stop it first (Esc).[/]")
             return
         self.push_screen(SessionsModal(workdir=self.workdir), self._on_session_selected)
 
@@ -1376,36 +1620,26 @@ class CMDAICodeTUI(App):
         }
         spec = param_specs.get(name)
         if spec is None:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"Unknown parameter: [b]{name}[/] — one of: temperature, top_p, max_tokens, repetition_penalty")
+            self._feedback(f"Unknown parameter: [b]{name}[/] — one of: temperature, top_p, max_tokens, repetition_penalty")
             return
         key, cast, lo, hi = spec
         gen = self.settings.config.setdefault("generation", {})
         if len(parts) < 2 or not parts[1].strip():
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"[b #58a6ff]•[/] {key}: {gen.get(key, 0.6)}")
+            self._feedback(f"[b #58a6ff]•[/] {key}: {gen.get(key, 0.6)}")
             return
         val_str = parts[1].strip()
         try:
             val = cast(val_str)
         except ValueError:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"Invalid value for {key}: [b]{val_str}[/]")
+            self._feedback(f"Invalid value for {key}: [b]{val_str}[/]")
             return
         if val < lo or val > hi:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"{key} must be between {lo} and {hi}")
+            self._feedback(f"{key} must be between {lo} and {hi}")
             return
         old = gen.get(key, 0.6)
         gen[key] = val
         self.settings.save_config()
-        if not self.in_chat_mode:
-            self._switch_to_chat()
-        self._add_msg("system-msg", f"[b #58a6ff]•[/] {key}: {old} → {val}")
+        self._feedback(f"[b #58a6ff]•[/] {key}: {old} → {val}")
 
     def _cmd_settings(self, arg: str = "") -> None:
         self.push_screen(SettingsModal(), lambda _: None)
@@ -1428,6 +1662,131 @@ class CMDAICodeTUI(App):
     def _cmd_stats(self, arg: str = "") -> None:
         self.push_screen(StatsModal(self.stats), lambda _: None)
 
+    def _cmd_releases(self, arg: str = "") -> None:
+        self.push_screen(ReleasesModal(), lambda _: None)
+
+    def show_user_actions(self, turn_id: int) -> None:
+        from .modals.actions import ActionMenuModal
+        self.push_screen(ActionMenuModal(), lambda act: self._on_user_action(act, turn_id))
+
+    def _on_user_action(self, action: object, turn_id: int) -> None:
+        if not action or int(turn_id) <= 0:
+            return
+        if action == "copy":
+            try:
+                text = next((str(m.get("content", "")) for m in self.messages if m.get("role") == "user" and int(m.get("turn_id") or -1) == int(turn_id)), "")
+                if text and copy_text_to_clipboard(text):
+                    self.notify("User message copied.", timeout=2.0)
+            except Exception:
+                pass
+            return
+        if action in ("revert", "delete"):
+            if action == "revert":
+                self._revert_turn_files()
+            self._delete_turn(int(turn_id))
+
+    def _revert_files(self, file_list: Optional[List[str]] = None) -> List[str]:
+        import subprocess
+        targets = set()
+        if file_list:
+            targets.update(file_list)
+        if getattr(self, "_last_modified_files", None):
+            targets.update(self._last_modified_files)
+        if not targets:
+            try:
+                res = subprocess.run(["git", "status", "--porcelain"], cwd=self.workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        if line.strip():
+                            targets.add(line[2:].strip().strip('"'))
+            except Exception:
+                pass
+
+        reverted = []
+        for f in targets:
+            full_p = os.path.join(self.workdir, f) if not os.path.isabs(f) else f
+            rel = os.path.relpath(full_p, self.workdir)
+            try:
+                check_tracked = subprocess.run(["git", "ls-files", "--error-unmatch", rel], cwd=self.workdir, capture_output=True)
+                if check_tracked.returncode == 0:
+                    res = subprocess.run(["git", "checkout", "HEAD", "--", rel], cwd=self.workdir, capture_output=True)
+                    if res.returncode == 0:
+                        reverted.append(rel)
+                else:
+                    if os.path.exists(full_p):
+                        os.remove(full_p)
+                        reverted.append(rel)
+            except Exception:
+                pass
+
+        if hasattr(self, "_last_modified_files"):
+            self._last_modified_files.clear()
+        return reverted
+
+    def _revert_turn_files(self) -> None:
+        reverted = self._revert_files()
+        if reverted:
+            self.notify(f"Reverted {len(reverted)} file(s).", timeout=2.5)
+        else:
+            self.notify("No file changes to revert.", timeout=2.0)
+
+    def _delete_turn(self, turn_id: int) -> None:
+        try:
+            idx = next((i for i, m in enumerate(self.messages) if m.get("role") == "user" and int(m.get("turn_id") or -1) == int(turn_id)), None)
+            if idx is None:
+                return
+            end = idx + 1
+            while end < len(self.messages) and self.messages[end].get("role") != "user":
+                end += 1
+            del self.messages[idx:end]
+            try:
+                self.session_manager.save_session(session_id=self.current_session_id, messages=self.messages, model_id=self.current_model_id, stats=self.stats, title=self.session_title)
+            except Exception:
+                pass
+            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+            for card in list(chat_scroll.query(UserMessageCard)):
+                if int(getattr(card, "turn_id", -1)) == int(turn_id):
+                    try:
+                        card.remove()
+                    except Exception:
+                        pass
+            self.notify(f"Turn {turn_id} removed.", timeout=2.0)
+        except Exception:
+            pass
+
+    def _maybe_show_update_notice(self) -> None:
+        try:
+            flag = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "cache", "pending_changelog.json")
+            flag = os.path.normpath(flag)
+            if not os.path.exists(flag):
+                return
+            import json
+            with open(flag, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            os.remove(flag)
+            version = str(data.get("version", ""))
+            notes = str(data.get("notes", ""))
+            self.push_screen(UpdateNoticeModal(version=version, notes=notes))
+        except Exception:
+            pass
+
+    def _cmd_mcp(self, arg: str = "") -> None:
+        parts = (arg or "").split()
+        if self.mcp_client is None:
+            self._feedback("[dim]MCP unavailable.[/dim]")
+            return
+        if len(parts) >= 2 and parts[0] == "restart":
+            ok = self.mcp_client.restart(parts[1])
+            self._feedback(f"[b #58a6ff]/mcp restart {parts[1]}:[/] {'connected' if ok else 'failed'}")
+            return
+        if len(parts) >= 2 and parts[0] == "logs":
+            srv = self.mcp_client.servers.get(parts[1])
+            logs = (srv.stderr_log[-20:] if srv else ["unknown server"])
+            self._feedback("[b #58a6ff]/mcp logs:[/]\n" + "\n".join(logs))
+            return
+        lines = self.mcp_client.status_lines() or ["[dim]No MCP servers configured (mcp_config.json).[/dim]"]
+        self._feedback("[b #58a6ff]MCP servers:[/]\n" + "\n".join(lines))
+
     def _cmd_modelinfo(self, arg: str = "") -> None:
         self.push_screen(InfoModal("Model info", self._build_modelinfo_body()))
 
@@ -1436,11 +1795,29 @@ class CMDAICodeTUI(App):
         if arg in ("cpu", "cuda", "vulkan", "ryzen", "npu"):
             self.settings.config["active_loader"] = arg
             self.settings.save_config()
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"⚙️ Active loader set to: [b #58a6ff]{arg}[/]")
+            self._feedback(f"⚙️ Active loader set to: [b #58a6ff]{arg}[/]")
         else:
             self.push_screen(LoaderModal(), self._on_loader_selected)
+
+    def _find_model_file(self, model_id: str) -> str:
+        try:
+            from ..core.resource_limits import find_local_model_file
+            m_dir = getattr(getattr(self, "gguf_loader", None), "models_dir", "models")
+            return find_local_model_file(model_id, models_dir=m_dir, workdir=getattr(self, "workdir", ""))
+        except Exception:
+            return ""
+
+    def _dynamic_limit(self) -> int:
+        try:
+            from ..core.resource_limits import get_dynamic_context_limit
+            m_dir = getattr(getattr(self, "gguf_loader", None), "models_dir", "models")
+            return get_dynamic_context_limit(
+                self.current_model_id, self.current_provider,
+                model_path=self._find_model_file(self.current_model_id) or None,
+                models_dir=m_dir, workdir=getattr(self, "workdir", ""),
+            )
+        except Exception:
+            return 8192
 
     def _build_modelinfo_body(self) -> str:
         import psutil
@@ -1453,7 +1830,7 @@ class CMDAICodeTUI(App):
         cache_budget_70 = max(0.5, (avail_ram_gb * 0.70))
         tokens_70_ram = int(cache_budget_70 * 128_000)
 
-        dyn_limit = get_dynamic_context_limit(self.current_model_id, self.current_provider)
+        dyn_limit = self._dynamic_limit()
         cap = get_model_capability(self.current_model_id, provider_id=self.current_provider)
         gen = self.settings.config.get("generation", {})
         active_reasoning = gen.get("reasoning_level", "Medium")
@@ -1564,12 +1941,9 @@ class CMDAICodeTUI(App):
         if arg:
             self.execute_terminal_command(arg)
         else:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", "Usage: [b]/cmd <command>[/] (e.g. [dim]/cmd dir[/] or [dim]/cmd git status[/])")
+            self._feedback("Usage: [b]/cmd <command>[/] (e.g. [dim]/cmd dir[/] or [dim]/cmd git status[/])")
 
     def _spawn_terminal_window(self, script_path: str, title: str, *args: str) -> None:
-        """Spawn an independent terminal app in a new dedicated console window."""
         import subprocess
         clean_args = [os.path.normpath(str(a)).rstrip("\\") for a in args if str(a).strip()]
         flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
@@ -1621,31 +1995,16 @@ class CMDAICodeTUI(App):
         except Exception as e:
             self.notify(f"Failed to launch editor: {e}", severity="error")
 
-    def _cmd_undo(self, arg: str = "") -> None:
+    def _revert_session_files(self, arg: str = "") -> None:
         if self.is_generating:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", "[yellow]Generation in progress — stop it first (Esc).[/]")
+            self.notify("Generation in progress — stop it first (Esc).", severity="warning", timeout=2.5)
             return
 
-        reverted_files = []
-        if hasattr(self, "_last_modified_files") and self._last_modified_files:
-            import subprocess
-            for f in set(self._last_modified_files):
-                full_p = os.path.join(self.workdir, f) if not os.path.isabs(f) else f
-                if os.path.exists(full_p):
-                    rel = os.path.relpath(full_p, self.workdir)
-                    res = subprocess.run(["git", "checkout", "--", rel], cwd=self.workdir, capture_output=True)
-                    if res.returncode == 0:
-                        reverted_files.append(rel)
-            self._last_modified_files.clear()
-
-        if not self.in_chat_mode:
-            self._switch_to_chat()
-        if reverted_files:
-            self._add_msg("system-msg", f"[b #f0883e]< Reverted changes:[/] {', '.join(reverted_files)}")
+        reverted = self._revert_files()
+        if reverted:
+            self.notify(f"Reverted changes: {', '.join(reverted[:3])}", timeout=2.5)
         else:
-            self._add_msg("system-msg", "[dim]Nothing to revert (no agent file edits recorded in this session).[/dim]")
+            self.notify("No file edits to revert.", timeout=2.0)
 
     def _cmd_test(self, arg: str = "") -> None:
         arg = (arg or "").strip()
@@ -1669,24 +2028,11 @@ class CMDAICodeTUI(App):
 
     def _cmd_commit(self, arg: str = "") -> None:
         arg = (arg or "").strip()
-        if arg.lower() == "modal":
-            self.push_screen(CommitModal(self.workdir, suggested_msg=arg), self._on_commit_done)
-            return
-
-        try:
-            diff_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "editor", "diff_app.py")
-            self._spawn_terminal_window(diff_py, "CMDAI CODE - Git Commit & Diff", self.workdir)
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", "[b #58a6ff]•[/] Opened CMDAI CODE Diff & Commit in a new terminal window.")
-        except Exception as e:
-            self.notify(f"Failed to open commit window: {e}", severity="error")
+        self.push_screen(CommitModal(self.workdir, suggested_msg=arg), self._on_commit_done)
 
     def _on_commit_done(self, msg: Optional[str]) -> None:
         if msg:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"[b #3fb950]✔ Committed successfully:[/] [white]{msg}[/]")
+            self._feedback(f"[b #3fb950]✔ Committed successfully:[/] [white]{msg}[/]")
 
     def _cmd_review(self, arg: str = "") -> None:
         if self.is_generating:
@@ -1720,21 +2066,19 @@ class CMDAICodeTUI(App):
         self._on_todo_updated(tasks)
 
     def _cmd_debug(self, arg: str = "") -> None:
-        if not self.in_chat_mode:
-            self._switch_to_chat()
         from ..agent.verifier import scan_project_bugs
         report = scan_project_bugs(self.workdir)
         scanned = report.get("scanned_files", 0)
         errors = report.get("errors", {})
         if not errors:
-            self._add_msg("system-msg", f"[b #3fb950]✔ Debug Syntax Check Passed![/] Scanned [b]{scanned}[/] files with [b #3fb950]0 errors[/].")
+            self._feedback(f"[b #3fb950]✔ Debug Syntax Check Passed![/] Scanned [b]{scanned}[/] files with [b #3fb950]0 errors[/].")
         else:
             lines = [f"[b #f85149]⚠️ Syntax Errors Detected[/] ({len(errors)} file(s) with errors out of {scanned} scanned):\n"]
             for fpath, errs in errors.items():
                 lines.append(f"[b white]• {fpath}[/]")
                 for e in errs:
                     lines.append(f"  [#f85149]{e}[/]")
-            self._add_msg("system-msg", "\n".join(lines))
+            self._feedback("\n".join(lines))
 
     def _cmd_index(self, arg: str = "") -> None:
         if not self.in_chat_mode:
@@ -1743,16 +2087,11 @@ class CMDAICodeTUI(App):
             from ..indexer.ast_indexer import ProjectIndexer
             indexer = ProjectIndexer(self.workdir)
             stats = indexer.index_all()
-            self._add_msg(
-                "system-msg",
-                f"[b #58a6ff]⌬ AST Symbol Index Updated[/]: [b white]{stats['indexed_files']}[/] files indexed, "
-                f"[b #3fb950]{stats['total_symbols']}[/] symbols saved to SQLite FTS5 database."
-            )
         except Exception as e:
             self._add_msg("system-msg", f"[#f85149]Indexing failed:[/] {e}")
 
     def _cmd_context(self, arg: str = "") -> None:
-        max_ctx = get_dynamic_context_limit(self.current_model_id, self.current_provider)
+        max_ctx = self._dynamic_limit()
         def _on_context_close(updated_pinned: Optional[Dict[str, str]] = None) -> None:
             if updated_pinned is not None:
                 self.pinned_files = updated_pinned
@@ -1792,16 +2131,12 @@ class CMDAICodeTUI(App):
             )
             rel = os.path.relpath(out_file, self.workdir)
             if self.is_running:
-                if not self.in_chat_mode:
-                    self._switch_to_chat()
-                self._add_msg("system-msg", f"[b #3fb950]Session exported successfully:[/] [b white]{rel}[/]")
+                self._feedback(f"[b #3fb950]Session exported successfully:[/] [b white]{rel}[/]")
                 self.notify(f"Exported to {rel}", timeout=3.5)
             send_desktop_notification("CMDAI CODE", f"Session exported: {rel}")
         except Exception as e:
             if self.is_running:
-                if not self.in_chat_mode:
-                    self._switch_to_chat()
-                self._add_msg("system-msg", f"[#f85149]Failed to export session:[/] {e}")
+                self._feedback(f"[#f85149]Failed to export session:[/] {e}")
 
     def _cmd_add(self, arg: str = "") -> None:
         arg = (arg or "").strip()
@@ -1813,9 +2148,7 @@ class CMDAICodeTUI(App):
                 if arg and os.path.isdir(os.path.join(self.workdir, arg)):
                     target_dir = os.path.normpath(os.path.join(self.workdir, arg))
                 os.startfile(target_dir)
-                if not self.in_chat_mode:
-                    self._switch_to_chat()
-                self._add_msg("system-msg", f"[b #58a6ff]•[/] Opened Windows Explorer in: [b white]{target_dir}[/]")
+                self._feedback(f"[b #58a6ff]•[/] Opened Windows Explorer in: [b white]{target_dir}[/]")
             except Exception as e:
                 self.notify(f"Failed to open Windows Explorer: {e}", severity="error")
 
@@ -1826,9 +2159,7 @@ class CMDAICodeTUI(App):
     def _add_file_to_context(self, rel_path: str) -> None:
         full_p = os.path.join(self.workdir, rel_path) if not os.path.isabs(rel_path) else rel_path
         if not os.path.exists(full_p):
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"[#f85149]File not found:[/] {rel_path}")
+            self._feedback(f"[#f85149]File not found:[/] {rel_path}")
             return
 
         try:
@@ -1837,36 +2168,30 @@ class CMDAICodeTUI(App):
             clean_rel = os.path.relpath(full_p, self.workdir).replace("\\", "/")
             self.pinned_files[clean_rel] = content
             lines = len(content.splitlines())
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"[b #3fb950]+ Pinned to context:[/] [b white]{clean_rel}[/] [dim]({lines} lines)[/dim]")
+            self._feedback(f"[b #3fb950]+ Pinned to context:[/] [b white]{clean_rel}[/] [dim]({lines} lines)[/dim]")
         except Exception as e:
-            if not self.in_chat_mode:
-                self._switch_to_chat()
-            self._add_msg("system-msg", f"[#f85149]Error reading file:[/] {e}")
+            self._feedback(f"[#f85149]Error reading file:[/] {e}")
 
     def _cmd_drop(self, arg: str = "") -> None:
         arg = (arg or "").strip()
-        if not self.in_chat_mode:
-            self._switch_to_chat()
 
         if not self.pinned_files:
-            self._add_msg("system-msg", "[dim]No files currently pinned in context.[/dim]")
+            self._feedback("[dim]No files currently pinned in context.[/dim]")
             return
 
         if not arg or arg.lower() == "all":
             cnt = len(self.pinned_files)
             self.pinned_files.clear()
-            self._add_msg("system-msg", f"[b #f0883e]- Unpinned all {cnt} files from context.[/]")
+            self._feedback(f"[b #f0883e]- Unpinned all {cnt} files from context.[/]")
             return
 
         matched = [k for k in self.pinned_files if arg.lower() in k.lower()]
         if matched:
             for k in matched:
                 del self.pinned_files[k]
-            self._add_msg("system-msg", f"[b #f0883e]- Unpinned from context:[/] {', '.join(matched)}")
+            self._feedback(f"[b #f0883e]- Unpinned from context:[/] {', '.join(matched)}")
         else:
-            self._add_msg("system-msg", f"[dim]File not pinned:[/] {arg} (pinned: {', '.join(self.pinned_files.keys())})")
+            self._feedback(f"[dim]File not pinned:[/] {arg} (pinned: {', '.join(self.pinned_files.keys())})")
 
     def _cmd_cd(self, arg: str = "") -> None:
         target = (arg or "").strip()
@@ -1927,7 +2252,6 @@ class CMDAICodeTUI(App):
         self.notify(f"Directory changed: {os.path.basename(self.workdir) or self.workdir}")
 
     def execute_command(self, cmd_text: str) -> None:
-        """Compatibility wrapper for command execution."""
         self._dispatch_command(cmd_text)
 
     def execute_terminal_command(self, cmd_line: str) -> None:
@@ -1939,7 +2263,8 @@ class CMDAICodeTUI(App):
             self._switch_to_chat()
         try:
             chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
-            user_msg = UserMessageCard(f"!{cmd_line}")
+            self._turn_counter += 1
+            user_msg = UserMessageCard(f"!{cmd_line}", turn_id=self._turn_counter)
             chat_scroll.mount(user_msg)
             card = AssistantTurnCard("Terminal")
             chat_scroll.mount(card)
@@ -1976,22 +2301,9 @@ class CMDAICodeTUI(App):
             self._check_and_warn_model_memory(self.current_provider, self.current_model_id)
 
     def _check_and_warn_model_memory(self, provider: str, model_id: str) -> None:
-        """Inspects model memory demands against host RAM/VRAM and posts an alert card if unsafe."""
         if provider != "local_gguf":
             return
-        m_dir = getattr(self.gguf_loader, "models_dir", "models")
-        candidates = [
-            os.path.join(m_dir, model_id),
-            os.path.join(self.workdir, "models", model_id),
-            os.path.join("D:/CMDAI CODE/models", model_id),
-            os.path.join("E:/CMDAI CODE/models", model_id),
-            model_id,
-        ]
-        found_path = None
-        for c in candidates:
-            if c and os.path.exists(c) and os.path.isfile(c):
-                found_path = c
-                break
+        found_path = self._find_model_file(model_id) or None
         if not found_path:
             return
 
@@ -2019,9 +2331,6 @@ class CMDAICodeTUI(App):
 
 
     def _handle_agent_ask(self, question: str, options: List[str]) -> str:
-        """Invoked synchronously from worker thread by AgentRunner when agent emits <tool:ask>.
-        Displays interactive AskModal in the same single TUI window, waiting for user response.
-        """
         evt = threading.Event()
         res = [""]
 
@@ -2037,7 +2346,6 @@ class CMDAICodeTUI(App):
         return res[0]
 
     def trigger_summarize(self, auto: bool = False) -> None:
-        """Summarizes conversation history using the active model into a single context handoff turn."""
         if not self.messages:
             return
 
@@ -2050,7 +2358,7 @@ class CMDAICodeTUI(App):
 
     @work(thread=True)
     def _summarize_worker(self, tool_block: ToolBlock, auto: bool = False) -> None:
-        ctx_limit = get_dynamic_context_limit(self.current_model_id, self.current_provider)
+        ctx_limit = self._dynamic_limit()
         payload = build_summarization_payload(
             self.messages,
             last_modified_files=getattr(self, "_last_modified_files", None),
@@ -2111,6 +2419,7 @@ class CMDAICodeTUI(App):
             self.reset_session()
             self.current_session_id = session_id
             self.messages = data.get("messages", [])
+            self.session_title = str(data.get("title", "") or "")
             self.stats = data.get("stats") or {
                 "tokens_in": 0,
                 "tokens_out": 0,
@@ -2125,12 +2434,20 @@ class CMDAICodeTUI(App):
                 is_u = m.get("role") == "user"
                 content = m.get("content", "")
                 if is_u:
-                    chat_scroll.mount(UserMessageCard(content))
+                    tid = int(m.get("turn_id") or 0)
+                    if tid <= 0:
+                        self._turn_counter += 1
+                        tid = self._turn_counter
+                        m["turn_id"] = tid
+                    else:
+                        self._turn_counter = max(self._turn_counter, tid)
+                    chat_scroll.mount(UserMessageCard(content, turn_id=tid))
                 else:
                     card = AssistantTurnCard(self.current_model_id, initial_text=content)
                     chat_scroll.mount(card)
 
             chat_scroll.scroll_end(animate=False)
+            self._update_terminal_title()
 
     def _on_prompt_selected(self, result: Any) -> None:
         if not result:
@@ -2176,10 +2493,77 @@ class CMDAICodeTUI(App):
             self._add_msg("system-msg", f"[b #3fb950]• Active system prompt:[/] [b white]{p_name}[/]")
 
 
+    def _attach_pending_images(self, payload_messages: List[Dict[str, Any]]) -> None:
+        pending = list(getattr(self.agent_ctx, "pending_images", []) or [])
+        if not pending:
+            return
+        try:
+            vcap = get_model_capability(self.current_model_id, self.current_provider)
+        except Exception:
+            vcap = None
+        if not vcap or not vcap.vision:
+            self.agent_ctx.pending_images.clear()
+            return
+        if self.current_provider == "local_gguf":
+                                                                                
+                                                                               
+            self.agent_ctx.pending_images.clear()
+            for m in reversed(payload_messages):
+                if m.get("role") == "user" and isinstance(m.get("content"), str):
+                    m["content"] += "\n[vision: %d image(s) captured but the local build has no image projector - describe them from paths if needed]" % len(pending)
+                    break
+            return
+        parts: List[Dict[str, Any]] = []
+        for entry in pending:
+            uri = self._image_to_data_uri(entry.get("path", ""))
+            if not uri:
+                continue
+            q = entry.get("question", "")
+            if q:
+                parts.append({"type": "text", "text": f"[image question] {q}"})
+            parts.append({"type": "image_url", "image_url": {"url": uri}})
+        self.agent_ctx.pending_images.clear()
+        if not parts:
+            return
+        for m in reversed(payload_messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    m["content"] = [{"type": "text", "text": content}, *parts]
+                elif isinstance(content, list):
+                    m["content"] = [*content, *parts]
+                break
+
+    @staticmethod
+    def _image_to_data_uri(path: str) -> str:
+        try:
+            if not path or not os.path.exists(path):
+                return ""
+            if os.path.getsize(path) > 4_000_000:
+                return ""
+            import base64
+            try:
+                from PIL import Image
+                import io
+                img = Image.open(path).convert("RGB")
+                img.thumbnail((1568, 1568))
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=80)
+                return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            except ImportError:
+                import base64 as _b64
+                with open(path, "rb") as f:
+                    return "data:image/png;base64," + _b64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            return ""
+        return ""
+
     def start_generation(self, user_prompt: str) -> None:
         self.is_generating = True
         self.abort_requested = False
         self.auto_scroll_enabled = True
+        self._last_user_scroll_time = 0.0
+        self._set_follow_hint(False)
 
         chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
 
@@ -2220,6 +2604,7 @@ class CMDAICodeTUI(App):
             self.is_generating = False
             self.abort_requested = False
             self.call_from_thread(self._update_meta_bars)
+            self.call_from_thread(self._maybe_auto_name_session)
 
     def _generation_worker_impl(
         self,
@@ -2256,6 +2641,7 @@ class CMDAICodeTUI(App):
             self.agent_runner.on_tool_start = _on_tool_start
             self.agent_runner.on_tool_finish = _on_tool_finish
             self.agent_runner.ask_handler = self._handle_agent_ask
+            self.agent_runner.provider_id = self.current_provider
 
         if self.current_provider == "local_gguf":
             loaded_path = getattr(self.gguf_loader, "current_model_path", "") or ""
@@ -2306,18 +2692,7 @@ class CMDAICodeTUI(App):
                 if now - last_token_render[0] > 0.03 or step_tool_completed[0]:
                     last_token_render[0] = now
 
-                    tool_matches = list(re.finditer(
-                        r'(?:<tool:|call:|<tool_call>call:|<\|tool_call>call:)(\w+)(?:[^>]*?(?:path|target|cmd|query|file|url|note|action)=["\']?([^"\'\s>]+)["\']?)?(?:>([^\n<]{1,60}))?',
-                        accumulated,
-                        flags=re.IGNORECASE,
-                    ))
-                    if tool_matches:
-                        last_call = tool_matches[-1]
-                        gen_name = last_call.group(1)
-                        gen_tgt = last_call.group(2) or last_call.group(3) or ""
-                        self.call_from_thread(assistant_card.set_generating_tool, gen_name, gen_tgt.strip())
-                    else:
-                        self.call_from_thread(assistant_card.clear_generating_tool)
+                    self.call_from_thread(assistant_card.clear_generating_tool)
 
                     clean_preview = self.agent_runner.strip_xml_tool_calls(accumulated) if self.agent_runner else accumulated
                     clean_preview = re.sub(r'(?:<tool:\w*[^>]*|<\|tool_call[^>]*|<tool_call[^>]*)$', '', clean_preview, flags=re.IGNORECASE)
@@ -2339,7 +2714,7 @@ class CMDAICodeTUI(App):
                     last_thinking_render[0] = now
                     self.call_from_thread(self._scroll_chat_to_end_if_enabled)
 
-            ctx_limit = get_dynamic_context_limit(self.current_model_id, self.current_provider)
+            ctx_limit = self._dynamic_limit()
             current_toks = estimate_token_count(self.messages)
             if should_summarize(current_toks, ctx_limit) and len(self.messages) > 1:
                 try:
@@ -2408,7 +2783,12 @@ class CMDAICodeTUI(App):
             agent_on = self.settings.config.get("agent", {}).get("enabled", True)
             if agent_on:
                 from ..agent.runner import get_agent_system_prompt
-                sys_content += get_agent_system_prompt(self.workdir, self.agent_mode)
+                try:
+                    vcap = get_model_capability(self.current_model_id, self.current_provider)
+                    has_vision = bool(vcap and vcap.vision)
+                except Exception:
+                    has_vision = False
+                sys_content += get_agent_system_prompt(self.workdir, self.agent_mode, vision=has_vision)
 
             if getattr(self, "pinned_files", None):
                 pinned_section = ["\n\nPINNED CONTEXT FILES (/add):"]
@@ -2417,6 +2797,7 @@ class CMDAICodeTUI(App):
                 sys_content += "\n".join(pinned_section)
             payload_messages = [{"role": "system", "content": sys_content}]
             payload_messages.extend(self.messages)
+            self._attach_pending_images(payload_messages)
 
             if self.abort_requested:
                 break
@@ -2424,8 +2805,8 @@ class CMDAICodeTUI(App):
             if self.current_provider == "local_gguf":
                 resp, think = self.gguf_loader.stream_chat(
                     messages=payload_messages,
-                    temperature=gen_params.get("temperature", 0.6),
-                    max_tokens=gen_params.get("max_tokens", 2048),
+                    temperature=gen_params.get("temperature", 0.3),
+                    max_tokens=gen_params.get("max_tokens", 0),
                     on_token=on_token,
                     on_thinking=on_thinking,
                     model_filename=self.current_model_id,
@@ -2507,20 +2888,44 @@ class CMDAICodeTUI(App):
 
                 remaining_segments = segments[1:] if (first_seg and first_seg[0] == "text") else segments
 
-                for kind, data in remaining_segments:
+                idx = 0
+                while idx < len(remaining_segments):
                     if self.abort_requested:
                         break
+                    kind, data = remaining_segments[idx]
                     if kind == "text":
                         text_chunk = data
                         self.call_from_thread(assistant_card.append_text_block, text_chunk)
                         self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+                        idx += 1
                     elif kind == "tool":
                         tool_name, args = data
-                        res = self.agent_runner.execute_tool(tool_name, args)
-                        last_tool_failed[0] = bool(res.get("error") or res.get("success") is False)
-                        tool_feedback = self.agent_runner.format_tool_result_for_llm(tool_name, res)
-                        self.messages.append({"role": "user", "content": tool_feedback})
-                        self.call_from_thread(self.refresh)
+                        if tool_name == "subagent":
+                            # Subagents temporarily removed: consume the whole
+                            # subagent batch as disabled-errors so the model
+                            # corrects itself instead of stalling.
+                            j = idx + 1
+                            while j < len(remaining_segments) and remaining_segments[j][0] == "tool" and remaining_segments[j][1][0] == "subagent":
+                                j += 1
+                            _on_tool_start("subagent", (args.get("name") or args.get("role") or "subagent").strip())
+                            err_item = {
+                                "success": False,
+                                "error": "Subagents are temporarily disabled. Do the task yourself using your own tools (read/ls/search/edit/write/command).",
+                            }
+                            _on_tool_finish("subagent", (args.get("name") or args.get("role") or "subagent").strip(), err_item)
+                            last_tool_failed[0] = True
+                            self.messages.append({"role": "user", "content": self.agent_runner.format_tool_result_for_llm("subagent", err_item)})
+                            self.call_from_thread(assistant_card.clear_generating_tool)
+                            self.call_from_thread(self.refresh)
+                            idx = j
+                            continue
+                        else:
+                            res = self.agent_runner.execute_tool(tool_name, args)
+                            last_tool_failed[0] = bool(res.get("error") or res.get("success") is False)
+                            tool_feedback = self.agent_runner.format_tool_result_for_llm(tool_name, res)
+                            self.messages.append({"role": "user", "content": tool_feedback})
+                            self.call_from_thread(self.refresh)
+                            idx += 1
 
                 if self.abort_requested:
                     break
@@ -2554,12 +2959,7 @@ class CMDAICodeTUI(App):
                 pass
 
         try:
-            self.session_manager.save_session(
-                session_id=self.current_session_id,
-                messages=self.messages,
-                model_id=self.current_model_id,
-                stats=self.stats,
-            )
+            self._save_current_session()
         except Exception:
             pass
 
@@ -2590,5 +2990,3 @@ class CMDAICodeTUI(App):
 
         self.is_generating = False
         self.abort_requested = False
-
-

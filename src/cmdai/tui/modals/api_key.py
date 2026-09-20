@@ -10,7 +10,6 @@ from ...core.settings import get_settings
 
 
 class ApiKeyModal(ModalScreen[bool]):
-    """Modal dialog for entering and saving API keys."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -46,6 +45,9 @@ class ApiKeyModal(ModalScreen[bool]):
             with Horizontal(id="modal-footer"):
                 yield Static("[enter: Save & Fetch Models]  [esc: Cancel]")
 
+    def on_mount(self) -> None:
+        self.query_one("#api-key-input", Input).focus()
+
     def action_cancel(self) -> None:
         self.dismiss(False)
 
@@ -53,4 +55,10 @@ class ApiKeyModal(ModalScreen[bool]):
         inp = self.query_one("#api-key-input", Input)
         new_key = inp.value.strip()
         self.settings.set_api_key(self.provider_id, new_key)
+        if self.provider_id == "opencode":
+            self.settings.set_api_key("opencode_zen", new_key)
         self.dismiss(True)
+
+    @on(Input.Submitted, "#api-key-input")
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.action_save()

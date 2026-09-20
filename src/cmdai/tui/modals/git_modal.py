@@ -130,7 +130,6 @@ GitBranchesModal {
 """
 
 class GitBranchesModal(ModalScreen[None]):
-    """Full-screen Git branches & forks management modal with single-line strips and Esc exit."""
 
     CSS = GIT_MODAL_CSS
 

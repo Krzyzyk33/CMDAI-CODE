@@ -8,10 +8,6 @@ from .symbol_db import SymbolDB
 
 
 def extract_symbols_from_code(filepath: str, code: str) -> List[Dict[str, Any]]:
-    """
-    Ekstraktuje symbole (klasy, funkcje, metody) z kodu źródłowego.
-    Używa wbudowanego AST dla Pythona oraz precyzyjnych wyrażeń regularnych dla innych języków.
-    """
     ext = os.path.splitext(filepath)[1].lower()
     symbols: List[Dict[str, Any]] = []
 
@@ -134,10 +130,6 @@ def extract_symbols_from_code(filepath: str, code: str) -> List[Dict[str, Any]]:
 
 
 class ProjectIndexer:
-    """
-    Skaner i zarządca indeksu symboli dla projektu.
-    Zapisuje bazę w `.cmdai_code_project/index.db`.
-    """
 
     def __init__(self, workdir: str = "."):
         self.workdir = os.path.abspath(workdir)
@@ -145,8 +137,22 @@ class ProjectIndexer:
         self.db_path = os.path.join(self.db_dir, "index.db")
         self.db = SymbolDB(self.db_path)
 
+    def index_file(self, filepath: str) -> Dict[str, Any]:
+        full = filepath if os.path.isabs(filepath) else os.path.join(self.workdir, filepath)
+        rel_path = os.path.relpath(full, self.workdir)
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            return {"path": rel_path, "skipped": False, "error": str(e)}
+        file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if self.db.get_file_hash(rel_path) == file_hash:
+            return {"path": rel_path, "skipped": True, "symbols": 0}
+        syms = extract_symbols_from_code(rel_path, content)
+        self.db.add_symbols(rel_path, file_hash, os.path.getmtime(full), syms)
+        return {"path": rel_path, "skipped": False, "symbols": len(syms)}
+
     def index_all(self, force: bool = False) -> Dict[str, Any]:
-        """Skanuje i indeksuje pliki w projekcie."""
         supported_exts = {".py", ".pyw", ".js", ".ts", ".jsx", ".tsx"}
         ignored_dirs = {
             ".git", "node_modules", "venv", ".venv", "__pycache__",
@@ -154,7 +160,10 @@ class ProjectIndexer:
         }
 
         indexed_files = 0
+        skipped_files = 0
+        removed_files = 0
         total_symbols = 0
+        seen: set = set()
 
         for root, dirs, files in os.walk(self.workdir):
             dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith(".")]
@@ -166,13 +175,16 @@ class ProjectIndexer:
 
                 filepath = os.path.join(root, filename)
                 rel_path = os.path.relpath(filepath, self.workdir)
+                seen.add(rel_path)
 
                 try:
                     mtime = os.path.getmtime(filepath)
                     with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                         content = f.read()
-
                     file_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if not force and self.db.get_file_hash(rel_path) == file_hash:
+                        skipped_files += 1
+                        continue
 
                     syms = extract_symbols_from_code(rel_path, content)
                     self.db.add_symbols(rel_path, file_hash, mtime, syms)
@@ -182,11 +194,33 @@ class ProjectIndexer:
                 except Exception:
                     continue
 
+        for stale in self._db_filepaths() - seen:
+            try:
+                self.db.clear_file_symbols(stale)
+                removed_files += 1
+            except Exception:
+                pass
+
+        stats = self.db.get_stats()
         return {
             "indexed_files": indexed_files,
+            "skipped_files": skipped_files,
+            "removed_files": removed_files,
             "total_symbols": total_symbols,
+            "db_files": stats["files"],
+            "db_symbols": stats["symbols"],
             "db_path": self.db_path,
         }
+
+    def _db_filepaths(self) -> set:
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.db_path)
+            rows = conn.execute("SELECT filepath FROM files").fetchall()
+            conn.close()
+            return {r[0] for r in rows}
+        except Exception:
+            return set()
 
     def search(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
         return self.db.search_symbols(query, limit=limit)

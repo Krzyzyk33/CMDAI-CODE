@@ -83,7 +83,6 @@ TOOL_DEFINITIONS = {
 }
 
 class ToolGrammarGenerator:
-    """Generates GBNF grammar for llama.cpp / GGUF constrained decoding of tool calls."""
 
     @staticmethod
     def generate_gbnf(tools: Optional[List[str]] = None) -> str:

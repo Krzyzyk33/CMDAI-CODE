@@ -6,11 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 def verify_code_syntax(filepath: str, content: str) -> Tuple[bool, str]:
-    """
-    Natywna, błyskawiczna (0 ms, 0 tokenów) weryfikacja składniowa kodu.
-    Sprawdza błędy składni (SyntaxError) przed lub po zapisaniu pliku,
-    umożliwiając natychmiastową pętlę samonaprawy modelu.
-    """
     ext = os.path.splitext(filepath)[1].lower()
 
     if ext in (".py", ".pyw"):
@@ -84,10 +79,6 @@ def verify_code_syntax(filepath: str, content: str) -> Tuple[bool, str]:
 
 
 def scan_project_bugs(workdir: str = ".") -> Dict[str, Any]:
-    """
-    Skanuje cały projekt w poszukiwaniu błędów składniowych.
-    Zwraca ustrukturyzowany słownik z listą błędów per plik.
-    """
     abs_workdir = os.path.abspath(workdir)
     errors_by_file: Dict[str, List[str]] = {}
     scanned_count = 0

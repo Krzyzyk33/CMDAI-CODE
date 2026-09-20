@@ -161,7 +161,6 @@ TextArea:focus {
 
 
 class CMDAICodeEditor(App[None]):
-    """Swift-styled terminal code editor for CMDAI CODE."""
 
     CSS = EDITOR_CSS
     TITLE = "CMDAI CODE EDITOR"

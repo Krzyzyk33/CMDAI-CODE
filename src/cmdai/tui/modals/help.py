@@ -11,10 +11,9 @@ from textual.widgets.option_list import Option
 COMMANDS_DOC: Dict[str, str] = {
     "/help": "Browse commands by category — enter opens, enter runs",
     "/new": "Start a fresh conversation — previous stays saved in /sessions",
-    "/models": "Open model picker and switch engines (Local + 23 API providers)",
+    "/models": "Open model picker and switch engines (Local + 33 API providers)",
     "/modelinfo": "Details of the currently loaded model: arch, context, thinking support",
     "/summarize": "Summarize conversation history into compact context handoff",
-    "/agent": "Toggle CMDAI Code Agent mode (file tools, terminal loop) on/off",
     "/params": "View or set generation parameters: temp, top_p, max_tokens, reasoning level",
     "/sessions": "Browse, reopen or delete auto-saved conversations",
     "/system": "Pick, create or switch system prompt",
@@ -23,7 +22,6 @@ COMMANDS_DOC: Dict[str, str] = {
     "/stats": "Session statistics: tokens, response speeds, tool counts",
     "/diff": "Open git diff in a new terminal window",
     "/editor": "Open terminal code editor (VS Code style) in a new window",
-    "/undo": "Safe rollback of files modified during the session",
     "/test": "Auto-detect and run test suite with live output",
     "/commit": "Open git commit in a new terminal window",
     "/review": "Run AI code review on current uncommitted changes",
@@ -37,20 +35,21 @@ COMMANDS_DOC: Dict[str, str] = {
     "/cd": "Change current working directory (/cd <path>)",
     "/mode": "Toggle/cycle agent execution mode (auto / plan / ask)",
     "/thinking": "Cycle/set thinking reasoning level (Off / On / Low / Med / High) if supported",
+    "/changelog": "Show GitHub releases changelog (>= v3.0-alpha)",
+    "/mcp": "MCP servers status (/mcp restart|logs <name>)",
     "/quit": "Quit CMDAI CODE",
 }
 
 HELP_CATEGORIES: List[Tuple[str, List[str]]] = [
     ("Chat & Sessions", ["/new", "/help", "/export", "/summarize", "/sessions", "/stats"]),
-    ("Code Agent & Git", ["/editor", "/diff", "/commit", "/undo", "/test", "/review", "/plan", "/debug", "/index", "/agent", "/mode"]),
+    ("Code Agent & Git", ["/editor", "/diff", "/commit", "/test", "/review", "/plan", "/debug", "/index", "/mode"]),
     ("Context & Files", ["/cd", "/add", "/drop", "/context"]),
     ("Model & Reasoning", ["/models", "/modelinfo", "/params", "/system", "/thinking"]),
-    ("Configuration & Engine", ["/settings", "/loader", "/quit"]),
+    ("Configuration & Engine", ["/settings", "/loader", "/changelog", "/mcp", "/quit"]),
 ]
 
 
 class HelpCommandsModal(ModalScreen[Optional[str]]):
-    """Commands viewer for selected category or all commands with search (Swift style)."""
 
     BINDINGS = [
         Binding("escape", "back", "Back"),
@@ -147,7 +146,6 @@ class HelpCommandsModal(ModalScreen[Optional[str]]):
 
 
 class HelpModal(ModalScreen[Optional[str]]):
-    """Categorized help browser modal matching Swift HelpModal."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),
@@ -206,7 +204,6 @@ class HelpModal(ModalScreen[Optional[str]]):
 
 
 class InfoModal(ModalScreen[None]):
-    """Generic informative modal screen matching Swift InfoModal."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),

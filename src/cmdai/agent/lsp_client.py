@@ -5,12 +5,10 @@ from typing import Any, Dict, List, Optional
 
 
 def is_tool_available(name: str) -> bool:
-    """Checks whether a binary is available on PATH."""
     return shutil.which(name) is not None
 
 
 def run_file_diagnostics(file_path: str, workdir: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Runs available local language server or linter diagnostics on a file."""
     if not os.path.exists(file_path):
         return []
 
@@ -75,7 +73,6 @@ def run_file_diagnostics(file_path: str, workdir: Optional[str] = None) -> List[
 
 
 def format_diagnostics_summary(diagnostics: List[Dict[str, Any]]) -> str:
-    """Formats list of diagnostics into a concise string for agent consumption."""
     if not diagnostics:
         return ""
     lines = ["[LSP DIAGNOSTICS DETECTED]"]

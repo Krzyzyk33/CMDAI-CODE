@@ -119,11 +119,59 @@ class ModelWorker:
         t0 = time.time()
 
         stop_tokens = ["<end_of_turn>", "<|end_of_turn|>", "<eos>", "<|im_end|>", "<|turn_end|>", "</s>"]
+        n_ctx_total = 8192
         try:
+            if hasattr(self.llm, "n_ctx") and callable(self.llm.n_ctx):
+                n_ctx_total = int(self.llm.n_ctx())
+            elif hasattr(self.llm, "n_ctx"):
+                n_ctx_total = int(self.llm.n_ctx)
+        except Exception:
+            n_ctx_total = 8192
+
+        def _count_tokens(text: str) -> int:
+            try:
+                return len(self.llm.tokenize(text.encode("utf-8", errors="replace"), add_bos=False))
+            except Exception:
+                return max(1, len(text.split()) * 4 // 3)
+
+        cleaned_msgs = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = str(m.get("content", "") or "")
+            if len(content) > 7000:
+                content = content[:3000] + "\n\n[... content truncated to fit context window ...]\n\n" + content[-3000:]
+            cleaned_msgs.append({"role": role, "content": content})
+
+        mt = 1024 if (not max_tokens or max_tokens <= 0) else int(max_tokens)
+        safe_budget = max(1024, n_ctx_total - mt - 128)
+
+        total_toks = sum(_count_tokens(m["content"]) + 4 for m in cleaned_msgs)
+        if total_toks > safe_budget and len(cleaned_msgs) > 2:
+            pruned = [cleaned_msgs[0]]
+            tail = cleaned_msgs[1:]
+            tail_toks = 0
+            selected = []
+            for m in reversed(tail):
+                m_toks = _count_tokens(m["content"]) + 4
+                if tail_toks + m_toks > (safe_budget - _count_tokens(pruned[0]["content"]) - 64):
+                    if not selected:
+                        selected.append(m)
+                    break
+                selected.append(m)
+                tail_toks += m_toks
+            pruned.extend(reversed(selected))
+            cleaned_msgs = pruned
+            total_toks = sum(_count_tokens(m["content"]) + 4 for m in cleaned_msgs)
+
+        rem_tokens = max(128, n_ctx_total - total_toks - 16)
+        actual_mt = min(mt, rem_tokens)
+
+        def _run_stream(msgs_to_run, mt_to_run):
+            nonlocal is_in_thinking
             stream = self.llm.create_chat_completion(
-                messages=messages,
+                messages=msgs_to_run,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=mt_to_run,
                 stop=stop_tokens,
                 stream=True,
             )
@@ -188,6 +236,22 @@ class ModelWorker:
                 curr_txt = "".join(full_text)
                 if TOOL_COMPLETE_PATTERNS.search(curr_txt):
                     break
+
+        try:
+            try:
+                _run_stream(cleaned_msgs, actual_mt)
+            except Exception as first_err:
+                err_str = str(first_err).lower()
+                if "exceed context window" in err_str or "requested tokens" in err_str or "context length" in err_str:
+                    emergency_msgs = [cleaned_msgs[0]]
+                    if len(cleaned_msgs) > 1:
+                        last_c = cleaned_msgs[-1]["content"]
+                        if len(last_c) > 2000:
+                            last_c = last_c[:1000] + "\n\n[... truncated ...]\n\n" + last_c[-1000:]
+                        emergency_msgs.append({"role": cleaned_msgs[-1]["role"], "content": last_c})
+                    _run_stream(emergency_msgs, 512)
+                else:
+                    raise first_err
 
             elapsed = time.time() - t0
             sys.stdout.write(json.dumps({

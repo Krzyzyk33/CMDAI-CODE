@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
@@ -31,6 +32,8 @@ class ProviderInfo:
     default_models: List[str] = field(default_factory=list)
     supports_remote_fetch: bool = True
     models_endpoint: str = "/models"
+    needs_custom_auth: bool = False
+    auth_hint: str = ""
 
 
 PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
@@ -52,27 +55,13 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         default_models=[
             "deepseek-v4-flash-free",
             "mimo-v2.5-free",
+            "nemotron-3-ultra-free",
+            "nemotron-3.5-lightning-free",
+            "ling-3.0-flash-fin-free",
+            "jev-1.13-free",
+            "muse-spark-1.3-contributor-free",
             "qwen3.6-plus-free",
             "minimax-m3-free",
-            "nemotron-3-ultra-free",
-            "big-pickle",
-            "claude-3-7-sonnet",
-            "gpt-4o",
-        ],
-        supports_remote_fetch=True,
-    ),
-    "opencode_zen": ProviderInfo(
-        id="opencode_zen",
-        name="OpenCode Zen",
-        base_url="https://opencode.ai/zen/v1",
-        key_url="https://opencode.ai/zen",
-        provider_type="cloud",
-        default_models=[
-            "deepseek-v4-flash-free",
-            "mimo-v2.5-free",
-            "qwen3.6-plus-free",
-            "minimax-m3-free",
-            "nemotron-3-ultra-free",
             "big-pickle",
             "claude-3-7-sonnet",
             "gpt-4o",
@@ -86,11 +75,13 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         key_url="https://openrouter.ai/keys",
         provider_type="cloud",
         default_models=[
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-r1:free",
+            "qwen/qwen-2.5-coder-32b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
             "anthropic/claude-3.7-sonnet",
             "openai/o3-mini",
-            "deepseek/deepseek-r1",
-            "meta-llama/llama-3.3-70b-instruct",
-            "google/gemini-2.0-flash-exp:free",
         ],
     ),
     "openai": ProviderInfo(
@@ -295,10 +286,8 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         base_url="https://api-inference.huggingface.co/v1",
         key_url="https://huggingface.co/settings/tokens",
         provider_type="cloud",
-        default_models=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1",
-        ],
+        default_models=[],
+        supports_remote_fetch=False,
     ),
     "ollama": ProviderInfo(
         id="ollama",
@@ -306,7 +295,7 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         base_url="http://localhost:11434",
         key_url="https://ollama.com",
         provider_type="local",
-        default_models=["llama3.3:latest", "deepseek-r1:latest"],
+        default_models=[],
         models_endpoint="/api/tags",
     ),
     "lmstudio": ProviderInfo(
@@ -325,11 +314,126 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         provider_type="local",
         default_models=[],
     ),
+    "zai": ProviderInfo(
+        id="zai",
+        name="Z.AI (Zhipu)",
+        base_url="https://api.z.ai/api/paas/v4",
+        key_url="https://z.ai/manage-apikey/apikey-list",
+        provider_type="cloud",
+        default_models=[
+            "glm-4.6",
+            "glm-4.5",
+            "glm-4.5-air",
+        ],
+    ),
+    "github_models": ProviderInfo(
+        id="github_models",
+        name="GitHub Models",
+        base_url="https://models.github.ai/inference",
+        key_url="https://github.com/settings/tokens",
+        provider_type="cloud",
+        default_models=[
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "meta/Llama-3.3-70B-Instruct",
+            "deepseek/DeepSeek-R1",
+        ],
+    ),
+    "moonshot": ProviderInfo(
+        id="moonshot",
+        name="Moonshot AI",
+        base_url="https://api.moonshot.ai/v1",
+        key_url="https://platform.moonshot.ai/console/api-keys",
+        provider_type="cloud",
+        default_models=[
+            "kimi-k2-0711-preview",
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+        ],
+    ),
+    "nvidia": ProviderInfo(
+        id="nvidia",
+        name="NVIDIA NIM",
+        base_url="https://integrate.api.nvidia.com/v1",
+        key_url="https://build.nvidia.com",
+        provider_type="cloud",
+        default_models=[
+            "meta/llama-3.3-70b-instruct",
+            "deepseek-ai/deepseek-r1",
+            "qwen/qwen2.5-coder-32b-instruct",
+        ],
+    ),
+    "nebius": ProviderInfo(
+        id="nebius",
+        name="Nebius AI Studio",
+        base_url="https://api.studio.nebius.com/v1",
+        key_url="https://studio.nebius.com/settings/api-keys",
+        provider_type="cloud",
+        default_models=[
+            "meta-llama/Meta-Llama-3.3-70B-Instruct",
+            "deepseek-ai/DeepSeek-R1",
+            "Qwen/Qwen2.5-Coder-32B-Instruct",
+        ],
+    ),
+    "minimax": ProviderInfo(
+        id="minimax",
+        name="MiniMax",
+        base_url="https://api.minimax.io/v1",
+        key_url="https://platform.minimax.io",
+        provider_type="cloud",
+        default_models=[
+            "MiniMax-M2",
+            "MiniMax-Text-01",
+        ],
+    ),
+    "bedrock": ProviderInfo(
+        id="bedrock",
+        name="AWS Bedrock",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        key_url="https://console.aws.amazon.com/bedrock",
+        provider_type="cloud",
+        default_models=[
+            "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "meta.llama3-3-70b-instruct-v1:0",
+        ],
+        supports_remote_fetch=False,
+        needs_custom_auth=True,
+        auth_hint="Bedrock uses AWS SigV4 signing, not a Bearer key. Configure AWS credentials (aws configure) and use an AWS SDK proxy or the 'aws bedrock-runtime' CLI.",
+    ),
+    "vertex": ProviderInfo(
+        id="vertex",
+        name="Google Vertex AI",
+        base_url="https://us-central1-aiplatform.googleapis.com",
+        key_url="https://console.cloud.google.com/vertex-ai",
+        provider_type="cloud",
+        default_models=[
+            "gemini-2.0-flash-001",
+            "claude-3-7-sonnet@20250219",
+        ],
+        supports_remote_fetch=False,
+        needs_custom_auth=True,
+        auth_hint="Vertex AI needs a GCP access token (gcloud auth print-access-token), not a plain API key. Use the Gemini provider entry for key-based access.",
+    ),
+    "copilot": ProviderInfo(
+        id="copilot",
+        name="GitHub Copilot",
+        base_url="https://api.githubcopilot.com",
+        key_url="https://github.com/settings/copilot",
+        provider_type="cloud",
+        default_models=[
+            "gpt-4o",
+            "claude-3.7-sonnet",
+        ],
+        supports_remote_fetch=False,
+        needs_custom_auth=True,
+        auth_hint="Copilot needs a GitHub OAuth device-flow token, not a classic PAT. Sign in via the official Copilot CLI/extension to obtain one.",
+    ),
 }
 
 
 def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, Any]]:
-    """Asynchronously fetches models for a given provider from live API data."""
+    if provider_id == "opencode_zen":
+        provider_id = "opencode"
     info = PROVIDERS_CATALOG.get(provider_id)
     if not info:
         return []
@@ -378,7 +482,7 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                 })
         return found
 
-    if not api_key and provider_id not in ("opencode", "opencode_zen", "openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
+    if not api_key and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
         return []
 
     url = f"{info.base_url}{info.models_endpoint}"
@@ -436,7 +540,10 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                     elif ctx_len >= 1_000:
                         ctx_str = f"{ctx_len // 1_000}k"
 
+                    is_free = "free" in mid.lower() or ":free" in mid.lower() or "free" in name.lower()
                     badge_parts = []
+                    if is_free:
+                        badge_parts.append("FREE")
                     if ctx_str:
                         badge_parts.append(ctx_str)
                     if has_reasoning:
@@ -453,6 +560,14 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         "thinking": has_reasoning,
                         "context_length": ctx_len,
                     })
+
+                def _is_free_item(m_item: Dict[str, Any]) -> bool:
+                    m_id = str(m_item.get("id") or "").lower()
+                    m_name = str(m_item.get("name") or "").lower()
+                    m_badge = str(m_item.get("badge") or "").lower()
+                    return "free" in m_id or ":free" in m_id or "free" in m_name or "free" in m_badge
+
+                res.sort(key=lambda m: (0 if _is_free_item(m) else 1, str(m.get("id") or m.get("name") or "")))
                 return res
 
     except Exception:
@@ -471,18 +586,28 @@ def stream_chat_completion(
     on_thinking: Optional[Callable[[str], None]] = None,
     is_aborted: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, str]:
-    """Streams chat completions with transparent separation of thinking and response tokens.
-    
-    Returns:
-        (full_response, full_thinking)
-    """
     params = generation_params or {}
     cap = get_model_capability(model_id, provider_id=provider_id, api_key=api_key)
     reasoning_level = params.get("reasoning_level", "Medium")
 
+    if provider_id == "opencode_zen":
+        provider_id = "opencode"
     info = PROVIDERS_CATALOG.get(provider_id)
     if not info:
         return f"Unknown provider: {provider_id}", ""
+
+    if provider_id not in ("local_gguf", "ollama", "lmstudio", "vllm") and not api_key:
+        err_msg = f"API key required for {info.name}. Please configure your API key with Ctrl+D in /models or in config.json."
+        if on_token:
+            on_token(err_msg)
+        return err_msg, ""
+
+    if info.needs_custom_auth:
+        err_msg = (f"{info.name} needs special authentication, plain API key is not enough.\n"
+                   f"{info.auth_hint or 'See provider docs for setup.'}")
+        if on_token:
+            on_token(err_msg)
+        return err_msg, ""
 
     full_text = []
     full_thinking = []
@@ -493,6 +618,13 @@ def stream_chat_completion(
         "Content-Type": "application/json",
         "User-Agent": "CMDAI-CODE/1.0",
     }
+    if provider_id in ("opencode", "opencode_zen"):
+        session_uid = str(uuid.uuid4())
+        headers["User-Agent"] = "opencode/1.1.28"
+        headers["x-opencode-session"] = session_uid
+        headers["x-opencode-request"] = str(uuid.uuid4())
+        headers["x-opencode-project"] = "default"
+
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["x-api-key"] = api_key
@@ -500,10 +632,12 @@ def stream_chat_completion(
     payload: Dict[str, Any] = {
         "model": model_id,
         "messages": messages,
-        "temperature": params.get("temperature", 0.6),
-        "max_tokens": params.get("max_tokens", 4096),
+        "temperature": params.get("temperature", 0.3),
         "stream": True,
     }
+    mt = params.get("max_tokens", 0)
+    if mt and int(mt) > 0:
+        payload["max_tokens"] = int(mt)
 
     if cap.thinking and reasoning_level != "Off":
         if cap.param_style == "reasoning_effort":
@@ -516,7 +650,47 @@ def stream_chat_completion(
     try:
         resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60.0)
         if resp.status_code != 200:
-            err_msg = f"API Error [{resp.status_code}]: {resp.text}"
+            err_text = resp.text
+            clean_err = ""
+            try:
+                err_json = resp.json()
+                if isinstance(err_json, dict):
+                    err_obj = err_json.get("error")
+                    if isinstance(err_obj, dict):
+                        clean_err = err_obj.get("message") or str(err_obj)
+                    elif isinstance(err_obj, str):
+                        clean_err = err_obj
+                    elif "message" in err_json:
+                        clean_err = err_json["message"]
+            except Exception:
+                clean_err = err_text
+
+            if provider_id in ("opencode", "opencode_zen"):
+                if not api_key:
+                    err_msg = (
+                        f"⚠ OpenCode Zen Error [{resp.status_code}]: {clean_err or 'Access restricted'}\n\n"
+                        f"The OpenCode Zen gateway requires an API key for third-party access.\n"
+                        f"• Get your API key at: https://opencode.ai/zen\n"
+                        f"• Configure it in /models (Ctrl+D) or in config.json\n"
+                        f"• Or use local offline models (local_gguf) or free models on OpenRouter."
+                    )
+                else:
+                    err_msg = (
+                        f"⚠ OpenCode Zen Error [{resp.status_code}]: {clean_err or err_text}\n\n"
+                        f"Model '{model_id}' is temporarily down upstream or your key cannot access it. "
+                        f"Try selecting another model in /models or verify your key at https://opencode.ai/zen."
+                    )
+            elif provider_id == "openrouter" and resp.status_code == 401:
+                err_msg = (
+                    f"⚠ OpenRouter Error [{resp.status_code}]: {clean_err or 'Authentication required'}\n\n"
+                    f"Free models on OpenRouter require an OpenRouter account API key:\n"
+                    f"• Create a free key at: https://openrouter.ai/keys\n"
+                    f"• Configure it in /models (Ctrl+D) or config.json\n"
+                    f"• Or use local offline models from local_gguf."
+                )
+            else:
+                err_msg = f"⚠ Provider Error [{resp.status_code}]: {clean_err or err_text}"
+
             if on_token:
                 on_token(err_msg)
             return err_msg, ""

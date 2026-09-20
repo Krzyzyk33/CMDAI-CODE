@@ -101,8 +101,6 @@ CheckpointsModal {
 """
 
 class CheckpointsModal(ModalScreen[None]):
-    """Full-screen checkpoints modal with ultra-thin single-line strips (no prompt line),
-    oldest at top, newest at bottom, and exit via Esc."""
 
     CSS = CHECKPOINTS_CSS
 

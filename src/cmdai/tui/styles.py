@@ -43,7 +43,13 @@ Screen {
     width: 100%;
     text-align: center;
     content-align: center middle;
-    margin-bottom: 2;
+    margin-bottom: 1;
+}
+
+#hero-version {
+    width: 100%;
+    height: 0;
+    display: none;
 }
 
 #hero-input-box {
@@ -120,15 +126,26 @@ Screen {
 
 #chat-scroll {
     background: #000000;
-    padding: 0 1 0 2;
+    padding: 0 1 0 3;
     margin: 0;
     width: 100%;
     height: 1fr;
+    /* Mouse wheel and keyboard scrolling stay enabled; the rail itself is
+       intentionally hidden to keep the chat visually clean. */
     scrollbar-size-vertical: 0;
     scrollbar-gutter: auto;
 }
 
 .user-card {
+    background: #161b22;
+    border: none;
+    padding: 1 3;
+    margin: 1 0;
+    width: 100%;
+    color: #e6edf3;
+}
+
+.index-card {
     background: #161b22;
     border: none;
     padding: 1 3;
@@ -144,6 +161,7 @@ Screen {
     margin: 1 0;
     width: 100%;
     color: #e6edf3;
+    min-height: 0;
 }
 
 
@@ -184,14 +202,16 @@ Screen {
     width: 100%;
     height: auto;
     background: transparent;
-    margin: 0 0 1 0;
+    margin: 0;
+    min-height: 0;
 }
 
 .card-thinking {
     width: 100%;
     height: auto;
     background: transparent;
-    margin: 0 0 1 0;
+    margin: 0;
+    min-height: 0;
 }
 
 .card-tools {
@@ -207,6 +227,7 @@ Screen {
     background: transparent;
     margin: 0;
     padding: 0;
+    min-height: 0;
 }
 
 .card-body {
@@ -242,7 +263,7 @@ Screen {
     height: auto;
     width: 100%;
     background: #000000;
-    padding: 1 1 0 2;
+    padding: 1 1 0 3;
     margin: 0;
 }
 
@@ -595,10 +616,10 @@ ModalScreen {
     color: #6e7681;
 }
 
-#modal-search, #sp-name, #api-key-input, #plan-new-input, #commit-input {
+Input, #modal-dialog Input, #modal-search, #sp-name, #api-key-input, #model-name-input, #plan-new-input, #commit-input, #file-search-input {
     background: #161b22;
-    border: none;
-    outline: none;
+    border: none !important;
+    outline: none !important;
     padding: 0 1;
     height: 1;
     min-height: 1;
@@ -607,10 +628,19 @@ ModalScreen {
     color: #e6edf3;
 }
 
-#modal-search:focus, #sp-name:focus, #api-key-input:focus, #ask-custom-input:focus, #plan-new-input:focus, #commit-input:focus {
+Input:focus, Input.-focus, #modal-dialog Input:focus, #modal-dialog Input.-focus, #modal-search:focus, #sp-name:focus, #api-key-input:focus, #model-name-input:focus, #ask-custom-input:focus, #plan-new-input:focus, #commit-input:focus, #file-search-input:focus {
     background: #21262d;
-    border: none;
-    outline: none;
+    border: none !important;
+    outline: none !important;
+}
+
+Input .input--placeholder {
+    color: #6e7681;
+}
+
+Input .input--cursor {
+    background: #58a6ff;
+    color: #0d1117;
 }
 
 #modal-list {

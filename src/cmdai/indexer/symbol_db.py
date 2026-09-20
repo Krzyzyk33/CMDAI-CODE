@@ -4,10 +4,6 @@ from typing import Any, Dict, List, Optional
 
 
 class SymbolDB:
-    """
-    Relacyjna baza danych symboli z pełnotekstowym indeksem FTS5.
-    Umożliwia błyskawiczne (poniżej 1 ms) wyszukiwanie funkcji, klas i metod w projekcie.
-    """
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -51,6 +47,11 @@ class SymbolDB:
             conn.execute("DELETE FROM symbols WHERE filepath = ?", (filepath,))
             conn.execute("DELETE FROM files WHERE filepath = ?", (filepath,))
             conn.commit()
+
+    def get_file_hash(self, filepath: str) -> Optional[str]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT file_hash FROM files WHERE filepath = ?", (filepath,)).fetchone()
+            return row["file_hash"] if row else None
 
     def add_symbols(self, filepath: str, file_hash: str, mtime: float, symbols: List[Dict[str, Any]]) -> None:
         with self._get_connection() as conn:

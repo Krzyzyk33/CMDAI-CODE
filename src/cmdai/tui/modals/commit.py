@@ -12,7 +12,6 @@ from textual.widgets.option_list import Option
 
 
 class CommitModal(ModalScreen[Optional[str]]):
-    """Editor-styled commit viewer: changed files on left, file diff on right, commit message below."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Cancel"),

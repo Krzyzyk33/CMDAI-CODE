@@ -10,7 +10,6 @@ from textual.widgets.option_list import Option
 
 
 class FilePickerModal(ModalScreen[Optional[str]]):
-    """File explorer modal for workspace files (triggered by /add or @)."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Cancel"),

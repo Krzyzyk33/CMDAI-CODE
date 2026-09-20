@@ -15,7 +15,6 @@ from .diff import DiffModal
 
 
 class EditInspectModal(ModalScreen[str]):
-    """Modal dialog displaying proposed file changes in Code mode, with file tree and Diff button in the bottom right."""
 
     BINDINGS = [
         Binding("escape", "reject", "Reject"),

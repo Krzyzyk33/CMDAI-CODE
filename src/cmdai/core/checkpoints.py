@@ -26,7 +26,6 @@ class Checkpoint:
 
 
 class CheckpointManager:
-    """Manages prompt-level checkpoints and snapshots for /undo and diff inspection."""
 
     def __init__(self, workdir: str = "."):
         self.workdir = os.path.abspath(workdir)
@@ -75,7 +74,6 @@ class CheckpointManager:
             return []
 
     def create_checkpoint(self, prompt: str) -> Checkpoint:
-        """Creates a new checkpoint snapshot before executing prompt actions."""
         ts = time.time()
         p_hash = hashlib.sha256(f"{prompt}_{ts}".encode()).hexdigest()[:8]
         time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
@@ -152,7 +150,6 @@ class CheckpointManager:
         return cp
 
     def revert_checkpoint(self, checkpoint_id: str) -> bool:
-        """Reverts workspace changes to the specified checkpoint state."""
         cps = self.list_checkpoints()
         target = next((c for c in cps if c.id == checkpoint_id), None)
         if not target:

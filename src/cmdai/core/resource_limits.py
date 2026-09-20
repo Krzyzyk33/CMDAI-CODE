@@ -52,16 +52,69 @@ def save_model_metadata(model_id: str, provider_id: str, context_length: int) ->
 _GGUF_META_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def _gguf_field_text(field) -> str:
+    try:
+        raw = field.parts[field.data[0]] if field.data else b""
+        if isinstance(raw, (bytes, bytearray)):
+            return raw.decode("utf-8", errors="ignore")
+        if hasattr(raw, "tobytes"):
+            return raw.tobytes().decode("utf-8", errors="ignore")
+        if hasattr(raw, "__iter__"):
+            return bytes(raw).decode("utf-8", errors="ignore")
+        return str(raw)
+    except Exception:
+        return ""
+
+
+def _gguf_field_int(field) -> Optional[int]:
+    try:
+        raw = field.parts[field.data[0]] if field.data else None
+        if raw is None:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            return int.from_bytes(bytes(raw)[:8], "little")
+        if hasattr(raw, "tobytes"):
+            return int.from_bytes(raw.tobytes()[:8], "little")
+        if hasattr(raw, "__iter__"):
+            return int.from_bytes(bytes(raw)[:8], "little")
+        return int(raw)
+    except Exception:
+        return None
+
+
+def find_local_model_file(model_id: str, models_dir: str = "models", workdir: str = "") -> str:
+    base = os.path.basename(model_id)
+    candidates = [
+        os.path.join(models_dir, model_id) if models_dir else "",
+        os.path.join(models_dir, base) if models_dir else "",
+        os.path.join(workdir, "models", model_id) if workdir else "",
+        os.path.join(workdir, "models", base) if workdir else "",
+        os.path.join("D:/CMDAI CODE/models", model_id),
+        os.path.join("D:/CMDAI CODE/models", base),
+        os.path.join("E:/CMDAI CODE/models", model_id),
+        os.path.join("E:/CMDAI CODE/models", base),
+        model_id,
+        os.path.abspath(model_id),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c) and os.path.isfile(c):
+            return os.path.abspath(c)
+    return ""
+
+
 def read_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
-    """Inspects GGUF metadata quickly without scanning tensors, cached in memory."""
     abs_path = os.path.abspath(gguf_path)
     if abs_path in _GGUF_META_CACHE:
         return _GGUF_META_CACHE[abs_path]
 
-    result = {
-        "n_ctx_train": 32768,
+    result: Dict[str, Any] = {
+        "n_ctx_train": 8192,
         "file_size_gb": 0.0,
-        "arch": "llama",
+        "arch": "unknown",
+        "n_layer": None,
+        "n_head_kv": None,
+        "n_embd_head_k": None,
+        "estimated": True,
     }
     if not os.path.exists(gguf_path):
         return result
@@ -71,16 +124,65 @@ def read_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    if not GGUFReader:
+        _GGUF_META_CACHE[abs_path] = result
+        return result
+
+    try:
+        reader = GGUFReader(gguf_path)
+        fields = reader.fields
+        arch_f = fields.get("general.architecture")
+        arch = _gguf_field_text(arch_f).strip().lower() if arch_f is not None else ""
+        if arch:
+            result["arch"] = arch
+            ctx_f = fields.get(f"{arch}.context_length")
+            ctx = _gguf_field_int(ctx_f) if ctx_f is not None else None
+            if ctx and ctx > 0:
+                result["n_ctx_train"] = ctx
+            layer_f = fields.get(f"{arch}.block_count")
+            layer = _gguf_field_int(layer_f) if layer_f is not None else None
+            if layer and layer > 0:
+                result["n_layer"] = layer
+            kv_f = fields.get(f"{arch}.attention.head_count_kv")
+            kv = _gguf_field_int(kv_f) if kv_f is not None else None
+            if kv and kv > 0:
+                result["n_head_kv"] = kv
+            key_f = fields.get(f"{arch}.attention.key_length")
+            key = _gguf_field_int(key_f) if key_f is not None else None
+            if key and key > 0:
+                result["n_embd_head_k"] = key
+            if result["n_embd_head_k"] is None:
+                emb_f = fields.get(f"{arch}.embedding_length")
+                head_f = fields.get(f"{arch}.attention.head_count")
+                emb = _gguf_field_int(emb_f) if emb_f is not None else None
+                heads = _gguf_field_int(head_f) if head_f is not None else None
+                if emb and heads:
+                    result["n_embd_head_k"] = emb // heads
+        if result["arch"] != "unknown" and result["n_ctx_train"] != 8192:
+            result["estimated"] = False
+        elif result["n_layer"] is not None:
+            result["estimated"] = False
+    except Exception:
+        pass
+
     _GGUF_META_CACHE[abs_path] = result
     return result
 
 
+def estimate_kv_cache_bytes_per_token(meta: Dict[str, Any], dtype_bytes: int = 2) -> int:
+    n_layer = meta.get("n_layer")
+    n_head_kv = meta.get("n_head_kv")
+    n_embd_head_k = meta.get("n_embd_head_k")
+    if n_layer and n_head_kv and n_embd_head_k:
+        return 2 * int(n_layer) * int(n_head_kv) * int(n_embd_head_k) * int(dtype_bytes)
+    return 256 * 1024
+
+
 def estimate_model_memory(gguf_path: str, n_ctx: int = 4096) -> Dict[str, float]:
-    """Auto-detects memory consumption for a GGUF model: weights RAM + KV cache RAM."""
     meta = read_gguf_metadata(gguf_path)
     weights_gb = meta["file_size_gb"]
 
-    kv_cache_gb = (n_ctx / 1024.0) * 0.0008
+    kv_cache_gb = n_ctx * estimate_kv_cache_bytes_per_token(meta) / (1024**3)
     total_gb = weights_gb + kv_cache_gb
 
     vm = psutil.virtual_memory()
@@ -102,27 +204,33 @@ def get_dynamic_context_limit(
     provider_id: str = "openrouter",
     model_path: Optional[str] = None,
     api_key: str = "",
+    models_dir: str = "models",
+    workdir: str = "",
 ) -> int:
-    """Calculates the real context limit dynamically for local or API models."""
     if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)):
-        path = model_path or os.path.join("models", model_id)
-        meta = read_gguf_metadata(path)
-        train_ctx = meta.get("n_ctx_train", 32768)
+        path = ""
+        if model_path and os.path.exists(model_path) and os.path.isfile(model_path):
+            path = os.path.abspath(model_path)
+        else:
+            path = find_local_model_file(model_id, models_dir=models_dir, workdir=workdir)
+        meta = read_gguf_metadata(path) if path else {
+            "n_ctx_train": 8192, "file_size_gb": 0.0, "arch": "unknown",
+            "n_layer": None, "n_head_kv": None, "n_embd_head_k": None, "estimated": True,
+        }
+        train_ctx = meta.get("n_ctx_train", 8192) or 8192
 
         vm = psutil.virtual_memory()
-        total_ram_gb = vm.total / (1024**3)
-        used_ram_gb = vm.used / (1024**3)
-        free_ram_gb = max(0.0, total_ram_gb - used_ram_gb)
+        available_gb = vm.available / (1024**3)
 
-        model_size_gb = meta.get("file_size_gb", 0.0)
-        ram_after_model = max(0.5, free_ram_gb - model_size_gb)
+        model_size_gb = meta.get("file_size_gb", 0.0) or 0.0
+        ram_after_model = max(0.5, available_gb - model_size_gb)
 
         cache_budget_gb = ram_after_model * 0.70
 
-        max_possible_tokens = int(cache_budget_gb * 128_000)
+        bytes_per_token = estimate_kv_cache_bytes_per_token(meta)
+        max_possible_tokens = int(cache_budget_gb * (1024**3) / bytes_per_token)
 
-        max_cpu_ctx = 4096
-        dynamic_limit = max(2048, min(train_ctx, max_possible_tokens, max_cpu_ctx))
+        dynamic_limit = max(2048, min(train_ctx, max_possible_tokens))
         return dynamic_limit
 
     cache = load_model_metadata_cache()
@@ -159,22 +267,21 @@ def get_dynamic_context_limit(
 
 
 def should_summarize(current_token_count: int, context_limit: int) -> bool:
-    """Proactive threshold check for context compaction ensuring prompt + generation never exceeds limit."""
     if context_limit <= 0:
         return False
-    safety_margin = min(2048, max(50, int(context_limit * 0.25)))
-    threshold = context_limit - safety_margin
+    threshold = int(context_limit * COMPACTION_THRESHOLD)
     return current_token_count >= threshold
 
 
 def estimate_token_count(messages: List[Dict[str, Any]]) -> int:
-    """Fast approximation of total tokens in message history."""
-    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
-    return max(1, total_chars // 4)
+    total_toks = 0
+    for m in messages:
+        c = str(m.get("content", ""))
+        total_toks += max(len(c.split()) * 4 // 3, len(c) // 3) + 4
+    return max(1, total_toks)
 
 
 def detect_conversation_language(messages: List[Dict[str, Any]]) -> str:
-    """Detects whether the user is conversing in Polish or English."""
     user_texts = " ".join(str(m.get("content", "")) for m in messages if m.get("role") == "user").lower()
     pl_markers = (
         " i ", " w ", " z ", " na ", " do ", " nie ", " to ", " jest ", " jak ",
@@ -185,7 +292,6 @@ def detect_conversation_language(messages: List[Dict[str, Any]]) -> str:
 
 
 def prune_message_for_summarization(msg: Dict[str, Any], max_content_len: int = 1600) -> Dict[str, Any]:
-    """Trims bloated tool outputs while strictly preserving tool metadata, headers, and paths."""
     role = msg.get("role", "user")
     content = str(msg.get("content", ""))
 
@@ -203,7 +309,6 @@ def build_summarization_payload(
     last_modified_files: Optional[List[str]] = None,
     max_budget_tokens: int = 2500,
 ) -> List[Dict[str, Any]]:
-    """Constructs an optimized, language-aware message payload for deep technical summarization with strict token budget."""
     if not messages:
         raw_msgs = []
     elif len(messages) <= 4:
@@ -284,7 +389,6 @@ def format_compacted_handoff(
     lang: str = "en",
     **kwargs,
 ) -> str:
-    """Formats the compacted handoff text naturally so the model understands past progress."""
     import re
     summary = (raw_summary or kwargs.get("summary_text", "")).strip()
     is_err = any(err_kw in summary.lower() for err_kw in [

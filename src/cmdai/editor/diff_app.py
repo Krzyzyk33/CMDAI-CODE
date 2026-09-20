@@ -199,7 +199,6 @@ Screen {
 
 
 class CMDAIDiffApp(App[None]):
-    """Standalone terminal diff viewer & commit tool for CMDAI CODE."""
 
     CSS = DIFF_CSS
     TITLE = "CMDAI CODE DIFF VIEWER"

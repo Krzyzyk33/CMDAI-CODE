@@ -14,7 +14,6 @@ SMTO_ABORTIFHUNG = 0x0002
 
 
 def _notify_windows_environment_change():
-    """Notify all top-level windows that the environment variables have changed."""
     if os.name != "nt":
         return
     try:
@@ -33,7 +32,6 @@ def _notify_windows_environment_change():
 
 
 def _ensure_windows_user_path_contains(path_entry: str) -> bool:
-    """Ensure path_entry is registered in HKCU\\Environment\\Path."""
     if os.name != "nt" or not winreg or not path_entry:
         return False
 
@@ -83,13 +81,6 @@ def _ensure_windows_user_path_contains(path_entry: str) -> bool:
 
 
 def install_global_launcher(silent: bool = False) -> bool:
-    """Installs the global CMDAI launcher in %USERPROFILE%\\CMDAI and adds it to PATH.
-    
-    Supports:
-        cmdai code [dir] -> launches CMDAI CODE in target dir
-        cmdai-code [dir] -> alias for cmdai code
-        cmdai [args]     -> fallback to CMDAI standard if present
-    """
     if os.name != "nt":
         if not silent:
             print("Launcher install is currently available on Windows only.")
