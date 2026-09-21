@@ -49,32 +49,46 @@
 
 ## 🚀 Quick Setup & Installation
 
-### Step 1: Clone the Repository
+Pick one command. After it finishes, open a **new** terminal and run `cmdai code`.
+
+### PowerShell
 ```powershell
-git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
-cd CMDAI-CODE
+irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/tools/install-remote.ps1 | iex
 ```
 
-### Step 2: Run the Installer
-Launch the automated setup script:
-```cmd
-install.bat
+### npm
+Requires Node.js 18+.
+```powershell
+npm install -g cmdai-code
 ```
-*(or run `installer.bat`)*
+
+### npx
+One run, no install. Requires Node.js 18+.
+```powershell
+npx -y cmdai-code
+```
+
+### pip
+Requires Python 3.10+ and git.
+```powershell
+pip install git+https://github.com/Krzyzyk33/CMDAI-CODE.git
+```
+
+### pipx
+Requires Python 3.10+ and git.
+```powershell
+pipx install git+https://github.com/Krzyzyk33/CMDAI-CODE.git
+```
 
 The installer automatically:
 1. Verifies Python 3.10+ and system prerequisites.
 2. Installs required packages from `requirements.txt`.
 3. Creates a starter `config.json` from `config.example.json`.
+4. Registers the global `cmdai code` command.
 
-### Step 3: Launch CMDAI CODE
-Start the assistant by running:
+### Launch CMDAI CODE
 ```powershell
-.\cmdai.bat
-```
-or:
-```powershell
-python cmdai.py
+cmdai code
 ```
 
 ---
@@ -85,11 +99,13 @@ CMDAI CODE provides dedicated CLI commands:
 
 | Command | Description |
 | :--- | :--- |
-| `cmdai` / `cmdai.bat` | Launches the terminal UI in the current workspace directory. |
+| `cmdai code` | Global launch of the terminal UI in the current directory (after install). |
+| `cmdai.bat` | Local launch from the checkout directory. |
 | `cmdai code update` | Safely updates CMDAI CODE from GitHub and synchronizes dependencies. |
 | `cmdai code addlocal model` | Opens Windows File Explorer to select a local `*.gguf` model and copies it into `models/`. |
 | `cmdai editor [file]` | Opens the built-in code editor in a standalone console window. |
-| `install.bat` | Fast installer for dependencies and initial configuration. |
+| `install.bat` | Local installer: dependencies, `config.json`, global `cmdai` launcher. |
+| `tools/install-remote.ps1` | Remote one-line installer (fixed location `~/CMDAI-CODE`). |
 
 ---
 

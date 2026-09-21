@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cmdai-code"
+version = "3.0.1a0"
+description = "CMDAI CODE - autonomous terminal coding agent for Windows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Custom Proprietary License - All Rights Reserved" }
+authors = [{ name = "Krzyzyk33" }]
+dependencies = [
+  "textual>=0.70.0",
+  "rich>=13.0.0",
+  "requests>=2.31.0",
+  "pydantic>=2.0.0",
+  "psutil>=5.9.0",
+  "gguf>=0.10.0",
+]
+
+[project.scripts]
+cmdai = "cmdai.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Krzyzyk33/CMDAI-CODE"
+
+[tool.setuptools.packages.find]
+where = ["src"]

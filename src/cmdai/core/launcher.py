@@ -1,6 +1,7 @@
 import os
 import sys
 import ctypes
+from typing import Dict
 
 try:
     import winreg
@@ -8,9 +9,49 @@ except Exception:
     winreg = None
 
 LAUNCHER_DIR_NAME = "CMDAI"
+FIXED_ROOT_NAME = "CMDAI-CODE"
 HWND_BROADCAST = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
 SMTO_ABORTIFHUNG = 0x0002
+
+
+def get_fixed_root() -> str:
+    return os.path.join(os.path.expanduser("~"), FIXED_ROOT_NAME)
+
+
+def build_launcher_scripts(project_root: str) -> Dict[str, str]:
+    """Build Windows launcher script contents.
+
+    The install-time project_root is only a fallback: at runtime the
+    launcher resolves CMDAI_CODE_ROOT env first, then %USERPROFILE%\\CMDAI-CODE.
+    """
+    main_cmd = (
+        "@echo off\n"
+        "rem CMDAI CODE global launcher (generated). Regen via: cmdai --install-launcher\n"
+        'if not defined CMDAI_CODE_ROOT set "CMDAI_CODE_ROOT=%USERPROFILE%\\CMDAI-CODE"\n'
+        f'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" if exist "{project_root}\\cmdai.py" set "CMDAI_CODE_ROOT={project_root}"\n'
+        'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" (\n'
+        "    echo [ERROR] CMDAI CODE checkout not found. Set CMDAI_CODE_ROOT or reinstall.\n"
+        "    exit /b 1\n"
+        ")\n"
+        'set "USER_WORKDIR=%CD%"\n'
+        'if exist "%CMDAI_CODE_ROOT%\\.venv\\Scripts\\python.exe" (\n'
+        '    set "PYTHON_BIN=%CMDAI_CODE_ROOT%\\.venv\\Scripts\\python.exe"\n'
+        ") else (\n"
+        '    set "PYTHON_BIN=python"\n'
+        ")\n"
+        '"%PYTHON_BIN%" "%CMDAI_CODE_ROOT%\\cmdai.py" --workdir "%USER_WORKDIR%" %*\n'
+        "exit /b %ERRORLEVEL%\n"
+    )
+    shim = '@echo off\ncall "%~dp0cmdai.cmd" %*\n'
+    editor_shim = '@echo off\ncall "%~dp0cmdai.cmd" editor %*\n'
+    # NOTE: no separate CMDAI.cmd - Windows filenames are case-insensitive,
+    # so CMDAI.cmd and cmdai.cmd are the same file. cmdai.cmd IS the launcher.
+    return {
+        "cmdai.cmd": main_cmd,
+        "cmdai-code.cmd": shim,
+        "editor.cmd": editor_shim,
+    }
 
 
 def _notify_windows_environment_change():
@@ -89,79 +130,24 @@ def install_global_launcher(silent: bool = False) -> bool:
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(here)))
-        entry_py = os.path.join(project_root, "cmdai.py")
         launcher_dir = os.path.join(os.path.expanduser("~"), LAUNCHER_DIR_NAME)
         os.makedirs(launcher_dir, exist_ok=True)
 
-        cmdai_base_root = "E:\\CMDAI"
-
-        cmd_path = os.path.join(launcher_dir, "CMDAI.cmd")
-        cmd_content = (
-            "@echo off\n"
-            "setlocal enabledelayedexpansion\n\n"
-            'if /i "%~1"=="editor" (\n'
-            "    shift\n"
-            f'    set "CMDAI_CODE_ROOT={project_root}"\n'
-            '    if exist "!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe" (\n'
-            '        set "PYTHON_BIN=!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe"\n'
-            "    ) else (\n"
-            '        set "PYTHON_BIN=python"\n'
-            "    )\n"
-            f'    !PYTHON_BIN! "{entry_py}" editor %*\n'
-            "    exit /b !ERRORLEVEL!\n"
-            ")\n\n"
-            'if /i "%~1"=="code" (\n'
-            "    shift\n"
-            f'    set "CMDAI_CODE_ROOT={project_root}"\n'
-            '    set "USER_WORKDIR=%CD%"\n\n'
-            '    if exist "!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe" (\n'
-            '        set "PYTHON_BIN=!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe"\n'
-            "    ) else (\n"
-            '        set "PYTHON_BIN=python"\n'
-            "    )\n\n"
-            f'    !PYTHON_BIN! "{entry_py}" --workdir "!USER_WORKDIR!" %1 %2 %3 %4 %5 %6 %7 %8 %9\n'
-            "    exit /b !ERRORLEVEL!\n"
-            ")\n\n"
-            f'set "CMDAI_BASE_ROOT={cmdai_base_root}"\n'
-            'if exist "!CMDAI_BASE_ROOT!\\cmdai.py" (\n'
-            '    pushd "!CMDAI_BASE_ROOT!" >nul 2>&1\n'
-            '    py -3 "!CMDAI_BASE_ROOT!\\cmdai.py" %*\n'
-            "    set ERR=!ERRORLEVEL!\n"
-            "    popd >nul 2>&1\n"
-            "    exit /b !ERR!\n"
-            ")\n\n"
-            f'set "CMDAI_CODE_ROOT={project_root}"\n'
-            'set "USER_WORKDIR=%CD%"\n'
-            'if exist "!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe" (\n'
-            '    set "PYTHON_BIN=!CMDAI_CODE_ROOT!\\.venv\\Scripts\\python.exe"\n'
-            ") else (\n"
-            '    set "PYTHON_BIN=python"\n'
-            ")\n"
-            f'!PYTHON_BIN! "{entry_py}" --workdir "!USER_WORKDIR!" %*\n'
-            "exit /b !ERRORLEVEL!\n"
-        )
-        with open(cmd_path, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(cmd_content)
-
-        editor_alias_path = os.path.join(launcher_dir, "editor.cmd")
-        with open(editor_alias_path, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write("@echo off\ncall \"%~dp0CMDAI.cmd\" editor %*\n")
-
-        code_alias_path = os.path.join(launcher_dir, "cmdai-code.cmd")
-        code_alias_content = (
-            "@echo off\n"
-            'call "%~dp0CMDAI.cmd" code %*\n'
-        )
-        with open(code_alias_path, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(code_alias_content)
+        scripts = build_launcher_scripts(project_root)
+        installed = []
+        for name, content in scripts.items():
+            script_path = os.path.join(launcher_dir, name)
+            with open(script_path, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(content)
+            installed.append(script_path)
 
         path_ok = _ensure_windows_user_path_contains(launcher_dir)
 
         if not silent:
-            print(f"Launcher installed: {cmd_path}")
-            print(f"Alias installed: {code_alias_path}")
+            for p in installed:
+                print(f"Launcher installed: {p}")
             if path_ok:
-                print("Global command registered! Run anywhere: cmdai code")
+                print("Global command registered! Open a NEW terminal and run: cmdai code")
             else:
                 print(f"Add this folder to PATH manually: {launcher_dir}")
         return True

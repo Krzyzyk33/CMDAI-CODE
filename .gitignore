@@ -27,3 +27,6 @@ logs/
 test_*.svg
 sim_*.log
 scratch/
+
+node_modules/
+*.tgz
