@@ -1,0 +1,20 @@
+{
+  "name": "cmdai-code",
+  "version": "3.0.1-alpha",
+  "description": "CMDAI CODE - autonomous terminal coding agent for Windows (Python bootstrap wrapper)",
+  "bin": {
+    "cmdai": "bin/cmdai.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Krzyzyk33/CMDAI-CODE.git"
+  },
+  "homepage": "https://github.com/Krzyzyk33/CMDAI-CODE",
+  "license": "SEE LICENSE IN LICENSE"
+}
