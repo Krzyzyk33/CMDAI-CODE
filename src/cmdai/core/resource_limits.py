@@ -310,25 +310,28 @@ def build_summarization_payload(
     max_budget_tokens: int = 2500,
 ) -> List[Dict[str, Any]]:
     if not messages:
-        raw_msgs = []
-    elif len(messages) <= 4:
-        raw_msgs = [prune_message_for_summarization(m) for m in messages]
-    else:
-        first_m = prune_message_for_summarization(messages[0])
-        recent_m = [prune_message_for_summarization(m, max_content_len=1200) for m in messages[-3:]]
-        middle_m = [prune_message_for_summarization(m, max_content_len=400) for m in messages[1:-3]]
-        raw_msgs = [first_m] + middle_m + recent_m
+        return []
 
-    pruned_history = []
-    total_tokens = 0
-    for m in reversed(raw_msgs):
-        m_tok = len(str(m.get("content", "")).split())
-        if total_tokens + m_tok <= max_budget_tokens or not pruned_history:
-            pruned_history.insert(0, m)
-            total_tokens += m_tok
-        elif m == raw_msgs[0]:
-            pruned_history.insert(0, prune_message_for_summarization(m, max_content_len=300))
+    first_m = prune_message_for_summarization(messages[0], max_content_len=500)
+    first_toks = estimate_token_count([first_m])
+    history_budget = max(400, max_budget_tokens - 400 - first_toks)
+
+    tail_messages = messages[1:]
+    pruned_tail = []
+    cur_tokens = 0
+    for m in reversed(tail_messages):
+        p = prune_message_for_summarization(m, max_content_len=700)
+        tok = estimate_token_count([p])
+        if cur_tokens + tok <= history_budget:
+            pruned_tail.insert(0, p)
+            cur_tokens += tok
+        else:
+            if history_budget - cur_tokens >= 80:
+                p_short = prune_message_for_summarization(m, max_content_len=200)
+                pruned_tail.insert(0, p_short)
             break
+
+    pruned_history = [first_m] + pruned_tail if tail_messages else [first_m]
 
     lang = detect_conversation_language(messages)
     context_hint = []
@@ -387,6 +390,7 @@ def format_compacted_handoff(
     raw_summary: str = "",
     last_modified_files: Optional[List[str]] = None,
     lang: str = "en",
+    messages: Optional[List[Dict[str, Any]]] = None,
     **kwargs,
 ) -> str:
     import re
@@ -395,17 +399,31 @@ def format_compacted_handoff(
         "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
     ])
     if is_err or not summary:
+        extracted = []
+        if messages:
+            for m in messages:
+                c = str(m.get("content", ""))
+                if m.get("role") == "user" and not c.startswith("[tool:"):
+                    line = c.splitlines()[0][:120].strip()
+                    if line and line not in extracted:
+                        extracted.append(line)
         if lang == "pl":
-            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostały zachowane."
+            if extracted:
+                summary = "Podsumowanie dotychczasowych celow: " + "; ".join(extracted[:4]) + ".\nDotychczasowe ustalenia i stan kodu zostaly zachowane."
+            else:
+                summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostaly zachowane."
         else:
-            summary = "Previous session state and key code modifications have been preserved."
+            if extracted:
+                summary = "Summary of session objectives: " + "; ".join(extracted[:4]) + ".\nSession state and code modifications have been preserved."
+            else:
+                summary = "Previous session state and key code modifications have been preserved."
 
     summary = re.sub(r"^#+\s*CONTEXT COMPACTION STATE HANDOFF\s*", "", summary, flags=re.IGNORECASE).strip()
     summary = re.sub(r"^#+\s*Context Compaction[^\n]*\n*", "", summary, flags=re.IGNORECASE).strip()
     summary = re.sub(r"^●?\s*Conversation Summary[^\n]*\n*", "", summary, flags=re.IGNORECASE).strip()
     if not summary:
         if lang == "pl":
-            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostały zachowane."
+            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostaly zachowane."
         else:
             summary = "Previous session state and key code modifications have been preserved."
 
