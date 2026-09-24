@@ -160,17 +160,12 @@ class AssistantTurnCard(Vertical):
         self.current_body_widget: Static = self.body_widget
         self.body_widgets: List[Static] = [self.body_widget]
         self.footer_widget = Static("", classes="card-footer")
-        # Textual's default Vertical sizing can claim all remaining space in a
-        # scroll view.  Keep each turn content-sized so tool rows never get
-        # pushed to the bottom of an otherwise empty screen.
         self.styles.height = "auto"
         for container in (self.loading_container, self.thinking_container, self.flow_container):
             container.styles.height = "auto"
             container.styles.min_height = 0
         self.footer_widget.styles.height = 1
         self.thinking_container.styles.display = "none"
-        # An empty Vertical container can consume the remaining viewport in a
-        # scrollable parent. It is shown only once it contains chat content.
         self.flow_container.styles.display = "none"
         self.body_widget.styles.display = "none"
 
@@ -934,6 +929,17 @@ class ToolBlock(Vertical):
                 self._safe_update_details(render_edit_diff_opencode(diff_entries, target_file=self.target))
             else:
                 self._safe_update_details(Text(f"  {self.target}\n  (Edit applied successfully)\n", style="#3fb950"))
+        elif self.tool_name in ("summarizing", "summarize", "compact", "context_compact"):
+            summary_txt = str(result.get("summary") or result.get("content") or "Context compacted successfully.").strip()
+            self.target = "context compacted"
+            self.update_header()
+            txt = Text(no_wrap=False)
+            txt.append("  ⌬ Context Compaction & Handoff:\n", style="bold #58a6ff")
+            for line in summary_txt.splitlines()[:30]:
+                txt.append(f"    {line}\n", style="#c9d1d9")
+            if len(summary_txt.splitlines()) > 30:
+                txt.append("    ... [remaining summary truncated]\n", style="dim #8b949e")
+            self._safe_update_details(txt)
         elif self.tool_name == "command":
             stdout = result.get("stdout", "")
             stderr = result.get("stderr", "")

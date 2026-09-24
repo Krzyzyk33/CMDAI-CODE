@@ -114,6 +114,12 @@ class SubagentChatModal(ModalScreen[None]):
         Binding("ctrl+q", "dismiss_modal", "Close"),
         Binding("left", "prev_agent", "Prev", show=False),
         Binding("right", "next_agent", "Next", show=False),
+        Binding("up", "scroll_up", "Scroll Up", show=False),
+        Binding("down", "scroll_down", "Scroll Down", show=False),
+        Binding("pageup", "scroll_page_up", "Page Up", show=False),
+        Binding("pagedown", "scroll_page_down", "Page Down", show=False),
+        Binding("home", "scroll_top", "Scroll Top", show=False),
+        Binding("end", "scroll_bottom", "Scroll Bottom", show=False),
     ]
 
     def __init__(
@@ -198,9 +204,6 @@ class SubagentChatModal(ModalScreen[None]):
                 if not content or m_role == "system":
                     continue
                 if m_role == "assistant":
-                    # Render outgoing XML tool calls before removing them from
-                    # prose. Previously they were stripped, making a working
-                    # subagent appear to have no normal agent tools.
                     calls = list(_re.finditer(r'<tool:(\w+)\s*([^>]*?)/?\s*>', content, _re.IGNORECASE | _re.DOTALL))
                     for call in calls:
                         tool_name = call.group(1)
@@ -285,6 +288,42 @@ class SubagentChatModal(ModalScreen[None]):
         if len(self.agents) > 1:
             self.agent_index = self.agent_index % len(self.agents) + 1
             self._render_agent()
+
+    def action_scroll_up(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_relative(y=-2, animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_down(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_relative(y=2, animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_page_up(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_page_up(animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_page_down(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_page_down(animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_top(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_home(animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_bottom(self) -> None:
+        try:
+            self.query_one("#subagent-chat-scroll", VerticalScroll).scroll_end(animate=False)
+        except Exception:
+            pass
 
     def action_dismiss_modal(self) -> None:
         if self._refresh_timer:

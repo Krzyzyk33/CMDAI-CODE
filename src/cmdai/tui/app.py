@@ -171,7 +171,7 @@ class ChatScroll(VerticalScroll):
         app = getattr(self, "app", None)
         if app is not None:
             try:
-                if self._is_at_bottom():
+                if self._is_at_bottom(target):
                     app.auto_scroll_enabled = True
                     app._last_user_scroll_time = 0.0
                     try:
@@ -179,8 +179,6 @@ class ChatScroll(VerticalScroll):
                     except Exception:
                         pass
                 else:
-                    # User is manually working back down: stay manual for a
-                    # moment so streaming does not yank the view away.
                     app.auto_scroll_enabled = False
                     app._last_user_scroll_time = time.time()
             except Exception:
@@ -752,25 +750,12 @@ class CMDAICodeTUI(App):
                 self.auto_scroll_enabled = False
                 return
 
-            # User is reading above: never yank the view while they scroll.
-            # Down-to-bottom clears this lockout via _mark_scrolled_down.
             if time.time() - getattr(self, "_last_user_scroll_time", 0.0) < 2.0:
                 self._set_follow_hint(True)
                 return
 
-            # Follow only when already near the bottom; otherwise leave the
-            # user's reading position alone and just hint about new content.
-            try:
-                pos = self._chat_target_y(cs)
-                if float(cs.max_scroll_y) > 0 and pos < (float(cs.max_scroll_y) - 6):
-                    self._set_follow_hint(True)
-                    return
-            except Exception:
-                pass
-
-            # Throttle: token streams call this very often; 5x/s is enough.
             now = time.time()
-            if now - getattr(self, "_last_auto_scroll_time", 0.0) < 0.2:
+            if now - getattr(self, "_last_auto_scroll_time", 0.0) < 0.08:
                 return
             self._last_auto_scroll_time = now
             self._set_follow_hint(False)
@@ -788,6 +773,7 @@ class CMDAICodeTUI(App):
             return
         if is_up:
             self._mark_scrolled_up()
+        target = None
         try:
             base = self._chat_target_y(cs)
             if is_up:
@@ -804,7 +790,7 @@ class CMDAICodeTUI(App):
         except Exception:
             pass
         if not is_up:
-            self._mark_scrolled_down(cs)
+            self._mark_scrolled_down(cs, target_y=target)
 
     def action_scroll_chat_up(self) -> None:
         try:
@@ -824,7 +810,6 @@ class CMDAICodeTUI(App):
                 cs.scroll_page_down(animate=False)
             except TypeError:
                 cs.scroll_page_down()
-            # Page scroll is deferred: decide from the requested target.
             self.call_after_refresh(self._mark_scrolled_down, cs)
         except Exception:
             pass
@@ -857,13 +842,14 @@ class CMDAICodeTUI(App):
         self._chat_scroll_by(2, is_up=False)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        # ChatScroll already handles + stops wheel events over the chat.
-        # This is only a fallback for wheel events over the input dock.
         self._chat_scroll_by(-3, is_up=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        # Fallback for wheel events outside ChatScroll (e.g. over input).
         self._chat_scroll_by(3, is_up=False)
+
+    @on(events.Click, "#input-meta-right")
+    def on_click_input_meta_right(self) -> None:
+        self._scroll_chat_to_end_if_enabled(force=True)
 
     def action_toggle_tools(self) -> None:
         try:
@@ -2388,6 +2374,12 @@ class CMDAICodeTUI(App):
         except Exception:
             summary_text = ""
 
+        try:
+            summary_text = re.sub(r"<tool:[^>]+>.*?</tool:[^>]+>", "", str(summary_text), flags=re.DOTALL)
+            summary_text = re.sub(r"<tool:[^>]+/>", "", summary_text).strip()
+        except Exception:
+            pass
+
         is_err = not summary_text or any(err_kw in str(summary_text).lower() for err_kw in [
             "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
         ])
@@ -2396,9 +2388,10 @@ class CMDAICodeTUI(App):
             summary_text if not is_err else "",
             last_modified_files=getattr(self, "_last_modified_files", None),
             lang=detect_conversation_language(self.messages),
+            messages=self.messages,
         )
 
-        init_goal = self.messages[0]["content"][:300] if self.messages else ""
+        init_goal = self.messages[0]["content"][:1000] if self.messages else ""
         self.messages = [
             {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
             {"role": "assistant", "content": handoff_content.strip()},
@@ -2406,8 +2399,7 @@ class CMDAICodeTUI(App):
 
         def _update_ui():
             tool_block.finish({"success": True, "summary": handoff_content.strip()})
-            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
-            chat_scroll.scroll_end(animate=False)
+            self._scroll_chat_to_end_if_enabled(force=True)
 
         self.call_from_thread(_update_ui)
 
@@ -2746,6 +2738,12 @@ class CMDAICodeTUI(App):
                     except Exception:
                         c_resp = ""
 
+                    try:
+                        c_resp = re.sub(r"<tool:[^>]+>.*?</tool:[^>]+>", "", str(c_resp), flags=re.DOTALL)
+                        c_resp = re.sub(r"<tool:[^>]+/>", "", c_resp).strip()
+                    except Exception:
+                        pass
+
                     is_err = not c_resp or any(err_kw in str(c_resp).lower() for err_kw in [
                         "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
                     ])
@@ -2754,8 +2752,9 @@ class CMDAICodeTUI(App):
                         c_resp if not is_err else "",
                         last_modified_files=getattr(self, "_last_modified_files", None),
                         lang=detect_conversation_language(self.messages),
+                        messages=self.messages[:-1] if len(self.messages) > 1 else self.messages,
                     )
-                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
+                    init_goal = self.messages[0]["content"][:1000] if self.messages else ""
                     last_msg = self.messages[-1]
                     self.messages = [
                         {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
@@ -2763,14 +2762,15 @@ class CMDAICodeTUI(App):
                         last_msg,
                     ]
                     self.call_from_thread(assistant_card.finish_tool, {"success": True, "summary": handoff_content.strip()})
-                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+                    self.call_from_thread(self._scroll_chat_to_end_if_enabled, force=True)
                 except Exception:
-                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
+                    init_goal = self.messages[0]["content"][:1000] if self.messages else ""
                     last_msg = self.messages[-1] if self.messages else {"role": "user", "content": ""}
                     handoff_content = format_compacted_handoff(
                         "",
                         last_modified_files=getattr(self, "_last_modified_files", None),
                         lang=detect_conversation_language(self.messages),
+                        messages=self.messages[:-1] if len(self.messages) > 1 else self.messages,
                     )
                     self.messages = [
                         {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
@@ -2901,9 +2901,6 @@ class CMDAICodeTUI(App):
                     elif kind == "tool":
                         tool_name, args = data
                         if tool_name == "subagent":
-                            # Subagents temporarily removed: consume the whole
-                            # subagent batch as disabled-errors so the model
-                            # corrects itself instead of stalling.
                             j = idx + 1
                             while j < len(remaining_segments) and remaining_segments[j][0] == "tool" and remaining_segments[j][1][0] == "subagent":
                                 j += 1
