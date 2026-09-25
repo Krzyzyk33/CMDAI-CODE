@@ -172,6 +172,13 @@ def handle_add_local_model():
 
 def main():
     setup_crash_logger()
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
     raw_args = [a.lower() for a in sys.argv[1:]]
     args_joined = " ".join(raw_args)
@@ -182,12 +189,18 @@ def main():
     if "code addlocal" in args_joined or "addlocal" in args_joined or "add-model" in args_joined:
         sys.exit(handle_add_local_model())
 
-    parser = argparse.ArgumentParser(description="CMDAI CODE - Next-gen Terminal Code Agent")
-    parser.add_argument("command", nargs="?", default="launch", help="Command (code, launch)")
-    parser.add_argument("--workdir", default=os.getcwd(), help="Target project working directory")
+    parser = argparse.ArgumentParser(
+        prog="cmdai",
+        description="CMDAI CODE - Next-gen Terminal Code Agent",
+        add_help=False,
+    )
+    parser.add_argument("command", nargs="?", default="", help="Command (code, update, addlocal, editor)")
+    parser.add_argument("path", nargs="?", default="", help="Optional project directory or file")
+    parser.add_argument("--workdir", default="", help="Target project working directory")
     parser.add_argument("--provider", default="", help="LLM Provider ID")
     parser.add_argument("--model", default="", help="Model ID")
     parser.add_argument("--install-launcher", action="store_true", help="Install global Windows PATH launcher")
+    parser.add_argument("-h", "--help", action="store_true", help="Show help message")
     args, unknown = parser.parse_known_args()
 
     if args.install_launcher:
@@ -199,9 +212,18 @@ def main():
     except Exception:
         pass
 
+    if args.help or args.command in ("help", "-h", "--help"):
+        args.command = ""
+
+    if args.command in ("update", "code-update") or "code update" in args_joined:
+        sys.exit(handle_update())
+
+    if args.command in ("addlocal", "add-model", "code-addlocal") or "code addlocal" in args_joined:
+        sys.exit(handle_add_local_model())
+
     if args.command == "editor" or (len(sys.argv) > 1 and sys.argv[1].lower() == "editor"):
         from cmdai.editor.editor_app import CMDAICodeEditor
-        target_file = "."
+        target_file = args.path or "."
         for a in (sys.argv[2:] if sys.argv[1].lower() == "editor" else sys.argv[1:]):
             if not a.startswith("-") and a.lower() != "editor":
                 target_file = a
@@ -210,13 +232,37 @@ def main():
         app.run()
         return
 
+    if args.command != "code":
+        print("""
+  \x1b[36m██████╗███╗   ███╗██████╗  █████╗ ██╗   \x1b[97m██████╗ ██████╗ ██████╗ ███████╗\x1b[0m
+ \x1b[36m██╔════╝████╗ ████║██╔══██╗██╔══██╗██║  \x1b[97m██╔════╝██╔═══██╗██╔══██╗██╔════╝\x1b[0m
+ \x1b[36m██║     ██╔████╔██║██║  ██║███████║██║  \x1b[97m██║     ██║   ██║██║  ██║█████╗  \x1b[0m
+ \x1b[36m██║     ██║╚██╔╝██║██║  ██║██╔══██║██║  \x1b[97m██║     ██║   ██║██║  ██║██╔══╝  \x1b[0m
+ \x1b[36m╚██████╗██║ ╚═╝ ██║██████╔╝██║  ██║██║  \x1b[97m╚██████╗╚██████╔╝██████╔╝███████╗\x1b[0m
+  \x1b[36m╚═════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝   \x1b[97m╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝\x1b[0m
+
+\x1b[1mUżycie / Usage:\x1b[0m
+  cmdai code [katalog]      Uruchomienie asystenta terminalowego CMDAI CODE
+  cmdai update              Aktualizacja z repozytorium GitHub
+  cmdai addlocal            Dodanie lokalnego modelu GGUF
+  cmdai editor [plik]       Wbudowany edytor kodu
+  cmdai --install-launcher  Instalacja globalnego launchera Windows
+
+\x1b[1mOpcje / Options:\x1b[0m
+  --workdir <ścieżka>       Katalog roboczy projektu
+  --provider <nazwa>        ID dostawcy LLM
+  --model <nazwa>           Nazwa lub ID modelu
+  -h, --help                Pomoc
+""")
+        return
+
     settings = get_settings()
     if args.provider:
         settings.config["default_provider"] = args.provider
     if args.model:
         settings.config["default_model"] = args.model
 
-    workdir = os.path.abspath(args.workdir)
+    workdir = os.path.abspath(args.path or args.workdir or os.getcwd())
     try:
         sys.stdout.write("\x1b]11;#000000\x07")
         sys.stdout.flush()
