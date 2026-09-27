@@ -16,6 +16,12 @@ from textual.widgets import Static, TextArea
 
 from ..agent.runner import AgentRunner
 from ..agent.tools import AgentContext
+from ..core.branding import (
+    CMDAI_PARTS as _CMDAI_PARTS,
+    CODE_PARTS as _CODE_PARTS,
+    LOGO_HERO as _LOGO_HERO,
+    get_hero_logo as _get_hero_logo,
+)
 from ..core.capabilities import clean_model_name, get_model_capability
 from ..core.engine import SimpleGGUFLoader
 from ..core.providers import PROVIDERS_CATALOG, stream_chat_completion
@@ -74,50 +80,11 @@ TOOL_COMPLETE_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-CMDAI_PARTS = [
-    " ██████╗███╗   ███╗██████╗  █████╗ ██╗",
-    "██╔════╝████╗ ████║██╔══██╗██╔══██╗██║",
-    "██║     ██╔████╔██║██║  ██║███████║██║",
-    "██║     ██║╚██╔╝██║██║  ██║██╔══██║██║",
-    "╚██████╗██║ ╚═╝ ██║██████╔╝██║  ██║██║",
-    " ╚═════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝",
-]
-
-CODE_PARTS = [
-    " ██████╗ ██████╗ ██████╗ ███████╗",
-    "██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-    "██║     ██║   ██║██║  ██║█████╗  ",
-    "██║     ██║   ██║██║  ██║██╔══╝  ",
-    "╚██████╗╚██████╔╝██████╔╝███████╗",
-    " ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
-]
-
-
-def get_hero_logo(d: Optional[datetime.date] = None) -> str:
-    if d is None:
-        d = datetime.date.today()
-    day_of_year = d.timetuple().tm_yday
-    cycle = day_of_year % 4
-    WHITE = "#ffffff"
-    GRAY = "#888888"
-    GAP = "   "
-
-    if cycle == 0:
-        cmdai_color, code_color = WHITE, WHITE
-    elif cycle == 1:
-        cmdai_color, code_color = GRAY, WHITE
-    elif cycle == 2:
-        cmdai_color, code_color = WHITE, GRAY
-    else:
-        cmdai_color, code_color = GRAY, GRAY
-
-    lines = []
-    for c_line, cd_line in zip(CMDAI_PARTS, CODE_PARTS):
-        lines.append(f"[{cmdai_color}]{c_line}[/]{GAP}[{code_color}]{cd_line}[/]")
-    return "\n".join(lines)
-
-
-LOGO_HERO = get_hero_logo()
+# Logo lives in core/branding.py so the CLI can print it without Textual.
+CMDAI_PARTS = _CMDAI_PARTS
+CODE_PARTS = _CODE_PARTS
+get_hero_logo = _get_hero_logo
+LOGO_HERO = _LOGO_HERO
 
 
 class ChatScroll(VerticalScroll):
@@ -171,7 +138,7 @@ class ChatScroll(VerticalScroll):
         app = getattr(self, "app", None)
         if app is not None:
             try:
-                if self._is_at_bottom(target):
+                if self._is_at_bottom():
                     app.auto_scroll_enabled = True
                     app._last_user_scroll_time = 0.0
                     try:
@@ -179,6 +146,8 @@ class ChatScroll(VerticalScroll):
                     except Exception:
                         pass
                 else:
+                    # User is manually working back down: stay manual for a
+                    # moment so streaming does not yank the view away.
                     app.auto_scroll_enabled = False
                     app._last_user_scroll_time = time.time()
             except Exception:
@@ -451,13 +420,11 @@ class CMDAICodeTUI(App):
                 is_thinking = True
 
         if is_thinking:
-            icon = ["⌬", "✻"][self._meta_spinner_idx % 2]
-            return f"[bold white]{icon}[/]  [bold white]{disp}[/] [dim white](thinking...)[/]"
-        elif self.is_generating:
-            icon = self.SPINNER_FRAMES[self._meta_spinner_idx]
-            return f"[b #58a6ff]{icon}[/]  [bold white]{disp}[/] [dim #58a6ff](generating...)[/]"
-        else:
-            return f"[b #58a6ff]⌬[/]  [bold white]{disp}[/] [dim]({self.current_provider})[/dim]"
+            # Animacja thinkingu: miganie ✻ / ⌬ (~2 razy na sekundę).
+            icon = ["✻", "⌬"][(self._meta_spinner_idx // 3) % 2]
+            return f"[bold white]{icon}[/]  [bold white]{disp}[/]"
+        # Spoczynek i generowanie: statyczne ⌬, bez nawiasów i bez klatki.
+        return f"[b #58a6ff]⌬[/]  [bold white]{disp}[/]"
 
     def _get_meta_mode_text(self) -> str:
         color = "#7ee787" if self.agent_mode == "auto" else ("#58a6ff" if self.agent_mode == "plan" else "#d29922")
@@ -538,6 +505,33 @@ class CMDAICodeTUI(App):
         except Exception as e:
             self.notify(f"Failed to launch diff: {e}", severity="error")
 
+    def _create_turn_checkpoint(self) -> None:
+        """Snapshot the working tree as a checkpoint labelled with the prompt.
+
+        Called when a turn finishes (chat / auto mode) and when the user
+        accepts the changes of a code-mode turn.
+        """
+        try:
+            from ..core.checkpoints import CheckpointManager
+            prompt = ""
+            for m in reversed(self.messages):
+                if m.get("role") == "user":
+                    prompt = str(m.get("content", ""))
+                    break
+            prompt = " ".join(prompt.split())[:80] or "Turn complete"
+            mgr = CheckpointManager(self.workdir)
+            cp = mgr.create_checkpoint(prompt)
+            self._refresh_checkpoints_cache(cp)
+        except Exception:
+            pass
+
+    def _refresh_checkpoints_cache(self, cp: Any) -> None:
+        try:
+            self._last_checkpoint = cp
+            self.call_after_refresh(self._update_meta_bars)
+        except Exception:
+            pass
+
     @on(ApprovalBar.ActionSelected)
     def on_approval_action_selected(self, msg: ApprovalBar.ActionSelected) -> None:
         try:
@@ -554,6 +548,8 @@ class CMDAICodeTUI(App):
             elif getattr(self, "_post_turn_approval_active", False):
                 self._post_turn_approval_active = False
                 self._last_modified_files.clear()
+                # Code mode: the checkpoint lands only after the user accepts.
+                self._create_turn_checkpoint()
                 self.notify("Changes approved.", timeout=2.5)
         elif msg.action == "reject":
             if bar:
@@ -750,12 +746,25 @@ class CMDAICodeTUI(App):
                 self.auto_scroll_enabled = False
                 return
 
+            # User is reading above: never yank the view while they scroll.
+            # Down-to-bottom clears this lockout via _mark_scrolled_down.
             if time.time() - getattr(self, "_last_user_scroll_time", 0.0) < 2.0:
                 self._set_follow_hint(True)
                 return
 
+            # Follow only when already near the bottom; otherwise leave the
+            # user's reading position alone and just hint about new content.
+            try:
+                pos = self._chat_target_y(cs)
+                if float(cs.max_scroll_y) > 0 and pos < (float(cs.max_scroll_y) - 6):
+                    self._set_follow_hint(True)
+                    return
+            except Exception:
+                pass
+
+            # Throttle: token streams call this very often; 5x/s is enough.
             now = time.time()
-            if now - getattr(self, "_last_auto_scroll_time", 0.0) < 0.08:
+            if now - getattr(self, "_last_auto_scroll_time", 0.0) < 0.2:
                 return
             self._last_auto_scroll_time = now
             self._set_follow_hint(False)
@@ -773,7 +782,6 @@ class CMDAICodeTUI(App):
             return
         if is_up:
             self._mark_scrolled_up()
-        target = None
         try:
             base = self._chat_target_y(cs)
             if is_up:
@@ -790,7 +798,7 @@ class CMDAICodeTUI(App):
         except Exception:
             pass
         if not is_up:
-            self._mark_scrolled_down(cs, target_y=target)
+            self._mark_scrolled_down(cs)
 
     def action_scroll_chat_up(self) -> None:
         try:
@@ -810,6 +818,7 @@ class CMDAICodeTUI(App):
                 cs.scroll_page_down(animate=False)
             except TypeError:
                 cs.scroll_page_down()
+            # Page scroll is deferred: decide from the requested target.
             self.call_after_refresh(self._mark_scrolled_down, cs)
         except Exception:
             pass
@@ -842,14 +851,13 @@ class CMDAICodeTUI(App):
         self._chat_scroll_by(2, is_up=False)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        # ChatScroll already handles + stops wheel events over the chat.
+        # This is only a fallback for wheel events over the input dock.
         self._chat_scroll_by(-3, is_up=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        # Fallback for wheel events outside ChatScroll (e.g. over input).
         self._chat_scroll_by(3, is_up=False)
-
-    @on(events.Click, "#input-meta-right")
-    def on_click_input_meta_right(self) -> None:
-        self._scroll_chat_to_end_if_enabled(force=True)
 
     def action_toggle_tools(self) -> None:
         try:
@@ -1367,8 +1375,8 @@ class CMDAICodeTUI(App):
             "/new": self._cmd_new,
             "/clear": self._cmd_new,
             "/reset": self._cmd_new,
-                        "/branch": self._cmd_branch,
-            "/branches": self._cmd_branch,
+            "/branch": self._cmd_branch,
+            "/branches": self._cmd_branches,
             "/fork": self._cmd_fork,
             "/git": self._cmd_git,
             "/checkpoints": self._cmd_checkpoints,
@@ -1864,31 +1872,8 @@ class CMDAICodeTUI(App):
         return "\n".join(lines)
 
     def _cmd_tools(self, arg: str = "") -> None:
-        self.push_screen(InfoModal("Agent Tools", self._build_tools_body()))
-
-    def _build_tools_body(self) -> str:
-        lines = [
-            "[b #58a6ff]CMDAI CODE XML Agent Tools[/]\n",
-            "[b white]• read[/]       Read full file or line ranges",
-            "  [dim]<read><path>src/main.py</path><lines>1-50</lines></read>[/]",
-            "[b white]• edit[/]       Accurate in-file replacement with diff preview",
-            "  [dim]<edit><path>file.py</path><old>old_code</old><new>new_code</new></edit>[/]",
-            "[b white]• write[/]      Create new file or overwrite file with content",
-            "  [dim]<write><path>src/new.py</path><content>...</content></write>[/]",
-            "[b white]• ls[/]         List files and directories in workspace directory",
-            "  [dim]<ls><path>.</path></ls>[/]",
-            "[b white]• glob[/]       Find files matching pattern (e.g. **/*.py)",
-            "  [dim]<glob><pattern>**/*.py</pattern></glob>[/]",
-            "[b white]• search[/]     Grep regex search inside files",
-            "  [dim]<search><pattern>def test</pattern><path>tests</path></search>[/]",
-            "[b white]• command[/]    Execute shell terminal command in workspace",
-            "  [dim]<command>python -m pytest</command>[/]",
-            "[b white]• fetch[/]      Fetch web content via HTTP GET",
-            "  [dim]<fetch><url>https://api.github.com</url></fetch>[/]",
-            "[b white]• todo[/]       Manage project task checklist (add/list/done/remove)",
-            "  [dim]<todo><action>add</action><task>Implement feature</task></todo>[/]",
-        ]
-        return "\n".join(lines)
+        from .modals.tools import ToolsModal
+        self.push_screen(ToolsModal())
 
     def _cmd_status(self, arg: str = "") -> None:
         self.push_screen(InfoModal("Workspace Status", self._build_status_body()))
@@ -1943,14 +1928,35 @@ class CMDAICodeTUI(App):
         from .modals.checkpoints import CheckpointsModal
         self.push_screen(CheckpointsModal(workdir=self.workdir))
 
+    def _git_window(self, view: str = "diff") -> None:
+        """Spawn the git window (changed files + commit bar) in a new terminal.
+
+        view="diff"  -> the file/diff view, plus [git] and [checkpoint] buttons
+        view="git"   -> straight into the branch list
+        """
+        app_py = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "editor",
+            "diff_app.py",
+        )
+        if not os.path.exists(app_py):
+            from .modals.git_modal import GitBranchesModal
+            self.push_screen(GitBranchesModal(workdir=self.workdir))
+            return
+        self._spawn_terminal_window(app_py, "CMDAI CODE Git", self.workdir, "--view", view)
+
     def _cmd_git(self, arg: str = "") -> None:
-        from .modals.git_modal import GitBranchesModal
-        self.push_screen(GitBranchesModal(workdir=self.workdir))
+        """/git -> the git window: changed files, diff and the commit bar."""
+        self._git_window("diff")
+
+    def _cmd_branches(self, arg: str = "") -> None:
+        """/branches -> the same window, straight into the branch list."""
+        self._git_window("git")
 
     def _cmd_branch(self, arg: str = "") -> None:
         arg = (arg or "").strip()
         if not arg:
-            self._cmd_git()
+            self._cmd_branches()
             return
         import subprocess
         try:
@@ -1966,6 +1972,7 @@ class CMDAICodeTUI(App):
         self._cmd_branch(arg)
 
     def _cmd_diff(self, arg: str = "") -> None:
+        """/diff -> the in-app diff modal (review only, opens the commit window)."""
         self._open_diff_window()
 
     def _on_diff_closed(self, action: Any) -> None:
@@ -2374,12 +2381,6 @@ class CMDAICodeTUI(App):
         except Exception:
             summary_text = ""
 
-        try:
-            summary_text = re.sub(r"<tool:[^>]+>.*?</tool:[^>]+>", "", str(summary_text), flags=re.DOTALL)
-            summary_text = re.sub(r"<tool:[^>]+/>", "", summary_text).strip()
-        except Exception:
-            pass
-
         is_err = not summary_text or any(err_kw in str(summary_text).lower() for err_kw in [
             "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
         ])
@@ -2388,10 +2389,9 @@ class CMDAICodeTUI(App):
             summary_text if not is_err else "",
             last_modified_files=getattr(self, "_last_modified_files", None),
             lang=detect_conversation_language(self.messages),
-            messages=self.messages,
         )
 
-        init_goal = self.messages[0]["content"][:1000] if self.messages else ""
+        init_goal = self.messages[0]["content"][:300] if self.messages else ""
         self.messages = [
             {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
             {"role": "assistant", "content": handoff_content.strip()},
@@ -2399,7 +2399,8 @@ class CMDAICodeTUI(App):
 
         def _update_ui():
             tool_block.finish({"success": True, "summary": handoff_content.strip()})
-            self._scroll_chat_to_end_if_enabled(force=True)
+            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+            chat_scroll.scroll_end(animate=False)
 
         self.call_from_thread(_update_ui)
 
@@ -2738,12 +2739,6 @@ class CMDAICodeTUI(App):
                     except Exception:
                         c_resp = ""
 
-                    try:
-                        c_resp = re.sub(r"<tool:[^>]+>.*?</tool:[^>]+>", "", str(c_resp), flags=re.DOTALL)
-                        c_resp = re.sub(r"<tool:[^>]+/>", "", c_resp).strip()
-                    except Exception:
-                        pass
-
                     is_err = not c_resp or any(err_kw in str(c_resp).lower() for err_kw in [
                         "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
                     ])
@@ -2752,9 +2747,8 @@ class CMDAICodeTUI(App):
                         c_resp if not is_err else "",
                         last_modified_files=getattr(self, "_last_modified_files", None),
                         lang=detect_conversation_language(self.messages),
-                        messages=self.messages[:-1] if len(self.messages) > 1 else self.messages,
                     )
-                    init_goal = self.messages[0]["content"][:1000] if self.messages else ""
+                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
                     last_msg = self.messages[-1]
                     self.messages = [
                         {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
@@ -2762,15 +2756,14 @@ class CMDAICodeTUI(App):
                         last_msg,
                     ]
                     self.call_from_thread(assistant_card.finish_tool, {"success": True, "summary": handoff_content.strip()})
-                    self.call_from_thread(self._scroll_chat_to_end_if_enabled, force=True)
+                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
                 except Exception:
-                    init_goal = self.messages[0]["content"][:1000] if self.messages else ""
+                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
                     last_msg = self.messages[-1] if self.messages else {"role": "user", "content": ""}
                     handoff_content = format_compacted_handoff(
                         "",
                         last_modified_files=getattr(self, "_last_modified_files", None),
                         lang=detect_conversation_language(self.messages),
-                        messages=self.messages[:-1] if len(self.messages) > 1 else self.messages,
                     )
                     self.messages = [
                         {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
@@ -2901,6 +2894,9 @@ class CMDAICodeTUI(App):
                     elif kind == "tool":
                         tool_name, args = data
                         if tool_name == "subagent":
+                            # Subagents temporarily removed: consume the whole
+                            # subagent batch as disabled-errors so the model
+                            # corrects itself instead of stalling.
                             j = idx + 1
                             while j < len(remaining_segments) and remaining_segments[j][0] == "tool" and remaining_segments[j][1][0] == "subagent":
                                 j += 1
@@ -2984,6 +2980,11 @@ class CMDAICodeTUI(App):
                 except Exception:
                     pass
             self.call_from_thread(_show_turn_approval)
+        else:
+            # No pending approval: the turn is done, so snapshot it now.
+            # In code mode with file changes the checkpoint waits for the user
+            # to accept the changes (see on_approval_action_selected).
+            self.call_from_thread(self._create_turn_checkpoint)
 
         self.is_generating = False
         self.abort_requested = False

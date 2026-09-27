@@ -11,6 +11,82 @@ from textual.widgets.option_list import Option
 
 class AskModal(ModalScreen[Any]):
 
+    # Rendered as an overlay panel sitting exactly where the input card is, so
+    # it covers the input: from the chat it looks like the input itself turned
+    # into the question. No dimmed backdrop, same width as the input.
+    #
+    # NOTE: this is a widget-level CSS (not DEFAULT_CSS) on purpose - app-level
+    # CSS in styles.py would otherwise win over DEFAULT_CSS.
+    CSS = """
+    AskModal {
+        align: left bottom;
+        background: transparent;
+    }
+    #ask-modal-dialog {
+        dock: bottom;
+        margin: 0 2 0 2;
+        width: 1fr;
+        max-width: 100%;
+        height: auto;
+        max-height: 60%;
+        background: #161b22;
+        border: none;
+        /* 3 cells of padding, same as the input, so the text lines up with
+           the chat cards (2 cell margin + 3 cell padding). */
+        padding: 1 3;
+    }
+    #ask-modal-dialog #ask-question {
+        color: #ffffff;
+        text-style: bold;
+        margin: 1 0 1 0;
+    }
+    #ask-options {
+        background: transparent;
+        border: none !important;
+        height: auto;
+        max-height: 8;
+        padding: 0;
+        margin: 0 0 1 0;
+    }
+    #ask-options > .option-list--option {
+        color: #8b949e;
+        background: transparent;
+    }
+    #ask-options > .option-list--option-highlighted {
+        background: #1f6feb !important;
+        color: #ffffff !important;
+        text-style: bold;
+    }
+    #ask-summary-content {
+        width: 100%;
+        height: auto;
+        max-height: 12;
+        overflow-y: auto;
+        margin: 1 0;
+        padding: 0;
+        color: #e6edf3;
+        display: none;
+    }
+    #ask-custom-box {
+        width: 100%;
+        height: auto;
+        margin: 1 0;
+        display: none;
+    }
+    #ask-custom-label {
+        color: #8b949e;
+        margin: 0 0 1 0;
+    }
+    #ask-custom-input {
+        background: #0d1117;
+        border: round #58a6ff;
+        height: 3;
+        padding: 0 1;
+        color: #e6edf3;
+        margin: 0;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("enter", "select_or_submit", "Submit"),
@@ -67,7 +143,7 @@ class AskModal(ModalScreen[Any]):
         t = Text()
         total = len(self.questions)
         for i in range(total):
-            tab_label = f" Q{i + 1} "
+            tab_label = f" {self._tab_label(self.questions[i].get('question', ''))} "
             if not self.is_summary_mode and i == self.current_idx:
                 t.append(tab_label, style="bold #ffffff on #1f6feb")
             elif i in self.answers:
@@ -82,11 +158,26 @@ class AskModal(ModalScreen[Any]):
             t.append(" Summary ", style="#8b949e")
         return t
 
+    @staticmethod
+    def _tab_label(question: str, limit: int = 30) -> str:
+        """Question snippet used instead of a bare 'Q1' / 'Q2' chip."""
+        q = " ".join(str(question or "").split())
+        if len(q) > limit:
+            q = q[: limit - 1].rstrip() + "…"
+        return q or "Question"
+
+    def _align_to_input(self) -> None:
+        """Cover the input card: the panel's bottom edge is the screen bottom."""
+        try:
+            self.query_one("#ask-modal-dialog").styles.margin = (0, 2, 0, 2)
+        except Exception:
+            pass
+
     def compose(self) -> ComposeResult:
         with Vertical(id="ask-modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(self._render_tabs_text(), id="modal-title")
-                yield Static("[esc: cancel]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield Static(f"[bold #ffffff]{self.current_question_text}[/]", id="ask-question")
 
@@ -104,7 +195,7 @@ class AskModal(ModalScreen[Any]):
             with Horizontal(id="modal-footer"):
                 max_key = len(self.all_choices)
                 yield Static(
-                    f"[1-{max_key}: Pick]  [←/→: Tab]  [enter: Confirm]  [esc: Cancel]",
+                    f"[1-{max_key}: Pick]  [←/→: Question]  [enter: Confirm]",
                     id="ask-footer-keys",
                 )
 
@@ -116,6 +207,7 @@ class AskModal(ModalScreen[Any]):
             ol = self.query_one("#ask-options", OptionList)
             ol.highlighted = 0
             ol.focus()
+        self.call_later(self._align_to_input)
 
     def _render_summary_content(self) -> Text:
         t = Text()
@@ -147,7 +239,7 @@ class AskModal(ModalScreen[Any]):
             ol.focus()
 
             self.query_one("#ask-footer-keys", Static).update(
-                "[1: Start]  [2: Edit]  [←: Prev Tab]  [enter: Confirm]  [esc: Cancel]"
+                "[1: Start]  [2: Edit]  [←: Prev]  [enter: Confirm]"
             )
         else:
             summary_widget.styles.display = "none"
@@ -168,7 +260,7 @@ class AskModal(ModalScreen[Any]):
 
             max_key = len(self.all_choices)
             self.query_one("#ask-footer-keys", Static).update(
-                f"[1-{max_key}: Pick]  [←/→: Tab]  [enter: Confirm]  [esc: Cancel]"
+                f"[1-{max_key}: Pick]  [←/→: Question]  [enter: Confirm]"
             )
 
     def _submit_answer(self, ans: str) -> None:
@@ -214,7 +306,7 @@ class AskModal(ModalScreen[Any]):
         custom_input = self.query_one("#ask-custom-input", Input)
         custom_input.value = ""
         custom_input.focus()
-        self.query_one("#ask-footer-keys", Static).update("[enter: Submit answer]  [esc: Back to options]")
+        self.query_one("#ask-footer-keys", Static).update("[enter: Submit answer]")
 
     def action_nav_left(self) -> None:
         if self.is_custom_mode:
@@ -262,7 +354,7 @@ class AskModal(ModalScreen[Any]):
             ol.focus()
             max_key = len(self.all_choices)
             self.query_one("#ask-footer-keys", Static).update(
-                f"[1-{max_key}: Pick]  [←/→: Tab]  [enter: Confirm]  [esc: Cancel]"
+                f"[1-{max_key}: Pick]  [←/→: Question]  [enter: Confirm]"
             )
             return
 

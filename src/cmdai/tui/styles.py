@@ -77,7 +77,6 @@ Screen {
 #hero-meta-bar {
     height: auto;
     padding: 1 3 1 3;
-    margin-top: 1;
     background: #161b22;
     color: #8b949e;
 }
@@ -126,7 +125,7 @@ Screen {
 
 #chat-scroll {
     background: #000000;
-    padding: 0 1 0 3;
+    padding: 0 2;
     margin: 0;
     width: 100%;
     height: 1fr;
@@ -136,6 +135,8 @@ Screen {
     scrollbar-gutter: auto;
 }
 
+/* User card: one empty row above the label, one between label and prompt,
+   one below the prompt. */
 .user-card {
     background: #161b22;
     border: none;
@@ -143,6 +144,14 @@ Screen {
     margin: 1 0;
     width: 100%;
     color: #e6edf3;
+}
+
+.user-card .card-label {
+    margin: 0 0 1 0;
+}
+
+.user-card .card-body {
+    margin: 0;
 }
 
 .index-card {
@@ -263,7 +272,7 @@ Screen {
     height: auto;
     width: 100%;
     background: #000000;
-    padding: 1 1 0 3;
+    padding: 1 2 0 2;
     margin: 0;
 }
 
@@ -390,7 +399,7 @@ HintRow, .cmd-hint {
 }
 
 HintRow.selected, .cmd-hint.selected {
-    background: #2c5380 !important;
+    background: #1f6feb !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -411,7 +420,6 @@ HintRow.selected, .cmd-hint.selected {
 #input-meta-bar {
     height: auto;
     padding: 1 3 1 3;
-    margin-top: 1;
     background: #161b22;
     color: #8b949e;
 }
@@ -573,7 +581,7 @@ ModalScreen {
 }
 
 #ask-options > .option-list--option-highlighted {
-    background: #2c5380 !important;
+    background: #1f6feb !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -603,6 +611,47 @@ ModalScreen {
     height: 1;
     margin: 0 0 1 0;
     width: 100%;
+}
+
+/* Content-sized scroll areas: without an explicit auto height the 1fr
+   default stretches the dialog to max-height and leaves empty rows. */
+#modal-scroll, #modal-body {
+    height: auto;
+    max-height: 60;
+}
+
+#modal-scroll {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: transparent;
+}
+
+#file-picker-list {
+    background: #0d1117;
+    border: none !important;
+    height: 1fr;
+    max-height: 100%;
+    padding: 0 1;
+    margin: 0;
+    overflow-x: hidden;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
+#file-picker-list > .option-list--option {
+    background: transparent;
+    color: #8b949e;
+}
+
+#file-picker-list > .option-list--option-highlighted {
+    background: #1f6feb !important;
+    color: #ffffff !important;
+    text-style: none;
 }
 
 #modal-title {
@@ -662,6 +711,91 @@ Input .input--cursor {
     background-tint: transparent 0%;
 }
 
+/* Changelog: the list fills the window, a release opens in a stacked window. */
+#modal-dialog.releases-dialog {
+    height: auto;
+    max-height: 85%;
+}
+
+#modal-dialog.releases-dialog #modal-list {
+    height: auto;
+    max-height: 8;
+}
+
+#releases-preview {
+    height: 1fr;
+    max-height: 100%;
+    background: #0d1117;
+    border: none;
+    border-top: solid #21262d;
+    padding: 1 0 0 0;
+    margin: 1 0 0 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
+#releases-body {
+    width: 100%;
+    height: auto;
+    color: #e6edf3;
+}
+
+/* Agent tools: flat list like /help, click opens a stacked window. */
+#modal-dialog.tools-dialog {
+    width: 76;
+    height: auto;
+    max-height: 80%;
+}
+
+#modal-dialog.tool-note-dialog {
+    width: 76;
+    height: auto;
+    max-height: 80%;
+}
+
+#tools-list {
+    width: 100%;
+    height: auto;
+    max-height: 14;
+    background: #0d1117;
+    border: none !important;
+    padding: 0;
+    margin: 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
+#tools-list > .option-list--option {
+    background: transparent;
+    color: #8b949e;
+}
+
+#tools-list > .option-list--option-highlighted {
+    background: #1f6feb !important;
+    color: #ffffff !important;
+    text-style: bold;
+}
+
+#releases-hint {
+    height: 1;
+    color: #8b949e;
+    margin-bottom: 1;
+}
+
+#releases-preview {
+    height: auto;
+    max-height: 100%;
+    background: #0d1117;
+    border: none;
+    padding: 0;
+    margin: 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
 #modal-list > .option-list--option {
     color: #8b949e;
     background: transparent;
@@ -673,13 +807,13 @@ Input .input--cursor {
 }
 
 #modal-list > .option-list--option-highlighted {
-    background: #2c5380 !important;
+    background: #1f6feb !important;
     color: #ffffff !important;
     text-style: bold;
 }
 
 #modal-list > .option-list--option-selected {
-    background: #2c5380 !important;
+    background: #1f6feb !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -689,6 +823,16 @@ Input .input--cursor {
     margin-top: 1;
     width: 100%;
     color: #6e7681;
+}
+
+#modal-footer-left {
+    width: 1fr;
+    height: 1;
+}
+
+#modal-footer-right {
+    width: auto;
+    height: 1;
 }
 
 /* ═════════════════════════════════════════════════════════════
@@ -742,8 +886,8 @@ Input .input--cursor {
 }
 
 #diff-file-list > .option-list--option-highlighted {
-    background: #21262d !important;
-    color: #58a6ff !important;
+    background: #1f6feb !important;
+    color: #ffffff !important;
     text-style: bold;
 }
 
@@ -770,18 +914,12 @@ Input .input--cursor {
     height: auto;
 }
 
-#diff-action-bar {
-    height: 3;
-    margin: 1 0 0 0;
-    background: #161b22;
-    padding: 0 1;
-    align: right middle;
-}
-
-#diff-action-hint {
-    width: 1fr;
-    color: #8b949e;
+/* Actions live in the footer row: one line high, buttons only. */
+#diff-footer-actions {
+    width: auto;
     height: 1;
+    align-vertical: middle;
+    margin: 0 2 0 0;
 }
 
 #diff-commit-btn {
@@ -790,7 +928,7 @@ Input .input--cursor {
     min-height: 1;
     background: #238636;
     color: #ffffff;
-    border: none;
+    border: none !important;
     padding: 0 2;
     text-style: bold;
 }
@@ -801,7 +939,28 @@ Input .input--cursor {
 
 #diff-commit-btn:focus {
     background: #2ea043;
-    border: none;
+    border: none !important;
+}
+
+#diff-reject-btn {
+    width: auto;
+    height: 1;
+    min-height: 1;
+    margin-left: 1;
+    background: #b62324;
+    color: #ffffff;
+    border: none !important;
+    padding: 0 2;
+    text-style: bold;
+}
+
+#diff-reject-btn:hover {
+    background: #da3633;
+}
+
+#diff-reject-btn:focus {
+    background: #da3633;
+    border: none !important;
 }
 
 #commit-box {
@@ -860,13 +1019,19 @@ Input .input--cursor {
     border: none !important;
 }
 
+/* Textual tints the whole focused OptionList by 5%, which reads as "every row
+   is selected". Only the highlighted row may carry a background. */
+OptionList:focus {
+    background-tint: transparent 0%;
+}
+
 #plan-list > .option-list--option {
     color: #8b949e;
     background: transparent;
 }
 
 #plan-list > .option-list--option-highlighted {
-    background: #2c5380 !important;
+    background: #1f6feb !important;
     color: #ffffff !important;
     text-style: bold;
 }

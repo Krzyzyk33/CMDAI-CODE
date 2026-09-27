@@ -139,9 +139,12 @@ class DiffModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog", classes="diff-modal-dialog"):
             with Horizontal(id="modal-header"):
-                title = self.single_title or "Working Changes (Git Diff)"
+                if self.is_single_edit:
+                    title = self.single_title or "Git Changes"
+                else:
+                    title = "Git Changes · review only"
                 yield Static(f"[bold white]{title}[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             with Horizontal(id="diff-split-container"):
                 with Vertical(id="diff-files-sidebar"):
@@ -159,20 +162,17 @@ class DiffModal(ModalScreen[None]):
                     yield Static("", id="diff-preview-header")
                     yield Static("", id="diff-content-body")
 
-            with Horizontal(id="diff-action-bar"):
-                if self.is_single_edit:
-                    yield Static("[bold #7ee787]●[/] [dim]Allow this edit?[/dim]", id="diff-action-hint")
-                    yield Button("Allow (y)", id="diff-commit-btn", variant="success")
-                    yield Button("Reject (n)", id="diff-reject-btn", variant="error")
-                else:
-                    yield Static("[bold #58a6ff]●[/] [dim]Ready to commit changes?[/dim]", id="diff-action-hint")
-                    yield Button("Commit Changes (c)", id="diff-commit-btn", variant="success")
-
             with Horizontal(id="modal-footer"):
                 if self.is_single_edit:
                     yield Static("[b #3fb950]Allow[/] y/Enter   [b #f85149]Reject[/] n/Esc   [b #58a6ff]Select file[/] ↑/↓", id="modal-footer-left")
                 else:
-                    yield Static("[b #3fb950]Commit[/] c / click button   [b #58a6ff]Select file[/] ↑/↓   [dim]Close[/] esc", id="modal-footer-left")
+                    yield Static("[b #3fb950]Commit[/] c / click button   [b #58a6ff]Select file[/] ↑/↓   [dim]opens the commit window[/dim]", id="modal-footer-left")
+                with Horizontal(id="diff-footer-actions"):
+                    if self.is_single_edit:
+                        yield Button("Allow", id="diff-commit-btn", variant="success")
+                        yield Button("Reject", id="diff-reject-btn", variant="error")
+                    else:
+                        yield Button("Commit Changes", id="diff-commit-btn", variant="success")
                 cnt = len(self.file_list)
                 yield Static(f"[dim]{cnt} changed file{'s' if cnt != 1 else ''}[/]", id="modal-footer-right")
 

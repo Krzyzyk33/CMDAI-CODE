@@ -48,14 +48,14 @@ class SessionsModal(ModalScreen[str]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Saved Conversations", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield SessionSearchInput(placeholder="Type to filter conversations... [Enter to open]", id="modal-search")
 
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Open session]  [delete: Remove]  [esc: Close]")
+                yield Static("[enter: Open session]  [delete: Remove]")
 
     def on_mount(self) -> None:
         self.all_sessions = self.session_manager.list_sessions()

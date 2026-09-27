@@ -58,16 +58,89 @@ def setup_crash_logger():
     sys.excepthook = handle_exception
 
 
+_ANIM_MODULE = None
+
+
+def _load_animator():
+    """Load tools/install_anim.py as a module (shared step animation)."""
+    global _ANIM_MODULE
+    if _ANIM_MODULE is not None:
+        return _ANIM_MODULE
+    import importlib.util
+    path = os.path.join(APP_ROOT, "tools", "install_anim.py")
+    spec = importlib.util.spec_from_file_location("install_anim", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _ANIM_MODULE = mod
+    return mod
+
+
+def _animated_step(label, work_fn, min_time=1.0, timeout=300.0, header="", gap=0):
+    """Run work_fn in a background thread while animating the step.
+
+    work_fn returns (status, detail) with status OK/FAIL.
+    Returns (status, detail). Falls back to plain output when the
+    animator module is unavailable.
+    """
+    import tempfile
+    import threading
+    try:
+        anim = _load_animator()
+    except Exception:
+        anim = None
+    fd, flag = tempfile.mkstemp(prefix="cmdai-update-", suffix=".done")
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+    result = {}
+
+    def _work():
+        try:
+            result["status"], result["detail"] = work_fn()
+        except Exception as e:
+            result["status"], result["detail"] = ("FAIL", str(e))
+        try:
+            with open(flag, "w", encoding="utf-8") as f:
+                f.write(result["status"])
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    try:
+        if anim is not None:
+            status = anim.animate(
+                label=label, wait_file=flag,
+                min_time=min_time, timeout=timeout,
+                header=header, gap=gap,
+            )
+        else:
+            print("... " + label + " ...")
+            thread.join(timeout if timeout > 0 else None)
+            status = result.get("status", "TIMEOUT")
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return ("FAIL", "cancelled by user")
+    thread.join(timeout=10)
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+    status = result.get("status", status)
+    return (status, result.get("detail", ""))
+
+
 def handle_update():
     """Updates CMDAI CODE from GitHub repository without modifying user's personal config."""
     import subprocess
 
     def _run(args):
         return subprocess.run(args, cwd=APP_ROOT, text=True, capture_output=True)
-
-    print("\n" + "=" * 65)
-    print("  CMDAI CODE - GitHub Repository Update")
-    print("=" * 65 + "\n")
 
     try:
         subprocess.check_output(["git", "--version"], stderr=subprocess.DEVNULL)
@@ -144,37 +217,29 @@ def handle_update():
 
     ver_before = _display_version()
 
-    print("[*] Pulling latest changes from repository...")
-    try:
+    def _pull_work():
         res = _run(["git", "pull", "--rebase", "--autostash"])
-        pull_text = f"{res.stdout or ''}\n{res.stderr or ''}".strip()
-        # Show only meaningful git lines; hide transport noise.
-        for line in pull_text.splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            low = s.lower()
-            if low.startswith("fetching ") or low.startswith("from http"):
-                continue
-            print(f"    {s}")
-        if res.returncode != 0:
-            combined = f"{res.stdout or ''}\n{res.stderr or ''}"
-            if "dubious ownership" in combined:
-                print(f"[!] Hint: run: git config --global --add safe.directory {APP_ROOT}")
-            elif "no tracking information" in combined:
-                print("[!] Hint: no upstream set. Run: git branch --set-upstream-to=origin/main (or origin/master)")
-            elif "Your local changes" in combined or "would be overwritten" in combined:
-                print("[!] Hint: you have local changes. Run: git stash push -m update-backup, then retry update.")
-            print("[!] Update failed.")
-            return res.returncode
-    except Exception as e:
-        print(f"[!] Error while pulling update: {e}")
+        status = "OK" if res.returncode == 0 else "FAIL"
+        return (status, f"{res.stdout or ''}\n{res.stderr or ''}")
+
+    pull_status, pull_out = _animated_step(
+        "Pulling latest changes", _pull_work,
+        min_time=1.2, timeout=300.0,
+        header="update cmdai code", gap=3,
+    )
+    if pull_status != "OK":
+        if "dubious ownership" in pull_out:
+            print(f"Hint: run: git config --global --add safe.directory {APP_ROOT}")
+        elif "no tracking information" in pull_out:
+            print("Hint: no upstream set. Run: git branch --set-upstream-to=origin/main (or origin/master)")
+        elif "Your local changes" in pull_out or "would be overwritten" in pull_out:
+            print("Hint: you have local changes. Run: git stash push -m update-backup, then retry update.")
+        print("Error: update failed.")
         return 1
 
     req_path = os.path.join(APP_ROOT, "requirements.txt")
     if os.path.exists(req_path):
-        print("[*] Synchronizing Python packages...")
-        try:
+        def _pip_work():
             pip = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r", req_path,
                  "--quiet", "--disable-pip-version-check"],
@@ -184,7 +249,6 @@ def handle_update():
             # Filter pip noise: broken "~" dist warnings and self-version notice.
             # Real errors (ERROR/Failed) are still shown.
             interesting = []
-            pip_notice = ""
             for line in pip_text.splitlines():
                 s = line.strip()
                 if not s:
@@ -192,42 +256,52 @@ def handle_update():
                 if "Ignoring invalid distribution" in s:
                     continue
                 if "new release of pip is available" in s:
-                    pip_notice = s
                     continue
                 if s.startswith("[notice]"):
                     continue
                 if "to update, run:" in s and "pip install" in s:
                     continue
                 interesting.append(s)
-            if pip.returncode != 0:
-                for s in interesting[-15:]:
-                    print(f"    {s}")
-                print("[!] Dependency sync failed (see lines above).")
-            else:
-                print("[OK] Dependencies are up to date.")
-                if pip_notice:
-                    print(f"     ({pip_notice})")
-        except Exception:
-            pass
+            status = "OK" if pip.returncode == 0 else "FAIL"
+            return (status, "\n".join(interesting[-15:]))
+
+        pip_status, pip_detail = _animated_step(
+            "Synchronizing packages", _pip_work,
+            min_time=1.0, timeout=900.0, gap=3,
+        )
+        if pip_status != "OK":
+            if pip_detail.strip():
+                print(pip_detail)
+            print("Error: dependency sync failed (see lines above).")
 
     # Refresh release/version cache so hero shows the new tag immediately.
-    ver_after = ver_before
-    try:
+    def _refresh_work():
         sys.path.insert(0, os.path.join(APP_ROOT, "src"))
         from cmdai.core.releases import get_releases as _gr, get_display_version as _gdv2
         _gr(refresh=True)
         ver_after = (_gdv2() or "").strip()
         if ver_after and not ver_after.lower().startswith("v"):
             ver_after = f"v{ver_after}"
-    except Exception:
-        ver_after = _display_version()
+        return ("OK", ver_after)
+
+    ver_after = ver_before
+    refresh_status, refresh_out = _animated_step(
+        "Refreshing version", _refresh_work,
+        min_time=1.0, timeout=120.0,
+    )
+    if refresh_status == "OK" and refresh_out:
+        ver_after = refresh_out
 
     if ver_before and ver_after and ver_before != ver_after:
-        print(f"\n[OK] Updated: {ver_before} -> {ver_after}\n")
+        result_text = f"Updated: {ver_before} -> {ver_after}"
     elif ver_after:
-        print(f"\n[OK] Already up to date ({ver_after}).\n")
+        result_text = f"Already up to date ({ver_after})"
     else:
-        print("\n[OK] CMDAI CODE has been successfully updated!\n")
+        result_text = "CMDAI CODE has been successfully updated!"
+    try:
+        _load_animator().print_footer(result_text)
+    except Exception:
+        print(result_text)
     return 0
 
 
@@ -326,6 +400,59 @@ def handle_add_local_model():
     return 0
 
 
+CLI_HELP = """
+  [bold]Usage[/]
+    cmdai code [target]            launch the app (default)
+    cmdai code help | -h | --help  show this help
+    cmdai editor [file]            open the code editor
+    cmdai code update              update from GitHub
+    cmdai addlocal                 add a local model (.gguf)
+
+  [bold]Options[/]
+    --workdir <path>     working directory (default: current)
+    --provider <id>      model provider, e.g. local_gguf, openrouter
+    --model <id>         model, e.g. gemma-4-E4B-it-Q4_0.gguf
+    --install-launcher   install the cmdai shortcut in PATH
+
+  [bold]In-app commands[/]
+    /help                every slash command with descriptions
+    /mode                auto / plan / code
+    /model               pick a model
+    /git                 git window in a new terminal
+    /diff                review working changes
+    /plan                task checklist (CMDAIPLAN.md)
+    /editor              code editor in a new window
+
+  [dim]{repo}[/]
+"""
+
+
+def print_cli_help() -> None:
+    from .core.branding import get_hero_logo, get_plain_logo
+
+    logo = get_hero_logo()
+    # The ASCII logo already spells out CMDAI CODE, so only the tagline goes
+    # under it - centred against the logo width instead of hardcoded spaces.
+    plain_lines = get_plain_logo().splitlines()
+    width = max((len(l) for l in plain_lines), default=0)
+    tagline = "Next-gen Terminal Code Agent"
+    pad = " " * max(0, (width - len(tagline)) // 2)
+    header = f"\n{pad}[bold white]{tagline}[/]\n"
+    body = CLI_HELP.format(repo=REPO_URL)
+    try:
+        from rich.console import Console
+
+        console = Console(highlight=False)
+        for line in logo.splitlines():
+            console.print(line)
+        console.print(header, markup=True, highlight=False)
+        console.print(body, markup=True, highlight=False)
+    except Exception:
+        print(get_plain_logo())
+        print("\n" + tagline.center(width))
+        print(body)
+
+
 def main():
     setup_crash_logger()
     # Windows PL console (cp1250) can't encode box glyphs — force UTF-8 output.
@@ -340,13 +467,20 @@ def main():
     raw_args = [a.lower() for a in sys.argv[1:]]
     args_joined = " ".join(raw_args)
 
+    # `help` / `-h` / `--help` print the CMDAI CODE help. Handled before
+    # argparse so it never falls through to its own "usage: cmdai.py" output.
+    if any(a in ("help", "-h", "--help", "-?", "/?") for a in raw_args):
+        print_cli_help()
+        return
+
     if "code update" in args_joined or (len(raw_args) >= 1 and raw_args[0] == "update"):
         sys.exit(handle_update())
 
     if "code addlocal" in args_joined or "addlocal" in args_joined or "add-model" in args_joined:
         sys.exit(handle_add_local_model())
 
-    parser = argparse.ArgumentParser(description="CMDAI CODE - Next-gen Terminal Code Agent")
+    parser = argparse.ArgumentParser(prog="cmdai code", add_help=False,
+                                     description="CMDAI CODE - Next-gen Terminal Code Agent")
     parser.add_argument("command", nargs="?", default="launch", help="Command (code, launch)")
     parser.add_argument("--workdir", default=os.getcwd(), help="Target project working directory")
     parser.add_argument("--provider", default="", help="LLM Provider ID")
@@ -363,13 +497,23 @@ def main():
     except Exception:
         pass
 
-    if args.command == "editor" or (len(sys.argv) > 1 and sys.argv[1].lower() == "editor"):
+    if "editor" in raw_args:
         from cmdai.editor.editor_app import CMDAICodeEditor
+        raw_list = sys.argv[1:]
         target_file = "."
-        for a in (sys.argv[2:] if sys.argv[1].lower() == "editor" else sys.argv[1:]):
-            if not a.startswith("-") and a.lower() != "editor":
-                target_file = a
-                break
+        i = 0
+        while i < len(raw_list):
+            a = raw_list[i]
+            if a.lower() in ("editor", "code"):
+                i += 1
+                continue
+            if a.startswith("-"):
+                i += 1
+                if "=" not in a and i < len(raw_list):
+                    i += 1
+                continue
+            target_file = a
+            break
         app = CMDAICodeEditor(initial_path=os.path.abspath(target_file))
         app.run()
         return

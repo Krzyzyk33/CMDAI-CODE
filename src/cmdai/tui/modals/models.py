@@ -74,7 +74,7 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Models — Providers Tree", id="modal-title")
-                yield Static("[esc: Close]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield ModalSearchInput(placeholder="Type to filter models... [Press / to search]", id="modal-search")
 

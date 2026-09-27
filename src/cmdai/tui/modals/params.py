@@ -38,9 +38,9 @@ class ParamEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(f"[bold white]Set {self._key}[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
-            yield Input(value=str(self._current), id="param-value")
+            yield Input(value=str(self._current), id="param-value", select_on_focus=False)
             if self._key == "max_tokens":
                 yield Static("[dim]0 = unlimited / default model maximum[/dim]")
 
@@ -101,7 +101,7 @@ class ParamsModal(ModalScreen[None]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Generation parameters[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield OptionList(id="modal-list")
 

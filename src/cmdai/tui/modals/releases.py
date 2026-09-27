@@ -10,8 +10,42 @@ from textual.widgets.option_list import Option
 from ...core.releases import get_releases
 
 
+class ReleaseNoteModal(ModalScreen[None]):
+    """Full changelog of a single release, stacked on top of the list."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Back", priority=True),
+        Binding("enter", "close", "Back", show=False),
+    ]
+
+    def __init__(self, release: Dict[str, Any], **kwargs):
+        super().__init__(**kwargs)
+        self.release = release
+
+    def compose(self) -> ComposeResult:
+        tag = self.release.get("tag", "")
+        name = self.release.get("name", "")
+        date = self.release.get("published_at", "")
+        pre = " [pre-release]" if self.release.get("prerelease") else ""
+        body = (self.release.get("body") or "_No description._").strip()
+        with Vertical(id="modal-dialog"):
+            with Horizontal(id="modal-header"):
+                yield Static(f"[bold white]{tag}[/]", id="modal-title")
+                yield Static("[dim]esc[/]", id="modal-esc")
+            yield Static(f"[dim]{date}{pre} · {name}[/]", id="releases-hint")
+            with VerticalScroll(id="releases-preview"):
+                try:
+                    from rich.markdown import Markdown
+                    yield Static(Markdown(body), id="releases-body")
+                except Exception:
+                    yield Static(body, id="releases-body")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class ReleasesModal(ModalScreen[None]):
-    """Changelog - release menu on top, markdown preview below. All English."""
+    """Changelog - every release listed newest first, click opens a stacked window."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
@@ -25,16 +59,14 @@ class ReleasesModal(ModalScreen[None]):
         self.releases: List[Dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="modal-dialog"):
+        with Vertical(id="modal-dialog", classes="releases-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Changelog", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
-            yield Static("Select a release to preview.", id="releases-hint")
+                yield Static("[dim]esc[/]", id="modal-esc")
             yield OptionList(id="modal-list")
-            with VerticalScroll(id="releases-preview"):
-                yield Static("Select a release.", id="releases-body")
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: preview]  [esc: close]")
+                yield Static("[b #58a6ff]Open[/] enter / click   [dim]opens a window with the full changelog[/dim]", id="modal-footer-left")
+                yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
         self.releases, _src = get_releases(refresh=True)
@@ -47,37 +79,23 @@ class ReleasesModal(ModalScreen[None]):
             return
         for r in self.releases:
             pre = " [pre-release]" if r.get("prerelease") else ""
-            ol.add_option(Option(f"  [b #58a6ff]{r['tag']}[/]  [dim]{r.get('published_at', '')}{pre}[/]  {r.get('name', '')[:50]}"))
+            ol.add_option(Option(
+                f"  [b #58a6ff]{r['tag']}[/]  [dim]{r.get('published_at', '')}{pre}[/]  {r.get('name', '')[:50]}"
+            ))
         ol.highlighted = 0
-        self._preview(0)
         ol.focus()
 
-    def _preview(self, idx: int) -> None:
-        if not (0 <= idx < len(self.releases)):
-            return
-        r = self.releases[idx]
-        body = (r.get("body") or "_No description._").strip()
-        try:
-            from rich.markdown import Markdown
-            self.query_one("#releases-body", Static).update(Markdown(f"# {r['tag']} - {r.get('name', '')}\n\n*{r.get('published_at', '')}*\n\n{body}"))
-        except Exception:
-            self.query_one("#releases-body", Static).update(f"{r['tag']}\n\n{body}")
-
     def action_cursor_up(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        ol.action_cursor_up()
-        self._preview(ol.highlighted or 0)
+        self.query_one("#modal-list", OptionList).action_cursor_up()
 
     def action_cursor_down(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        ol.action_cursor_down()
-        self._preview(ol.highlighted or 0)
+        self.query_one("#modal-list", OptionList).action_cursor_down()
 
     def action_open_window(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
         idx = ol.highlighted
-        if idx is not None:
-            self._preview(idx)
+        if idx is not None and 0 <= idx < len(self.releases):
+            self.app.push_screen(ReleaseNoteModal(self.releases[idx]))
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -105,12 +123,9 @@ class UpdateNoticeModal(ModalScreen[None]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Changelog", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             with VerticalScroll(id="releases-preview"):
                 yield Static("Loading latest release...", id="update-notice-body")
-            with Horizontal(id="modal-footer"):
-                yield Static("[esc: close]")
-                yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
         try:
@@ -119,7 +134,7 @@ class UpdateNoticeModal(ModalScreen[None]):
             if not rels:
                 rels, _src = get_releases(refresh=False)
             if rels:
-                latest = rels[-1]
+                latest = rels[0]
                 self.version = latest.get("tag", self.version)
                 body = (latest.get("body") or "_No description._").strip()
                 self.notes = f"{latest.get('name', '')}\n\n{body}"

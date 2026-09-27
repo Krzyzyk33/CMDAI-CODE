@@ -1,9 +1,23 @@
-from ..tui.modals.git_modal import GitBranchesModal
-from ..tui.modals.checkpoints import CheckpointsModal
+"""Read-only diff viewer for the working tree.
+
+Launched by /diff from the TUI in its own terminal window. It never writes to
+a file - it only renders `git diff` output. The commit bar runs git commands,
+which is not the same thing as editing a file.
+"""
+
 import os
 import subprocess
 import sys
 from typing import Dict, List, Optional
+
+# Runs both as `python src/cmdai/editor/diff_app.py` and as
+# `python -m cmdai.editor.diff_app`, so the package root must be importable.
+_SRC_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _SRC_ROOT not in sys.path:
+    sys.path.insert(0, _SRC_ROOT)
+
+from cmdai.tui.modals.git_modal import GitBranchesModal
+from cmdai.tui.modals.checkpoints import CheckpointsModal
 
 from rich.text import Text
 from textual import on
@@ -36,6 +50,12 @@ Screen {
 #diff-title-label {
     width: 1fr;
     color: #6e7681;
+}
+
+#diff-readonly {
+    width: auto;
+    color: #6e7681;
+    margin-right: 2;
 }
 
 
@@ -210,9 +230,12 @@ class CMDAIDiffApp(App[None]):
         Binding("down", "cursor_down", "Down", show=False),
     ]
 
-    def __init__(self, workdir: str = ".", **kwargs):
+    def __init__(self, workdir: str = ".", start_view: str = "diff", **kwargs):
         super().__init__(**kwargs)
         self.workdir = os.path.abspath(workdir)
+        # "diff" (default) or "git" - the latter opens straight into the
+        # branch window, which is what /git spawns.
+        self.start_view = start_view
         self.files_data: Dict[str, str] = {}
         self.file_list: List[str] = []
         self.file_status: Dict[str, str] = {}
@@ -327,9 +350,10 @@ class CMDAIDiffApp(App[None]):
         with Horizontal(id="diff-top-bar"):
             yield Static("[bold white]CMDAI[/] [bold #58a6ff]DIFF[/]", id="diff-brand")
             yield Static(f"[dim]{self.workdir}[/dim]", id="diff-title-label")
+            yield Static("[dim]read-only[/]", id="diff-readonly")
             yield Button(Text("[checkpoint]"), id="diff-checkpoints-btn")
             yield Button(Text("[git]"), id="diff-git-btn")
-            yield Static("[dim]esc exit[/]", id="diff-top-esc")
+            yield Static("[dim]esc[/]", id="diff-top-esc")
 
         with Horizontal(id="diff-main"):
             with Vertical(id="sidebar"):
@@ -357,10 +381,14 @@ class CMDAIDiffApp(App[None]):
                     value=self.suggested_msg,
                     placeholder="Commit message... (click Commit Changes to save)",
                     id="commit-input",
+                    select_on_focus=False,
                 )
                 yield Button("Commit Changes", id="commit-btn", variant="success")
 
     def on_mount(self) -> None:
+        if self.start_view == "git":
+            self.push_screen(GitBranchesModal(workdir=self.workdir))
+            return
         ol = self.query_one("#file-list", OptionList)
         if self.file_list:
             ol.highlighted = 0
@@ -483,9 +511,16 @@ class CMDAIDiffApp(App[None]):
 
 
 def main():
-    raw_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    args = sys.argv[1:]
+    start_view = "diff"
+    if "--view" in args:
+        i = args.index("--view")
+        if i + 1 < len(args):
+            start_view = args[i + 1]
+        del args[i:i + 2]
+    raw_dir = args[0] if args else "."
     abs_dir = os.path.abspath(raw_dir)
-    app = CMDAIDiffApp(workdir=abs_dir)
+    app = CMDAIDiffApp(workdir=abs_dir, start_view=start_view)
     app.run()
 
 

@@ -41,11 +41,11 @@ class SystemPromptEditScreen(ModalScreen[Optional[Dict[str, str]]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]New system prompt[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             yield Input(placeholder="Name", id="sp-name")
             yield TextArea(id="sp-text")
             with Horizontal(id="modal-footer"):
-                yield Static("[b #58a6ff]Save[/] ctrl+s   [dim]Cancel[/] esc", id="modal-footer-left")
+                yield Static("[b #58a6ff]Save[/] ctrl+s", id="modal-footer-left")
                 yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -89,11 +89,11 @@ class SystemPromptModal(ModalScreen[Optional[Dict[str, str]]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]System prompt[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             yield Input(placeholder="Search prompts...", id="modal-search")
             yield OptionList(id="modal-list")
             with Horizontal(id="modal-footer"):
-                yield Static("[b #58a6ff]Select[/] enter   [dim]Cancel[/] esc", id="modal-footer-left")
+                yield Static("[b #58a6ff]Select[/] enter", id="modal-footer-left")
                 yield Static("[dim]ctrl+s in editor saves[/]", id="modal-footer-right")
 
     def on_mount(self) -> None:
