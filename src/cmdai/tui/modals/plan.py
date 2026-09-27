@@ -68,10 +68,14 @@ class PlanModal(ModalScreen[None]):
         with Vertical(id="modal-dialog", classes="plan-modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Project Plan[/]  [dim]CMDAIPLAN.md[/dim]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield OptionList(id="plan-list")
-            yield Input(placeholder="Add new task (Enter to save)...", id="plan-new-input")
+            yield Input(
+                placeholder="Add a task manually (Enter to save)...",
+                id="plan-new-input",
+                select_on_focus=False,
+            )
 
             with Horizontal(id="modal-footer"):
                 yield Static("[b #58a6ff]Toggle[/] enter   [b #f85149]Delete[/] del   [dim]Add[/] a", id="modal-footer-left")
@@ -91,7 +95,8 @@ class PlanModal(ModalScreen[None]):
             if done:
                 label = f"  [b #3fb950]●[/]  [dim]{title}[/]"
             else:
-                label = f"  [b #58a6ff]○[/]  [bold white]{title}[/]"
+                # Not bold: only the highlighted row should read as selected.
+                label = f"  [#58a6ff]○[/]  [#8b949e]{title}[/]"
             ol.add_option(Option(label, id=f"task_{idx}"))
 
         if prev_highlight is not None and 0 <= prev_highlight < len(self.tasks):
@@ -141,7 +146,10 @@ class PlanModal(ModalScreen[None]):
                 ol.highlighted = min(idx, len(self.tasks) - 1)
 
     def action_focus_add(self) -> None:
-        self.query_one("#plan-new-input", Input).focus()
+        try:
+            self.query_one("#plan-new-input", Input).focus()
+        except Exception:
+            pass
 
     def action_dismiss_modal(self) -> None:
         self.dismiss(None)

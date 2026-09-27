@@ -27,7 +27,7 @@ class StatsModal(ModalScreen[None]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Session Statistics", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield Static(
                 f"[bold white]Total Tokens In:[/]     [#58a6ff]{tokens_in}[/]\n"

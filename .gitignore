@@ -30,3 +30,13 @@ scratch/
 
 node_modules/
 *.tgz
+
+# src/**/__pycache__/ lapie juz regula __pycache__/ na gorze
+
+# lokalne zrzuty ekranu (generator: tools/tui_screenshots.py)
+zrzuty/
+zrzuty2/
+
+# edytor trzymany poza repo
+editor/
+/

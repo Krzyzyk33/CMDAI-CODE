@@ -20,10 +20,12 @@ COMMANDS_DOC: Dict[str, str] = {
     "/settings": "Configure server port, auto-copy, exit confirmation, launcher",
     "/loader": "Select GGUF backend loader (CPU / CUDA / Vulkan)",
     "/stats": "Session statistics: tokens, response speeds, tool counts",
-    "/diff": "Open git diff in a new terminal window",
+    "/git": "Open the git window in a new terminal (changed files, diff, commit)",
+    "/branches": "Open the branch list in a new terminal (checkout / fork)",
+    "/diff": "Review working changes in a modal (read-only, opens commit)",
     "/editor": "Open terminal code editor (VS Code style) in a new window",
     "/test": "Auto-detect and run test suite with live output",
-    "/commit": "Open git commit in a new terminal window",
+    "/commit": "Write a commit message and commit the staged changes in a modal",
     "/review": "Run AI code review on current uncommitted changes",
     "/plan": "Minimalist task checklist and plan manager (CMDAIPLAN.md)",
     "/debug": "Fast project-wide AST scan for Python/JSON syntax errors (alias: /bugs)",
@@ -42,7 +44,7 @@ COMMANDS_DOC: Dict[str, str] = {
 
 HELP_CATEGORIES: List[Tuple[str, List[str]]] = [
     ("Chat & Sessions", ["/new", "/help", "/export", "/summarize", "/sessions", "/stats"]),
-    ("Code Agent & Git", ["/editor", "/diff", "/commit", "/test", "/review", "/plan", "/debug", "/index", "/mode"]),
+    ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/test", "/review", "/plan", "/debug", "/index", "/mode"]),
     ("Context & Files", ["/cd", "/add", "/drop", "/context"]),
     ("Model & Reasoning", ["/models", "/modelinfo", "/params", "/system", "/thinking"]),
     ("Configuration & Engine", ["/settings", "/loader", "/changelog", "/mcp", "/quit"]),
@@ -72,11 +74,11 @@ class HelpCommandsModal(ModalScreen[Optional[str]]):
             with Horizontal(id="modal-header"):
                 title = f"Help — {self.category}" if self.category else "All commands"
                 yield Static(f"[bold white]{title}[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             yield Input(placeholder="Search commands...", id="modal-search")
             yield OptionList(id="modal-list")
             with Horizontal(id="modal-footer"):
-                yield Static("[b #58a6ff]Run[/] enter   [dim]Back[/] esc", id="modal-footer-left")
+                yield Static("[b #58a6ff]Run[/] enter", id="modal-footer-left")
                 yield Static("[dim]select command to execute[/]", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -158,10 +160,10 @@ class HelpModal(ModalScreen[Optional[str]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Help[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             yield OptionList(id="modal-list")
             with Horizontal(id="modal-footer"):
-                yield Static("[b #58a6ff]Open[/] enter   [dim]Close[/] esc", id="modal-footer-left")
+                yield Static("[b #58a6ff]Open[/] enter", id="modal-footer-left")
                 yield Static("[dim]command categories[/]", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -219,12 +221,9 @@ class InfoModal(ModalScreen[None]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(f"[bold white]{self._title}[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
             with VerticalScroll(id="modal-scroll"):
                 yield Static(self._body, id="modal-body")
-            with Horizontal(id="modal-footer"):
-                yield Static("[dim]Close[/] esc", id="modal-footer-left")
-                yield Static("", id="modal-footer-right")
 
     def action_dismiss_modal(self) -> None:
         self.dismiss(None)

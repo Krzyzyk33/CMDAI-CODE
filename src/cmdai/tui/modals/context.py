@@ -12,10 +12,18 @@ from textual.widgets import DirectoryTree, Static
 from textual.widgets.tree import TreeNode
 
 from ...core.capabilities import BUDGET_MAP, get_model_capability
+from ...core.file_kinds import color_for
 from ...core.settings import get_settings
 
 
 class ContextDirectoryTree(DirectoryTree):
+
+    # Textual's DirectoryTree ships emoji icons (U+1F4C1 / U+1F4C2 / U+1F4C4),
+    # which most terminal fonts render as boxes or ticks. Plain geometric
+    # glyphs keep the tree readable everywhere.
+    ICON_NODE = "▸ "
+    ICON_NODE_EXPANDED = "▾ "
+    ICON_FILE = "· "
 
     BINDINGS = [
         Binding("space", "toggle_pin", "Toggle Pin", priority=True),
@@ -45,6 +53,16 @@ class ContextDirectoryTree(DirectoryTree):
 
     def render_label(self, node: TreeNode, base_style: Style, style: Style) -> Text:
         text = super().render_label(node, base_style, style)
+        # Folder / file names get the same per-type colors as the file picker.
+        try:
+            path = getattr(getattr(node.data, "path", None), "name", None)
+            if path:
+                if node.data.path.is_dir():
+                    text.stylize(Style(color="#58a6ff", bold=True))
+                else:
+                    text.stylize(Style(color=color_for(path)))
+        except Exception:
+            pass
         if node.data and hasattr(node.data, "path") and node.data.path.is_file():
             try:
                 rel = os.path.relpath(str(node.data.path), str(self.workdir_path)).replace("\\", "/")
@@ -148,7 +166,7 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
         with Vertical(id="modal-dialog", classes="context-modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Context Window Inspector & Workspace Picker[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             with Horizontal(id="context-split-container"):
                 with VerticalScroll(id="context-info-sidebar"):

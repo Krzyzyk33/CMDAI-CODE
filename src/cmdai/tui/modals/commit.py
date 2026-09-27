@@ -131,8 +131,8 @@ class CommitModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog", classes="diff-modal-dialog"):
             with Horizontal(id="modal-header"):
-                yield Static("[bold white]Git Commit & Diff Review[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[bold white]Git Commit[/]  [dim]write the message and commit[/dim]", id="modal-title")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             with Horizontal(id="diff-split-container"):
                 with Vertical(id="diff-files-sidebar"):
@@ -152,7 +152,12 @@ class CommitModal(ModalScreen[Optional[str]]):
 
             with Vertical(id="commit-box"):
                 yield Static("[bold white]Commit Message:[/] [dim](press Enter to commit)[/dim]", id="commit-label")
-                yield Input(value=self.suggested_msg, placeholder="e.g. feat: update files", id="commit-input")
+                yield Input(
+                    value=self.suggested_msg,
+                    placeholder="e.g. feat: update files",
+                    id="commit-input",
+                    select_on_focus=False,
+                )
 
             with Horizontal(id="modal-footer"):
                 yield Static("[b #3fb950]Commit[/] enter in input   [b #58a6ff]Select file[/] ↑/↓   [dim]Cancel[/] esc", id="modal-footer-left")

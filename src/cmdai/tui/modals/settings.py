@@ -28,12 +28,12 @@ class SettingsModal(ModalScreen[bool]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Application Settings", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Toggle / Run]  [esc: Close]")
+                yield Static("[enter: Toggle / Run]")
 
     def on_mount(self) -> None:
         self.rebuild_options()
@@ -109,7 +109,7 @@ class LoaderModal(ModalScreen[Optional[str]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Select GGUF Engine Loader", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield OptionList(
                 Option("  CPU (llama-cpp-python default)"),
@@ -119,7 +119,7 @@ class LoaderModal(ModalScreen[Optional[str]]):
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Select Loader]  [esc: Cancel]")
+                yield Static("[enter: Select Loader]")
 
     def on_mount(self) -> None:
         curr = get_settings().config.get("active_loader", "cpu").lower()

@@ -12,15 +12,18 @@ from textual.widgets import Button, Input, Static
 GIT_MODAL_CSS = """
 GitBranchesModal {
     align: center middle;
-    background: #090d13;
+    background: rgba(9, 13, 19, 0.85);
 }
 
+/* Fullscreen, frameless - shared by the TUI and the editor. */
 #git-dialog {
     width: 100%;
     height: 100%;
-    background: #090d13;
+    max-width: 100%;
+    max-height: 100%;
+    background: #0d1117;
     border: none;
-    padding: 1 2;
+    padding: 2 4;
 }
 
 #git-header {
@@ -34,6 +37,8 @@ GitBranchesModal {
     width: 1fr;
     color: #e6edf3;
     text-style: bold;
+    text-overflow: ellipsis;
+    overflow: hidden;
 }
 
 #git-esc-hint {
@@ -49,15 +54,22 @@ GitBranchesModal {
 
 #git-branch-input {
     width: 1fr;
+    height: 3;
+    min-height: 3;
+    max-height: 3;
     background: #161b22;
     color: #e6edf3;
-    border: round #30363d;
+    /* !important - app-level `Input { border: none !important; max-height: 1 }`
+       in styles.py would otherwise strip the frame and hide the text. */
+    border: round #30363d !important;
     padding: 0 1;
     margin-right: 1;
 }
 
+/* Pole nie zmienia koloru na bialy po fokusie - dostaje tylko tlo. */
 #git-branch-input:focus {
-    border: round #3fb950;
+    background: #21262d;
+    border: round #30363d !important;
 }
 
 #git-create-btn {
@@ -80,37 +92,55 @@ GitBranchesModal {
     scrollbar-color: #30363d;
 }
 
+/* Aktywna galeaz. Wczesniej `border: round #58a6ff` robil z niej
+   jaskrawoniebieska ramke - user prosil, zeby pozycje z ramka nie byly
+   podswietlone. Teraz ramka jest jak u innych pozycji (szara), a
+   aktywnosc niesie wypelnienie + pogrubiona nazwa + lewy pasek.
+   Wcześniej było też `background: #238636` + `border: none`, czyli
+   pelny zielony pas z bialym tekstem - wygladalo jak zaznaczenie. */
 .git-branch-active {
     width: 100%;
-    height: 1;
-    min-height: 1;
+    height: 3;
     margin: 0 0 1 0;
     padding: 0 1;
-    background: #238636;
-    color: #ffffff;
-    border: none;
+    background: #21262d;
+    color: #e6edf3;
+    border: round #30363d;
+    content-align: left middle;
+    text-style: bold;
+    text-align: left;
 }
 
+/* Wyglad jak karty checkpointow: ramka zamiast wypelnionego tla.
+   Wczesniej `border: none` + pelne tlo robilo z tego jeden pas
+   koloru, a najechanie dawalo jasne tlo - teraz jest tylko obwodka.
+   Zaznaczenie fokusem NIE daje bialego tla - tylko niebieska ramka. */
 .git-branch-item {
     width: 100%;
-    height: 1;
-    min-height: 1;
+    height: 3;
     margin: 0 0 1 0;
     padding: 0 1;
     background: #161b22;
     color: #8b949e;
-    border: none;
+    border: round #30363d;
+    content-align: left middle;
 }
 
-.git-branch-item:hover {
-    background: #21262d;
-    color: #c9d1d9;
+.git-branch-item:hover,
+.git-branch-item:focus {
+    background: #161b22;
+    color: #e6edf3;
+    /* Niebieska ramka na hoverze tez zniknela - zostaje wypelnienie
+       i pogrubienie, dzieki czemu kursor nie wyglada jak zaznaczenie. */
+    border: round #30363d;
+    text-style: bold;
 }
 
 #git-log-pane {
     dock: bottom;
     height: auto;
-    max-height: 8;
+    max-height: 40%;
+    min-height: 4;
     border-top: solid #21262d;
     padding: 1 0;
     background: #090d13;
@@ -119,7 +149,7 @@ GitBranchesModal {
 #git-log-header {
     height: 1;
     color: #8b949e;
-    text-style: bold;
+    text-style: none;
     margin-bottom: 1;
 }
 
@@ -212,7 +242,7 @@ class GitBranchesModal(ModalScreen[None]):
         with Vertical(id="git-dialog"):
             with Horizontal(id="git-header"):
                 yield Static("GIT BRANCHES & FORKS (REAL REPO · BRANCH / CHECKOUT / FORK)", id="git-title")
-                yield Static("[dim]esc exit[/dim]", id="git-esc-hint")
+                yield Static("[dim]esc[/dim]", id="git-esc-hint")
 
             with Horizontal(id="git-input-row"):
                 yield Input(placeholder="Create & switch to new branch name... (Enter to fork)", id="git-branch-input")
@@ -233,9 +263,8 @@ class GitBranchesModal(ModalScreen[None]):
                             self._branch_id_map[safe_id] = b
                             yield Button(f"○ BRANCH · {b} · click to checkout", classes="git-branch-item", id=safe_id)
 
-            with Vertical(id="git-log-pane"):
-                yield Static("RECENT COMMITS:", id="git-log-header")
-                yield Static(self._get_recent_log(), id="git-log-body")
+            # Panel "RECENT COMMITS" usuniety na zadanie - modal jest
+            # teraz lista galez, bez dolnego paska logu.
 
     @on(Input.Submitted, "#git-branch-input")
     def on_input_submitted(self, event: Input.Submitted) -> None:

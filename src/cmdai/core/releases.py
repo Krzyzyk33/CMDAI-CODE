@@ -75,7 +75,8 @@ def fetch_releases(timeout: float = 8.0) -> List[Dict[str, Any]]:
                 "url": r.get("html_url") or "",
             }
         )
-    out.sort(key=lambda x: _tag_sort_key(x["tag"]), reverse=False)
+    # Newest first - the UI lists releases top-down.
+    out.sort(key=lambda x: _tag_sort_key(x["tag"]), reverse=True)
     return out
 
 
@@ -177,7 +178,7 @@ def get_display_version() -> str:
 
 def render_changelog_md(releases: List[Dict[str, Any]]) -> str:
     lines = ["# CHANGELOG", "", "Generowane z GitHub Releases (>= v3.0-alpha).", ""]
-    for r in reversed(releases):
+    for r in releases:
         lines.append(f"## [{r['tag']}] - {r.get('published_at', '')}")
         lines.append(f"### {r.get('name', '')}")
         body = (r.get("body") or "").strip()

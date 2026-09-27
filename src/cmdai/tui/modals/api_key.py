@@ -30,7 +30,7 @@ class ApiKeyModal(ModalScreen[bool]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(f"Configure API Key: {provider_name}", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             if key_url:
                 yield Static(f"[dim]Get API key at: [bold #58a6ff]{key_url}[/][/dim]\n")
@@ -43,7 +43,7 @@ class ApiKeyModal(ModalScreen[bool]):
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Save & Fetch Models]  [esc: Cancel]")
+                yield Static("[enter: Save & Fetch Models]")
 
     def on_mount(self) -> None:
         self.query_one("#api-key-input", Input).focus()

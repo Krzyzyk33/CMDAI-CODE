@@ -35,7 +35,7 @@ class AddModelModal(ModalScreen[Optional[str]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(f"Add Model: {provider_name}", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield Static(f"[dim]Enter model identifier for [bold #58a6ff]{provider_name}[/]:[/dim]")
 
@@ -46,7 +46,7 @@ class AddModelModal(ModalScreen[Optional[str]]):
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Add & Select Model]  [esc: Cancel]")
+                yield Static("[enter: Add & Select Model]")
 
     def on_mount(self) -> None:
         self.query_one("#model-name-input", Input).focus()

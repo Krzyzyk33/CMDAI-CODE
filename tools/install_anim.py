@@ -1,4 +1,4 @@
-"""Installer step animator.
+"""Installer/update step animator.
 
 Mirrors the app loading animation (LoadingBlock in src/cmdai/tui/app.py):
 live glyph alternates ["⌬", "✻"] every 0.35s. Each step renders as a
@@ -10,6 +10,10 @@ nothing else, e.g.:
 Optional rounded table chrome around points: --header prints
 "╭ {header}" + "│", --gap N prints N empty bordered lines after the
 step, --footer prints "│" + "╰ {footer}". Stdlib only.
+
+Reusable from Python: animate(...) runs one step and returns the
+status string ("OK", "FAIL", "TIMEOUT"); print_footer(...) closes
+the table with a custom message.
 """
 
 import argparse
@@ -50,6 +54,78 @@ def live_line(label, elapsed):
 CR = chr(13)
 
 
+def print_footer(text):
+    """Close the rounded table with a custom message."""
+    print("│")
+    print("╰ " + str(text))
+    sys.stdout.flush()
+
+
+def animate(label, wait_file="", fixed=0.0, min_time=0.0, timeout=900.0,
+            header="", gap=0, footer=""):
+    """Run one animated step; return status string (OK/FAIL/TIMEOUT)."""
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        tty = sys.stdout.isatty()
+    except Exception:
+        tty = False
+
+    if header:
+        print("╭ " + header)
+        print("│")
+        sys.stdout.flush()
+
+    start = time.time()
+    status = ""
+
+    if fixed > 0:
+        if not tty:
+            print("✻  " + label + " ...")
+            sys.stdout.flush()
+        while time.time() - start < fixed:
+            if tty:
+                sys.stdout.write(CR + live_line(label, time.time() - start))
+                sys.stdout.flush()
+            time.sleep(TICK)
+        status = "OK"
+    else:
+        if not tty:
+            print("✻  " + label + " ...")
+            sys.stdout.flush()
+        while True:
+            elapsed = time.time() - start
+            status = read_status(wait_file)
+            if status in ("OK", "FAIL") and elapsed >= min_time:
+                break
+            if timeout > 0 and elapsed >= timeout:
+                status = "TIMEOUT"
+                break
+            if tty:
+                sys.stdout.write(CR + live_line(label, elapsed))
+                sys.stdout.flush()
+            time.sleep(TICK)
+
+    if tty:
+        sys.stdout.write(CR + "⌬  " + label + chr(10))
+        sys.stdout.flush()
+    else:
+        print("⌬  " + label)
+        sys.stdout.flush()
+
+    for _ in range(max(0, int(gap))):
+        print("│")
+    if footer:
+        print_footer(footer)
+    else:
+        sys.stdout.flush()
+
+    return status
+
+
 def main(argv=None) -> int:
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -62,60 +138,16 @@ def main(argv=None) -> int:
         print("Error: pass exactly one of --wait-file / --fixed", file=sys.stderr)
         return 1
 
-    try:
-        tty = sys.stdout.isatty()
-    except Exception:
-        tty = False
-
-    if args.header:
-        print("╭ " + args.header)
-        print("│")
-        sys.stdout.flush()
-
-    start = time.time()
-    status = ""
-
-    if args.fixed > 0:
-        if not tty:
-            print("✻  " + args.label + " ...")
-            sys.stdout.flush()
-        while time.time() - start < args.fixed:
-            if tty:
-                sys.stdout.write(CR + live_line(args.label, time.time() - start))
-                sys.stdout.flush()
-            time.sleep(TICK)
-        status = "OK"
-    else:
-        if not tty:
-            print("✻  " + args.label + " ...")
-            sys.stdout.flush()
-        while True:
-            elapsed = time.time() - start
-            status = read_status(args.wait_file)
-            if status in ("OK", "FAIL") and elapsed >= args.min_time:
-                break
-            if args.timeout > 0 and elapsed >= args.timeout:
-                status = "TIMEOUT"
-                break
-            if tty:
-                sys.stdout.write(CR + live_line(args.label, elapsed))
-                sys.stdout.flush()
-            time.sleep(TICK)
-
-    if tty:
-        sys.stdout.write(CR + "⌬  " + args.label + chr(10))
-        sys.stdout.flush()
-    else:
-        print("⌬  " + args.label)
-        sys.stdout.flush()
-
-    for _ in range(max(0, args.gap)):
-        print("│")
-    if args.footer:
-        print("│")
-        print("╰ " + args.footer)
-    sys.stdout.flush()
-
+    status = animate(
+        label=args.label,
+        wait_file=args.wait_file,
+        fixed=args.fixed,
+        min_time=args.min_time,
+        timeout=args.timeout,
+        header=args.header,
+        gap=args.gap,
+        footer=args.footer,
+    )
     return 0 if status == "OK" else 1
 
 

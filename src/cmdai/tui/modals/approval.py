@@ -2,14 +2,12 @@ import difflib
 import os
 from typing import Any, Dict, List, Optional
 
-from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Button, Static
 
 from .diff import DiffModal
 
@@ -25,23 +23,25 @@ class EditInspectModal(ModalScreen[str]):
         Binding("d", "open_diff", "View Diff"),
     ]
 
-    DEFAULT_CSS = """
+    # NOTE: widget-level CSS (not DEFAULT_CSS) - a Button's own DEFAULT_CSS
+    # would otherwise keep its `border: tall` and collapse a 1-row button.
+    CSS = """
     EditInspectModal {
         align: center middle;
         background: rgba(0, 0, 0, 0.75);
     }
     #inspect-dialog {
-        width: 86;
-        height: 28;
+        width: 76;
+        max-width: 95%;
+        height: auto;
         background: #0d1117;
-        border: solid #30363d;
+        border: none;
         padding: 1 2;
     }
     #inspect-header {
-        height: 3;
+        height: 1;
         width: 100%;
-        border-bottom: solid #30363d;
-        align-vertical: middle;
+        margin-bottom: 1;
     }
     #inspect-title {
         width: 1fr;
@@ -50,44 +50,40 @@ class EditInspectModal(ModalScreen[str]):
     }
     #inspect-esc {
         width: auto;
-        color: #8b949e;
+        color: #6e7681;
     }
     #inspect-banner {
         height: auto;
-        padding: 1 0;
         color: #e6edf3;
     }
-    #inspect-file-list {
-        height: 6;
-        background: #161b22;
-        border: solid #21262d;
-        margin-bottom: 1;
-    }
-    #inspect-preview-scroll {
-        height: 1fr;
-        background: #090d13;
-        border: solid #21262d;
-        padding: 0 1;
-    }
     #inspect-action-bar {
-        height: 3;
+        height: 1;
         width: 100%;
         margin-top: 1;
-        align-vertical: middle;
-    }
-    #inspect-action-left {
-        width: 1fr;
-        height: auto;
+        align-horizontal: right;
         align-vertical: middle;
     }
     #inspect-action-right {
         width: auto;
-        height: auto;
+        height: 1;
         align-vertical: middle;
     }
     .inspect-btn {
+        height: 1;
+        min-height: 1;
+        width: auto;
+        min-width: 8;
+        border: none !important;
+        padding: 0 2;
+        text-style: bold;
         margin-right: 1;
     }
+    #inspect-btn-allow { background: #238636; color: #ffffff; }
+    #inspect-btn-allow:hover { background: #2ea043; }
+    #inspect-btn-reject { background: #b62324; color: #ffffff; }
+    #inspect-btn-reject:hover { background: #da3633; }
+    #inspect-btn-diff { background: #21262d; color: #58a6ff; }
+    #inspect-btn-diff:hover { background: #30363d; }
     """
 
     def __init__(self, details: Dict[str, Any], workdir: str = ".", **kwargs):
@@ -121,45 +117,26 @@ class EditInspectModal(ModalScreen[str]):
         return "(Preview unavailable)"
 
     def compose(self) -> ComposeResult:
+        files = self.details.get("files") or ([self.target] if self.target else [])
+        cnt = self.file_count or len(files)
         with Vertical(id="inspect-dialog"):
             with Horizontal(id="inspect-header"):
-                yield Static("[bold white]Execution Approval Request[/] [dim](Code Mode)[/dim]", id="inspect-title")
-                yield Static("[esc]", id="inspect-esc")
+                yield Static(f"[bold white]{self.action.title()} approval[/]", id="inspect-title")
+                yield Static("[dim]esc[/]", id="inspect-esc")
 
             act_color = "#d29922" if self.action == "edit" else ("#3fb950" if self.action == "write" else "#58a6ff")
-            banner_text = (
-                f"[b {act_color}]● Tool: {self.action.upper()}[/]  "
-                f"[bold white]{self.target}[/]  "
-                f"[dim]({self.diff_info} · {self.file_count} file affected)[/dim]"
+            target = f"{cnt} file{'s' if cnt != 1 else ''}" if cnt != 1 else self.target
+            yield Static(
+                f"[b {act_color}]● {self.action.upper()}[/]  [bold white]{target}[/]"
+                f"  [dim]({self.diff_info or 'no changes'})[/dim]",
+                id="inspect-banner",
             )
-            yield Static(banner_text, id="inspect-banner")
-
-            ol = OptionList(id="inspect-file-list")
-            base = os.path.basename(self.target)
-            parent = os.path.dirname(self.target).replace("\\", "/")
-            badge = "[b #d29922]M[/]" if self.action == "edit" else "[b #3fb950]+[/]"
-            ol.add_option(Option(f" {badge} [bold white]{base}[/] [dim]({parent or '.'})  {self.diff_info}[/]"))
-            yield ol
-
-            with VerticalScroll(id="inspect-preview-scroll"):
-                t = Text()
-                for line in self.diff_text.splitlines():
-                    if line.startswith("+"):
-                        t.append(line + "\n", style="#7ee787")
-                    elif line.startswith("-"):
-                        t.append(line + "\n", style="#f85149")
-                    elif line.startswith("@"):
-                        t.append(line + "\n", style="#58a6ff")
-                    else:
-                        t.append(line + "\n", style="#8b949e")
-                yield Static(t, id="inspect-preview-content")
 
             with Horizontal(id="inspect-action-bar"):
-                with Horizontal(id="inspect-action-left"):
-                    yield Button("Allow (y)", id="inspect-btn-allow", variant="success", classes="inspect-btn")
-                    yield Button("Reject (n)", id="inspect-btn-reject", variant="error", classes="inspect-btn")
                 with Horizontal(id="inspect-action-right"):
-                    yield Button("Diff (d)", id="inspect-btn-diff", variant="primary", classes="inspect-btn")
+                    yield Button("Allow", id="inspect-btn-allow", variant="success", classes="inspect-btn")
+                    yield Button("Reject", id="inspect-btn-reject", variant="error", classes="inspect-btn")
+                    yield Button("Diff", id="inspect-btn-diff", variant="primary", classes="inspect-btn")
 
     @on(Button.Pressed, "#inspect-btn-allow")
     def on_allow_clicked(self) -> None:
@@ -184,15 +161,43 @@ class EditInspectModal(ModalScreen[str]):
             if result in ("allow", "reject"):
                 self.dismiss(result)
 
+        files = self.details.get("files") or ([self.target] if self.target else [])
+        if len(files) == 1:
+            self.app.push_screen(
+                DiffModal(
+                    workdir=self.workdir,
+                    single_file=files[0],
+                    single_diff=self.diff_text,
+                    single_title=f"Diff: {files[0]}",
+                ),
+                _on_diff_dismiss,
+            )
+            return
+
+        diffs = []
+        for rel in files:
+            diffs.append(self._file_diff(os.path.join(self.workdir, rel), rel))
         self.app.push_screen(
-            DiffModal(
-                workdir=self.workdir,
-                single_file=self.target,
-                single_diff=self.diff_text,
-                single_title=f"Diff: {self.target}",
-            ),
+            DiffModal(workdir=self.workdir, single_file=files[0], single_diff=diffs, single_title="Diff"),
             _on_diff_dismiss,
         )
+
+    def _file_diff(self, abs_path: str, rel: str) -> str:
+        try:
+            import difflib
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as fp:
+                new = fp.read()
+        except Exception:
+            return f"--- /dev/null\n+++ b/{rel}\n(could not read file)"
+        old = self.details.get("old", "") if rel == self.target else ""
+        if not old:
+            return "".join(f"+{line}\n" for line in new.splitlines()[:400])
+        return "".join(difflib.unified_diff(
+            old.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+        ))
 
     def action_handle_interrupt(self) -> None:
         self.action_reject()
