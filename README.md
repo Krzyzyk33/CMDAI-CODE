@@ -17,6 +17,10 @@
 
 ## Installation
 
+> [!WARNING]
+> **Temporarily Unavailable**
+> This feature is currently not working. We are working to resolve the issue as soon as possible.
+
 ### PowerShell
 ```bash
 irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/tools/install-remote.ps1 | iex
