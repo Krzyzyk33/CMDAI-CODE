@@ -71,6 +71,23 @@ TOOL_DOCS: List[ToolDoc] = [
         "<todo><action>ACTION</action><task>TASK</task></todo>",
         "<todo><action>add</action><task>Implement feature</task></todo>",
     ),
+    ToolDoc(
+        "subagent",
+        "Delegate a task to an autonomous subagent. Use name for the role shown in "
+        "the chat, system for the prompt you generate, and the element body for the "
+        "task. Emit several in one turn to run a batch: one after another on a local "
+        "model, all at once on an API model.",
+        "<tool:subagent name=\"Role\" system=\"prompt for the subagent\">the task</tool:subagent>",
+        "<tool:subagent name=\"Code Architect\" system=\"You are the autonomous Code "
+        "Architect subagent.\">Merge the duplicate dialog CSS rules.</tool:subagent>",
+    ),
+    ToolDoc(
+        "agent_note",
+        "Leave an optional note for the lead agent. Subagents only: it is handed to "
+        "the lead agent verbatim once the batch finishes.",
+        "<tool:agent_note text=\"NOTE\" />",
+        "<tool:agent_note text=\"plan.py line 74 has an unexpected indent\" />",
+    ),
 ]
 
 TOOL_DOCS_BY_NAME = {t.name: t for t in TOOL_DOCS}

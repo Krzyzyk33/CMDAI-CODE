@@ -196,7 +196,10 @@ class AssistantTurnCard(Vertical):
             if self.thinking_block:
                 yield self.thinking_block
         with self.flow_container:
-            yield self.current_body_widget
+            # A card can start with no text yet (the subagent window builds one
+            # from tool events), so the body widget is optional.
+            if self.current_body_widget is not None:
+                yield self.current_body_widget
         yield self.live_tool_widget
         yield self.footer_widget
 
@@ -761,6 +764,24 @@ class ToolBlock(Vertical):
         self._spinner_idx = 0
         self._spinner_timer = None
 
+        # Subagent-only state. A subagent block shows its role instead of the
+        # literal tool name and keeps the live session data so a click can open
+        # the subagent chat.
+        self.subagent_role: str = ""
+        self.subagent_status: str = "running"
+        self.subagent_index: int = 1
+        self.subagent_total: int = 1
+        self.subagent_goal: str = ""
+        self.subagent_system: str = ""
+        self.subagent_history: List[Dict[str, Any]] = []
+        self.subagent_findings: List[str] = []
+        self.subagent_notes: List[str] = []
+        self.subagent_tool_count: int = 0
+        self.subagent_live_tool: str = ""
+        self.subagent_tokens: int = 0
+        self.subagent_elapsed: float = 0.0
+        self.subagent_events: List[Dict[str, Any]] = []
+
         self.header_widget = Static("", classes="tool-header")
         self.details_widget = Static("", classes="tool-details")
         self.details_widget.styles.display = "none"
@@ -809,16 +830,132 @@ class ToolBlock(Vertical):
 
     def update_header(self) -> None:
         frame = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)] if self.tool_running else ""
+        display_name = self.subagent_role if self.subagent_role else ""
+        target = self.target
+        if self.subagent_role:
+            # "<role>  <tool> <path>" while it works, "<role>  complete" when it
+            # is done. Between tools there is no live tool, so the line is just
+            # the role with its spinner - keeping "starting" or the previous
+            # tool's path there made it look like it was looking at the wrong
+            # file. self.target only becomes "complete" once finish_subagent
+            # has run, which is why tool_running, not the status string, is
+            # what decides: the orchestrator emits "completed" before the block
+            # is closed out.
+            if self.subagent_live_tool:
+                target = self.subagent_live_tool
+            elif self.tool_running:
+                target = ""
+            else:
+                target = self.target
+            target = ("  " + str(target).strip()) if str(target).strip() else ""
         text = render_tool_header(
             self.tool_name,
-            self.target,
+            target,
             is_expanded=self.is_expanded,
             is_running=self.tool_running,
             spinner_frame=frame,
             is_error=self.has_error,
+            display_name=display_name,
         )
         try:
             self.header_widget.update(text)
+        except Exception:
+            pass
+
+    def set_subagent_progress(self, progress: Any) -> None:
+        """Mirror a SubagentProgress event into the chat marker."""
+        try:
+            tool = str(getattr(progress, "current_tool", "") or "")
+            arg = str(getattr(progress, "tool_arg", "") or "")
+            if tool == "thinking":
+                # Between tools. Clear the live line instead of leaving the
+                # last one up: the subagent had already finished it, so a
+                # spinner kept spinning on a tool that was already done and the
+                # window claimed it was looking at the wrong file.
+                self.subagent_live_tool = ""
+            elif tool and tool not in ("loading model", "agent_note"):
+                self.subagent_live_tool = f"{tool} {arg}".strip()
+            if tool == "agent_note":
+                note = str(getattr(progress, "note", "") or "")
+                if note and note not in self.subagent_notes:
+                    self.subagent_notes.append(note)
+            hist = getattr(progress, "history", None) or []
+            self.subagent_history = list(hist)
+            self.subagent_events = list(getattr(progress, "events", None) or [])
+            finds = getattr(progress, "findings", None) or []
+            self.subagent_findings = list(finds)
+            status = str(getattr(progress, "status", "") or "")
+            if status:
+                self.subagent_status = status
+            self.subagent_tool_count = sum(
+                1 for m in self.subagent_history
+                if m.get("role") == "user" and str(m.get("content", "")).startswith("[tool:")
+            )
+            self.update_header()
+        except Exception:
+            pass
+
+        if self.tool_name == "agent_note":
+            # A note to the lead agent, rendered as a normal tool: one collapsed
+            # line, click to read it.
+            note = str(result.get("note", "") or result.get("content", "")).strip()
+            self.target = note.splitlines()[0][:70] if note else self.target
+            txt = Text(no_wrap=True)
+            if note:
+                for line in note.splitlines():
+                    txt.append(f"  {line}\n", style="#e3b341")
+            else:
+                txt.append("  (empty note)\n", style="dim #8b949e")
+            self._safe_update_details(txt)
+            self.update_header()
+            return
+
+        if self.tool_name == "edit" and "diff_entries" not in result and result.get("path") and not result.get("error"):
+            pass
+
+    def finish_subagent(self, agent: Dict[str, Any]) -> None:
+        """Close out one subagent marker from its SubagentResult payload."""
+        try:
+            self.tool_running = False
+            self._stop_spinner()
+            self.result_data = agent
+            self.subagent_status = str(agent.get("status", "completed"))
+            self.subagent_goal = str(agent.get("goal", "") or self.subagent_goal)
+            self.subagent_system = str(agent.get("system_prompt", "") or self.subagent_system)
+            hist = agent.get("history") or []
+            if hist:
+                self.subagent_history = list(hist)
+            self.subagent_findings = list(agent.get("findings") or [])
+            self.subagent_notes = list(agent.get("notes") or [])
+            self.subagent_tool_count = int(agent.get("tool_count", 0) or 0)
+            self.subagent_live_tool = ""
+            self.subagent_events = list(agent.get("events") or [])
+            self.has_error = str(agent.get("status", "")) == "failed"
+
+            summary = str(agent.get("summary", "")).strip()
+            if self.has_error:
+                # Keep the reason visible; render_tool_header adds "[failed]".
+                first = (str(agent.get("error", "") or summary).splitlines() or ["error"])[0]
+                self.target = first.strip()[:70] or "error"
+            else:
+                self.target = "complete"
+            self.subagent_tokens = int(agent.get("tokens", 0) or 0)
+            # The orchestrator measures the real runtime; fall back to the local
+            # clock only when it did not report one.
+            reported = float(agent.get("elapsed", 0.0) or 0.0)
+            if reported > 0:
+                self.subagent_elapsed = reported
+            else:
+                started = getattr(self, "subagent_started", None)
+                if started:
+                    import time as _time
+                    self.subagent_elapsed = max(0.0, _time.monotonic() - started)
+
+            # No details body: a subagent marker never expands, so the chat
+            # window is the only place the report, findings and notes appear.
+            self._safe_update_details(Text(""))
+            self.update_header()
+            self.refresh(layout=True)
         except Exception:
             pass
 
@@ -895,6 +1032,22 @@ class ToolBlock(Vertical):
         )
         self.has_error = is_err
         self.update_header()
+
+        if self.tool_name == "agent_note" and not is_err:
+            # A note to the lead agent. Rendered exactly like any other tool:
+            # one collapsed line, click to read, no special colour.
+            note = str(result.get("note", "") or result.get("content", "")).strip()
+            if note:
+                self.target = note.splitlines()[0][:70]
+            self.update_header()
+            txt = Text(no_wrap=True)
+            if note:
+                for line in note.splitlines():
+                    txt.append(f"  {line}\n", style="#e6edf3")
+            else:
+                txt.append("  (empty note)\n", style="dim #8b949e")
+            self._safe_update_details(txt)
+            return
 
         if is_err:
             err_msg = str(result.get("error") or result.get("stderr") or "Tool execution failed.")
@@ -1198,6 +1351,10 @@ class ToolBlock(Vertical):
             pass
 
     def set_expanded(self, expanded: bool) -> None:
+        if self.subagent_role:
+            # Subagent markers never expand. A click opens the subagent chat,
+            # which is the only place the full session is shown.
+            return
         self.is_expanded = expanded
         if not expanded:
             self.h_offset = 0
@@ -1207,6 +1364,16 @@ class ToolBlock(Vertical):
         self.details_widget.styles.display = "block" if expanded else "none"
 
     def on_click(self, event: events.Click) -> None:
+        if self.subagent_role:
+            # A subagent click opens the subagent chat, even while it is still
+            # running, so the user can watch it work. It never expands.
+            opener = getattr(self.app, "_open_subagent_chat", None)
+            if callable(opener):
+                try:
+                    opener(self)
+                except Exception:
+                    pass
+            return
         if self.tool_running:
             return
         if self.tool_name == "screenshot" and self.result_data and self.result_data.get("path"):

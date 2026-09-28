@@ -27,6 +27,7 @@ from ..core.engine import SimpleGGUFLoader
 from ..core.providers import PROVIDERS_CATALOG, stream_chat_completion
 from ..core.resource_limits import (
     build_summarization_payload,
+    detect_conversation_language,
     estimate_model_memory,
     estimate_token_count,
     format_compacted_handoff,
@@ -1945,6 +1946,72 @@ class CMDAICodeTUI(App):
             return
         self._spawn_terminal_window(app_py, "CMDAI CODE Git", self.workdir, "--view", view)
 
+    def _new_subagent_block(self, card: Any, role: str, goal: str, system: str, index: int, total: int) -> Any:
+        """Create one chat marker for a subagent and label it with its role."""
+        try:
+            block = self.call_from_thread(card.add_tool, "subagent", "starting")
+        except Exception:
+            return None
+        if block is None:
+            return None
+        try:
+            block.subagent_role = role
+            block.subagent_goal = goal
+            block.subagent_system = system
+            block.subagent_index = index
+            block.subagent_total = total
+            block.subagent_live_tool = "starting"
+            block.subagent_started = time.monotonic()
+            block.update_header()
+            self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+        except Exception:
+            pass
+        return block
+
+    def _open_subagent_chat(self, block: Any) -> None:
+        """Push the subagent chat for one marker, with siblings for arrow nav."""
+        try:
+            from .modals.subagent_chat import SubagentChatModal
+        except Exception:
+            return
+        try:
+            card = self._current_assistant_card
+            siblings = [b for b in getattr(card, "tool_blocks", []) if getattr(b, "subagent_role", "")]
+            if not siblings:
+                siblings = [block]
+            try:
+                idx = siblings.index(block) + 1
+            except ValueError:
+                idx = 1
+            agents = [{
+                "role": b.subagent_role,
+                "goal": b.subagent_goal,
+                "system_prompt": b.subagent_system,
+                "summary": str((b.result_data or {}).get("summary", "") or ""),
+                "history": list(b.subagent_history or []),
+                "findings": list(b.subagent_findings or []),
+                "notes": list(b.subagent_notes or []),
+                "events": list(getattr(b, "subagent_events", []) or []),
+                "status": b.subagent_status,
+                "elapsed": float(getattr(b, "subagent_elapsed", 0.0) or 0.0),
+                "tokens": int(getattr(b, "subagent_tokens", 0) or 0),
+                "error": getattr(b, "error_msg", "") if getattr(b, "has_error", False) else "",
+            } for b in siblings]
+            running = bool(getattr(block, "tool_running", False))
+            self.push_screen(SubagentChatModal(
+                role=block.subagent_role or "Subagent",
+                goal=block.subagent_goal,
+                system_prompt=block.subagent_system,
+                history=list(block.subagent_history or []),
+                findings=list(block.subagent_findings or []),
+                agent_index=idx,
+                agent_total=len(agents),
+                agents=agents,
+                live_agent=block if running else None,
+            ))
+        except Exception:
+            pass
+
     def _cmd_git(self, arg: str = "") -> None:
         """/git -> the git window: changed files, diff and the commit bar."""
         self._git_window("diff")
@@ -2894,20 +2961,76 @@ class CMDAICodeTUI(App):
                     elif kind == "tool":
                         tool_name, args = data
                         if tool_name == "subagent":
-                            # Subagents temporarily removed: consume the whole
-                            # subagent batch as disabled-errors so the model
-                            # corrects itself instead of stalling.
+                            # A batch of N <tool:subagent> calls becomes N
+                            # markers in the chat, one per subagent, each
+                            # clickable into its own chat window.
+                            batch = [args]
                             j = idx + 1
-                            while j < len(remaining_segments) and remaining_segments[j][0] == "tool" and remaining_segments[j][1][0] == "subagent":
+                            while (j < len(remaining_segments)
+                                   and remaining_segments[j][0] == "tool"
+                                   and remaining_segments[j][1][0] == "subagent"):
+                                batch.append(remaining_segments[j][1][1])
                                 j += 1
-                            _on_tool_start("subagent", (args.get("name") or args.get("role") or "subagent").strip())
-                            err_item = {
-                                "success": False,
-                                "error": "Subagents are temporarily disabled. Do the task yourself using your own tools (read/ls/search/edit/write/command).",
-                            }
-                            _on_tool_finish("subagent", (args.get("name") or args.get("role") or "subagent").strip(), err_item)
-                            last_tool_failed[0] = True
-                            self.messages.append({"role": "user", "content": self.agent_runner.format_tool_result_for_llm("subagent", err_item)})
+
+                            by_role: Dict[str, List[Any]] = {}
+                            for n, call_args in enumerate(batch, start=1):
+                                self.stats["tools_run"] += 1
+                                blk = self._new_subagent_block(
+                                    assistant_card,
+                                    role=str(call_args.get("name") or call_args.get("role") or "Subagent").strip()[:60] or "Subagent",
+                                    goal=str(call_args.get("goal") or call_args.get("task") or call_args.get("description") or "").strip(),
+                                    system=str(call_args.get("system") or call_args.get("system_prompt") or call_args.get("prompt") or "").strip(),
+                                    index=n,
+                                    total=len(batch),
+                                )
+                                if blk is not None:
+                                    by_role.setdefault(blk.subagent_role, []).append(blk)
+
+                            def _on_sub_progress(prog: Any, _by_role: Dict[str, List[Any]] = by_role) -> None:
+                                for cand in _by_role.get(getattr(prog, "role", ""), []):
+                                    if getattr(cand, "tool_running", False):
+                                        self.call_from_thread(cand.set_subagent_progress, prog)
+                                        return
+
+                            def _sub_model_call(history: List[Dict[str, Any]]) -> str:
+                                if self.abort_requested:
+                                    return ""
+                                sub_params = dict(gen_params)
+                                if self.current_provider == "local_gguf":
+                                    txt, _ = self.gguf_loader.stream_chat(
+                                        messages=history,
+                                        temperature=sub_params.get("temperature", 0.3),
+                                        max_tokens=sub_params.get("max_tokens", 0),
+                                        model_filename=self.current_model_id,
+                                        is_aborted=lambda: self.abort_requested,
+                                    )
+                                else:
+                                    txt, _ = stream_chat_completion(
+                                        provider_id=self.current_provider,
+                                        model_id=self.current_model_id,
+                                        messages=history,
+                                        api_key=api_key,
+                                        generation_params=sub_params,
+                                        is_aborted=lambda: self.abort_requested,
+                                    )
+                                return txt or ""
+
+                            sub_res = self.agent_runner.execute_subagents(
+                                batch,
+                                on_progress=_on_sub_progress,
+                                is_local=self.current_provider in ("local_gguf", "local", "llama_cpp", "ollama"),
+                                model_call=_sub_model_call,
+                            )
+                            last_tool_failed[0] = not bool(sub_res.get("success", True))
+                            for agent in sub_res.get("subagents", []):
+                                for cand in by_role.get(agent.get("role", ""), []):
+                                    if getattr(cand, "tool_running", False):
+                                        self.call_from_thread(cand.finish_subagent, agent)
+                                        break
+                            self.messages.append({
+                                "role": "user",
+                                "content": self.agent_runner.format_tool_result_for_llm("subagent", sub_res),
+                            })
                             self.call_from_thread(assistant_card.clear_generating_tool)
                             self.call_from_thread(self.refresh)
                             idx = j

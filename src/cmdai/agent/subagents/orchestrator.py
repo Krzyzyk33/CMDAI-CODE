@@ -2,6 +2,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Callable, Optional
 from .models import SubagentTask, SubagentProgress, SubagentResult
 
+# Subagents get every tool the lead agent has, except "subagent" itself (see
+# run_subagent, which discards it from the allowlist). "agent_note" is added
+# here because it only makes sense from inside a subagent.
 SUBAGENT_AVAILABLE_TOOLS = [
     "read",
     "edit",
@@ -11,10 +14,16 @@ SUBAGENT_AVAILABLE_TOOLS = [
     "glob",
     "search",
     "scratch",
+    "todo",
+    "tasks",
     "ask",
     "web",
     "code_search",
     "bugs",
+    "mcps",
+    "screenshot",
+    "vision",
+    "agent_note",
 ]
 
 def _format_tool_snippet(cname: str, res: Dict[str, Any]) -> str:
@@ -54,6 +63,9 @@ def _format_tool_snippet(cname: str, res: Dict[str, Any]) -> str:
         return str(res.get("content", ""))[:1500] or "Done"
     elif cname in ("edit", "write"):
         return f"Successfully updated {res.get('path', '')}"
+    elif cname == "agent_note":
+        note = str(res.get("note", "")).strip()
+        return f"Note recorded for the lead agent: {note}" if note else "Note recorded for the lead agent."
     elif cname in ("bugs", "tool_bugs"):
         errors = res.get("errors", {})
         if not errors:
@@ -116,11 +128,16 @@ class SubagentOrchestrator:
             "- Web Search: <tool:web query=\"query\" />\n"
             "- Symbol Search: <tool:code_search query=\"symbol\" />\n"
             "- Run Command: <tool:command cmd=\"command\" />\n"
-            "- Scratchpad: <tool:scratch action=\"add\" note=\"...\" />\n\n"
+            "- Scratchpad: <tool:scratch action=\"add\" note=\"...\" />\n"
+            "- Note To Lead Agent: <tool:agent_note text=\"...\" />\n\n"
             "CRITICAL INSTRUCTIONS:\n"
             "1. You MUST use the tools above to inspect files, search code, and investigate the workspace.\n"
             "2. Never claim you do not have access to files, filesystem, or tools — use <tool:ls path=\".\"/> or <tool:glob pattern=\"*.*\"/> to inspect the files.\n"
-            "3. First invoke tools to gather the necessary data. Once you have enough findings, provide a concise, structured final report answering your task.\n"
+            "3. First invoke tools to gather the necessary data. Once you have enough findings, write a final report that IS handed back to the lead agent. That report is the only thing it gets from you, so treat it as the answer, not as a diary of your work.\n"
+            "4. The lead agent does NOT see your transcript, your tool calls, or their raw output. It sees only your final report plus any notes you sent with <tool:agent_note text=\"...\" />.\n"
+            "5. So make the report carry the data: concrete file paths, line numbers, symbol names, values, and your conclusion for each. Write it for someone who has not seen the workspace and will not re-read every file - spell out what you found, not how you looked for it. Skip the narration (\"I searched for X, then looked at Y\") and keep the findings.\n"
+            "6. Send <tool:agent_note> as soon as you find something the lead agent should know about, so it is not waiting for your report at the end.\n"
+            "7. You can do anything the lead agent can do, but you cannot spawn other subagents and you cannot ask the user anything.\n"
         )
         history: List[Dict[str, Any]] = [
             {"role": "system", "content": system_content},
@@ -128,8 +145,11 @@ class SubagentOrchestrator:
         ]
         findings: List[str] = []
         last_text = ""
+        # Tool activity in call order, as real dicts. The TUI replays these into
+        # the same ToolBlock widgets the lead agent's chat uses.
+        events: List[Dict[str, Any]] = []
 
-        def _emit(status: str, tool: str = "", arg: str = "", thought: str = "") -> None:
+        def _emit(status: str, tool: str = "", arg: str = "", thought: str = "", note: str = "") -> None:
             if on_progress:
                 try:
                     on_progress(SubagentProgress(
@@ -142,20 +162,27 @@ class SubagentOrchestrator:
                         system_prompt=task.system_prompt,
                         history=list(history),
                         findings=list(findings),
+                        note=note,
+                        events=list(events),
                     ))
                 except Exception:
                     pass
 
         _emit("running", "loading model", "…", f"Subagent {task.role} started.")
+        import time as _time
+        _t0 = _time.monotonic()
         if model_call is None:
             _emit("failed", thought="No model backend wired.")
-            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt)
+            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False)
 
         import re as _re
         for _ in range(max(1, max_turns)):
             sub_history = list(history)
-            if len(sub_history) > 8:
-                sub_history = [sub_history[0], sub_history[1]] + sub_history[-6:]
+            if len(sub_history) > 20:
+                # Keep the system prompt, the task, and a longer tail of tool
+                # results. The old cap of 8 (last 6) threw away most tool output,
+                # so a subagent doing real work kept re-reading the same files.
+                sub_history = [sub_history[0], sub_history[1]] + sub_history[-18:]
             try:
                 text = model_call(sub_history) or ""
             except Exception as e:
@@ -174,13 +201,25 @@ class SubagentOrchestrator:
                 if cname not in allowed:
                     history.append({"role": "user", "content": f"[tool {cname} not allowed for subagents]"})
                     continue
-                arg_summary = str(cargs.get("path") or cargs.get("query") or cargs.get("cmd") or cargs.get("pattern") or "")[:80]
+                arg_summary = str(cargs.get("path") or cargs.get("query") or cargs.get("cmd") or cargs.get("pattern") or cargs.get("text") or cargs.get("note") or "")[:80]
                 _emit("running", cname, arg_summary)
                 try:
                     res = tool_executor(cname, cargs) if tool_executor else {"success": False, "error": "no executor"}
                 except Exception as e:
                     res = {"success": False, "error": str(e)}
                 ok = bool(res.get("success", True)) and "error" not in res
+                events.append({
+                    "tool": cname,
+                    "args": dict(cargs or {}),
+                    "target": arg_summary,
+                    "result": dict(res) if isinstance(res, dict) else {"content": str(res)},
+                    "ok": ok,
+                })
+                if cname == "agent_note" and ok:
+                    # The executor appended the text to task.notes; surface it in
+                    # the progress stream so the TUI marker and the modal can show
+                    # the note without polling the task object.
+                    _emit("running", "agent_note", str(res.get("note", ""))[:80], note=str(res.get("note", "")))
                 snippet = _format_tool_snippet(cname, res)[:2000]
                 history.append({"role": "user", "content": f"[tool:{cname} result]\n{snippet}"})
                 if not ok and cname in ("write", "edit"):
@@ -213,70 +252,29 @@ class SubagentOrchestrator:
             system_prompt=task.system_prompt,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            notes=list(task.notes),
+            events=list(events),
+            elapsed=max(0.0, _time.monotonic() - _t0),
+            success=not is_model_err,
         )
 
     def _extract_calls(self, text: str) -> List[Any]:
-        import re as _re
+        """Tool calls in one subagent turn.
+
+        Delegates to the lead agent's parser instead of keeping a second copy
+        of the patterns. That copy only understood <tool:name ...>, so a
+        subagent on a local Gemma emitting <|tool_call>call:ls path="." />
+        had zero calls found: the raw tag stayed in the text and showed up in
+        the chat window verbatim, with the tool never running.
+        """
         if not text:
             return []
-
-        def _parse_attrs(attrs_str: str) -> Dict[str, str]:
-            if not attrs_str:
-                return {}
-            matches = _re.findall(r'(\w+)=(?:["\'](.*?)["\']|([^\s>]+))', attrs_str, _re.DOTALL)
-            attrs = {}
-            for k, v1, v2 in matches:
-                attrs[k.lower()] = v1 if (v1 is not None and v1 != "") else v2
-            return attrs
-
-        raw_matches = []
-        body_pattern = _re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?>(.*?)</tool:\1>', _re.DOTALL | _re.IGNORECASE)
-        for match in body_pattern.finditer(text):
-            tool_name = match.group(1).lower()
-            attrs_str = match.group(2) or ""
-            body = match.group(3).strip()
-            attrs = _parse_attrs(attrs_str)
-            if tool_name == "command" and "cmd" not in attrs:
-                attrs["cmd"] = body
-            elif tool_name == "scratch" and "note" not in attrs:
-                attrs["note"] = body
-            elif tool_name == "web" and "query" not in attrs:
-                attrs["query"] = body
-            elif tool_name == "ask" and "question" not in attrs:
-                attrs["question"] = body
-            elif tool_name == "write" and "content" not in attrs:
-                attrs["content"] = body
-            elif tool_name == "read" and "path" not in attrs:
-                attrs["path"] = body
-            elif tool_name in ("search", "code_search") and "query" not in attrs:
-                attrs["query"] = body
-            elif tool_name == "edit":
-                old_m = _re.search(r'<old>(.*?)</old>', body, _re.DOTALL | _re.IGNORECASE)
-                new_m = _re.search(r'<new>(.*?)</new>', body, _re.DOTALL | _re.IGNORECASE)
-                if old_m:
-                    attrs["old"] = old_m.group(1)
-                if new_m:
-                    attrs["new"] = new_m.group(1)
-                elif not old_m and "new" not in attrs:
-                    attrs["new"] = body
-            raw_matches.append((match.start(), match.end(), tool_name, attrs))
-
-        single_tag_pattern = _re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*/?>', _re.DOTALL | _re.IGNORECASE)
-        for match in single_tag_pattern.finditer(text):
-            tool_name = match.group(1).lower()
-            attrs_str = match.group(2) or ""
-            attrs = _parse_attrs(attrs_str)
-            raw_matches.append((match.start(), match.end(), tool_name, attrs))
-
-        raw_matches.sort(key=lambda m: (m[0], -m[1]))
-        non_overlapping = []
-        last_end = 0
-        for start, end, tool_name, attrs in raw_matches:
-            if start >= last_end:
-                non_overlapping.append((tool_name, attrs))
-                last_end = end
-
-        return non_overlapping
+        from ..runner import _parse_only
+        calls = []
+        for segment in _parse_only(text):
+            if segment and segment[0] == "tool":
+                calls.append(segment[1])
+        return calls
 
     def execute_tasks(
         self,
@@ -357,6 +355,7 @@ class SubagentOrchestrator:
                         summary=f"Failed: {e}",
                         findings=[f"Error: {e}"],
                         history=[],
-                        system_prompt=task.system_prompt
+                        system_prompt=task.system_prompt,
+                        success=False,
                     ))
         return results
