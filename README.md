@@ -17,31 +17,39 @@
 
 ## Installation
 
-> [!WARNING]
-> **Temporarily Unavailable**
-> This feature is currently not working. We are working to resolve the issue as soon as possible.
-
 ### PowerShell
 ```bash
 irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/tools/install-remote.ps1 | iex
 ```
 
 ### npm
+> [!WARNING]
+> **Temporarily Unavailable**
+> This feature is currently not working. We are working to resolve the issue as soon as possible.
 ```bash
 npm install -g cmdai-code
 ```
 
 ### npx
+> [!WARNING]
+> **Temporarily Unavailable**
+> This feature is currently not working. We are working to resolve the issue as soon as possible.
 ```bash
 npx -y cmdai-code code
 ```
 
 ### pip
+> [!WARNING]
+> **Temporarily Unavailable**
+> This feature is currently not working. We are working to resolve the issue as soon as possible.
 ```bash
 pip install git+[https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git)
 ```
 
 ### pipx
+> [!WARNING]
+> **Temporarily Unavailable**
+> This feature is currently not working. We are working to resolve the issue as soon as possible.
 ```bash
 git clone [https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git) $env:USERPROFILE\CMDAI-CODE
 cd $env:USERPROFILE\CMDAI-CODE
