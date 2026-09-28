@@ -35,10 +35,11 @@ from ..core.resource_limits import (
     should_summarize,
 )
 from ..core.server import BackgroundHTTPServer
-from ..core.sessions import SessionManager
+from ..core.sessions import SessionManager, transcript_from_messages
 from ..core.settings import get_settings
 from ..core.notifier import send_desktop_notification
 from ..core.exporter import export_session_to_html
+from ..core.releases import is_newer as _is_newer
 from .modals.actions import ActionMenuModal
 from .modals.approval import EditInspectModal
 from .modals.ask import AskModal
@@ -157,6 +158,29 @@ class ChatScroll(VerticalScroll):
         event.stop()
 
 
+def _match_agents_to_calls(calls: List[Dict[str, Any]],
+                           agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pair each <tool:subagent> call with the result it produced.
+
+    Matched by role, first come first served, which is the same rule the live
+    chat uses to hand a progress event to the marker that is still running. A
+    call with no matching result gets an empty dict rather than a neighbour's
+    report: showing the wrong subagent's output would be worse than none.
+    """
+    remaining = list(agents or [])
+    paired: List[Dict[str, Any]] = []
+    for call in (calls or []):
+        role = str((call or {}).get("name") or (call or {}).get("role") or "").strip()
+        match = {}
+        for i, agent in enumerate(remaining):
+            if str(agent.get("role", "")).strip() == role:
+                match = agent
+                del remaining[i]
+                break
+        paired.append(match)
+    return paired
+
+
 class CMDAICodeTUI(App):
 
     CSS = SWIFT_CSS
@@ -187,6 +211,11 @@ class CMDAICodeTUI(App):
         self.session_manager = SessionManager(project_dir=self.workdir)
         self.current_session_id: str = f"session_{int(time.time())}"
         self.session_title: str = ""
+        # What the chat showed, in order. `messages` alone cannot rebuild a
+        # session: it is the model's view, holding raw tool feedback and no
+        # record of the tool cards, so a replay from it loses every tool and
+        # prints tool output as if the user had typed it.
+        self._transcript: List[Dict[str, Any]] = []
         self._last_escape_time: float = 0.0
 
         self.current_provider: str = self.settings.config.get("default_provider", "openrouter")
@@ -239,6 +268,9 @@ class CMDAICodeTUI(App):
         self.in_chat_mode: bool = False
         self.is_generating: bool = False
         self.abort_requested: bool = False
+        # Set while /update's worker thread is pulling. Guards against a second
+        # update racing the same working tree.
+        self._update_running: bool = False
         self.auto_scroll_enabled: bool = True
         self._last_user_scroll_time: float = 0.0
         self._last_auto_scroll_time: float = 0.0
@@ -353,6 +385,7 @@ class CMDAICodeTUI(App):
         self.set_focus(hero_inp)
         self._update_terminal_title()
         self.set_timer(0.6, self._maybe_show_update_notice)
+        self.set_timer(3.0, self._maybe_auto_update_check)
         self._refresh_hero_version()
         self._refresh_hero_version_live()
 
@@ -1329,7 +1362,7 @@ class CMDAICodeTUI(App):
                 "/clear", "/reset", "/exit", "/tools", "/status",
                 "/diff", "/changes", "/commit", "/ci", "/plan", "/tasks",
                 "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
-                "/cd", "/changelog", "/mcp"
+                "/cd", "/changelog", "/update", "/updatesettings", "/mcp"
             )
             if cmd in modal_cmds:
                 pass
@@ -1358,6 +1391,7 @@ class CMDAICodeTUI(App):
         self.stats["tokens_in"] += in_toks
 
         self.messages.append({"role": "user", "content": prompt, "turn_id": self._turn_counter})
+        self._record_user_turn(prompt, self._turn_counter)
         self._save_current_session()
         self.start_generation(prompt)
 
@@ -1414,6 +1448,8 @@ class CMDAICodeTUI(App):
             "/compact": self._cmd_summarize,
             "/stats": self._cmd_stats,
             "/changelog": self._cmd_releases,
+            "/update": self._cmd_update,
+            "/updatesettings": self._cmd_update_settings,
             "/mcp": self._cmd_mcp,
             "/modelinfo": self._cmd_modelinfo,
             "/loader": self._cmd_loader,
@@ -1484,7 +1520,7 @@ class CMDAICodeTUI(App):
                       "/quit", "/new", "/params", "/help", "/loader", "/settings",
                       "/tools", "/status", "/diff", "/changes", "/commit", "/ci",
                       "/plan", "/tasks", "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
-                      "/changelog", "/mcp")
+                      "/changelog", "/update", "/updatesettings", "/mcp")
         if not self.in_chat_mode and cmd not in modal_cmds:
             self._switch_to_chat()
         self._dispatch_command(cmd)
@@ -1512,6 +1548,28 @@ class CMDAICodeTUI(App):
     def reset_session(self) -> None:
         self._cmd_new()
 
+    def _record_user_turn(self, text: str, turn_id: int) -> None:
+        self._transcript.append({"kind": "user", "text": text, "turn_id": turn_id})
+
+    def _record_assistant_text(self, text: str) -> None:
+        if not text:
+            return
+        self._transcript.append({"kind": "assistant", "text": text})
+
+    def _record_tool(self, tool_name: str, target: str, result: Any) -> None:
+        """Record one tool call so the replay can rebuild its card.
+
+        Keeps the whole result, not a summary: the card renders command output,
+        diffs and file contents out of it, and a trimmed copy would come back
+        as an empty block.
+        """
+        self._transcript.append({
+            "kind": "tool",
+            "tool": tool_name,
+            "target": target,
+            "result": result if isinstance(result, dict) else {"success": True, "content": str(result)},
+        })
+
     def _save_current_session(self) -> None:
         try:
             self.session_manager.save_session(
@@ -1520,6 +1578,7 @@ class CMDAICodeTUI(App):
                 model_id=self.current_model_id,
                 stats=self.stats,
                 title=self.session_title,
+                transcript=list(self._transcript),
             )
         except Exception:
             pass
@@ -1657,8 +1716,114 @@ class CMDAICodeTUI(App):
     def _cmd_stats(self, arg: str = "") -> None:
         self.push_screen(StatsModal(self.stats), lambda _: None)
 
+    def _cmd_update_settings(self, arg: str = "") -> None:
+        """/updatesettings -> automatic updates on, off, and how often."""
+        from .modals.update_settings import UpdateSettingsModal
+
+        self.push_screen(UpdateSettingsModal(), self._on_update_setting)
+
+    def _on_update_setting(self, action: Optional[str]) -> None:
+        if action == "check":
+            self._check_for_updates()
+        elif action == "update":
+            self._cmd_update("")
+
+    def _check_for_updates(self) -> None:
+        """Look for a newer release and say so, without pulling.
+
+        Runs on a thread because it reaches the network. Only reports when the
+        bundled release is behind what GitHub has, so a check on an up-to-date
+        installation says nothing at all.
+        """
+        from ..core.releases import get_bundled_release, get_release_list, get_releases
+
+        def _work() -> None:
+            try:
+                fetched, _src = get_releases(refresh=True)
+                if not fetched:
+                    return
+                newest = get_release_list(fetched)
+                if not newest:
+                    return
+                latest_tag = str(newest[0].get("tag", ""))
+                bundled_tag = str(get_bundled_release().get("tag", ""))
+                if bundled_tag and not _is_newer(latest_tag, bundled_tag):
+                    self.call_from_thread(self.notify, "CMDAI CODE is up to date.", timeout=2.5)
+                    return
+                self.call_from_thread(
+                    self.notify,
+                    f"CMDAI CODE {latest_tag} is available - run [b]/update[/b] to install it.",
+                    timeout=6.0,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _maybe_auto_update_check(self) -> None:
+        """Startup check, gated on the user's own settings."""
+        try:
+            from .modals.update_settings import is_check_due
+            if is_check_due():
+                self._check_for_updates()
+        except Exception:
+            pass
+
     def _cmd_releases(self, arg: str = "") -> None:
         self.push_screen(ReleasesModal(), lambda _: None)
+
+    def _cmd_update(self, arg: str = "") -> None:
+        """/update -> the same update `cmdai code update` runs.
+
+        Both go through core.updater.run_update, so they cannot drift apart.
+        The only difference is who draws the steps: the terminal animator on the
+        CLI, a progress window here. Nothing on this path may print - escape
+        codes on stdout land inside the rendered frame.
+        """
+        from ..core.releases import write_pending_notice
+        from ..core.updater import run_update
+        from .modals.update import TuiReporter, UpdateProgressModal
+
+        if getattr(self, "_update_running", False):
+            self.notify("An update is already running.", severity="warning", timeout=3.0)
+            return
+        if self.is_generating:
+            self.notify("Finish the current turn before updating.", severity="warning", timeout=3.0)
+            return
+
+        app_root = getattr(self.settings, "base_dir", None) or os.getcwd()
+        modal = UpdateProgressModal()
+        self._update_running = True
+        self.push_screen(modal, lambda _: None)
+
+        def _run() -> None:
+            reporter = TuiReporter(self, modal)
+            try:
+                result = run_update(app_root, reporter=reporter,
+                                    on_updated=write_pending_notice)
+            except Exception as e:
+                reporter.message(f"[#f85149]Update failed: {e}[/]")
+                self.call_from_thread(self._finish_update, None, str(e))
+                return
+            self.call_from_thread(self._finish_update, result, "")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_update(self, result: Any, error: str) -> None:
+        """Report the outcome once the updater's thread is done."""
+        self._update_running = False
+        if error:
+            self.notify(f"Update failed: {error}", severity="error", timeout=6.0)
+            return
+        if result is None or not getattr(result, "ok", False):
+            self.notify("Update failed. See the window for details.",
+                        severity="error", timeout=6.0)
+            return
+        if result.changed:
+            self.notify(f"{result.summary} - restart CMDAI CODE to run the new code.",
+                        timeout=8.0)
+        else:
+            self.notify(result.summary, timeout=4.0)
 
     def show_user_actions(self, turn_id: int) -> None:
         from .modals.actions import ActionMenuModal
@@ -1750,18 +1915,40 @@ class CMDAICodeTUI(App):
             pass
 
     def _maybe_show_update_notice(self) -> None:
+        """Show what changed, once, on the first launch after the version moved.
+
+        Two ways in. The flag written by `cmdai code update` is authoritative:
+        it proves an update actually ran. The version comparison catches
+        everything the flag misses - a `git pull` by hand, a tag switch, another
+        installer - because it only compares against the last recorded launch.
+        """
         try:
-            flag = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "cache", "pending_changelog.json")
-            flag = os.path.normpath(flag)
-            if not os.path.exists(flag):
+            from ..core.releases import (
+                clear_pending_notice,
+                detect_version_change,
+                get_bundled_release,
+                get_display_version,
+                mark_version_seen,
+                read_pending_notice,
+            )
+
+            pending = read_pending_notice()
+            if pending:
+                clear_pending_notice()
+                version = pending.get("version", "")
+                mark_version_seen(version)
+            else:
+                change = detect_version_change(get_display_version())
+                if not change:
+                    return
+                version = change.get("version", "")
+
+            release = get_bundled_release()
+            if not release:
+                # Nothing bundled and no way to say what changed. Stay quiet
+                # rather than opening an empty window.
                 return
-            import json
-            with open(flag, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            os.remove(flag)
-            version = str(data.get("version", ""))
-            notes = str(data.get("notes", ""))
-            self.push_screen(UpdateNoticeModal(version=version, notes=notes))
+            self.push_screen(UpdateNoticeModal(version=version, release=release))
         except Exception:
             pass
 
@@ -2471,43 +2658,107 @@ class CMDAICodeTUI(App):
 
         self.call_from_thread(_update_ui)
 
+    def _replay_transcript(self, transcript: List[Dict[str, Any]]) -> None:
+        """Rebuild a session into the chat with the widgets it used before.
+
+        Same cards, same tool blocks, same order - a reloaded session is
+        supposed to be indistinguishable from the one that was saved. Grouping
+        matters: an assistant turn is one card holding its prose and its tools,
+        because that is how the live chat builds it.
+        """
+        chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+        card: Optional[AssistantTurnCard] = None
+        marks: List[Any] = []
+
+        for item in transcript or []:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+
+            if kind == "user":
+                card = None
+                turn_id = int(item.get("turn_id") or 0)
+                if turn_id <= 0:
+                    self._turn_counter += 1
+                    turn_id = self._turn_counter
+                else:
+                    self._turn_counter = max(self._turn_counter, turn_id)
+                chat_scroll.mount(UserMessageCard(str(item.get("text", "")), turn_id=turn_id))
+                continue
+
+            if card is None:
+                card = AssistantTurnCard(self.current_model_id)
+                chat_scroll.mount(card)
+
+            if kind == "assistant":
+                text = str(item.get("text", "") or "")
+                if text:
+                    card.append_text_block(text)
+            elif kind == "tool":
+                block = card.add_tool(str(item.get("tool", "tool")), str(item.get("target", "")))
+                if block is not None:
+                    block.finish(item.get("result") or {"success": True})
+            elif kind == "subagent":
+                role = str(item.get("role", "Subagent") or "Subagent")
+                block = card.add_tool("subagent", role)
+                if block is None:
+                    continue
+                block.subagent_role = role
+                block.subagent_goal = str(item.get("goal", ""))
+                block.subagent_system = str(item.get("system", ""))
+                agent = item.get("agent") or {}
+                # finish_subagent carries the report, notes and history onto the
+                # marker, which is what _open_subagent_chat reads. Setting the
+                # role is enough for it to be picked up as a sibling too.
+                block.finish_subagent(agent)
+                block.update_header()
+                marks.append(block)
+
+        # Sibling position is only known once every marker exists.
+        total = len(marks)
+        for n, block in enumerate(marks, start=1):
+            block.subagent_index = n
+            block.subagent_total = total
+            block.update_header()
+
+        chat_scroll.scroll_end(animate=False)
+
     def _on_session_selected(self, session_id: str) -> None:
         if not session_id:
             return
         data = self.session_manager.load_session(session_id)
-        if data:
-            self.reset_session()
-            self.current_session_id = session_id
-            self.messages = data.get("messages", [])
-            self.session_title = str(data.get("title", "") or "")
-            self.stats = data.get("stats") or {
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "tok_per_sec": 0.0,
-                "tools_run": 0,
-            }
-            if data.get("model_id"):
-                self.current_model_id = data.get("model_id")
-                self.update_meta_bars()
-            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
-            for m in self.messages:
-                is_u = m.get("role") == "user"
-                content = m.get("content", "")
-                if is_u:
-                    tid = int(m.get("turn_id") or 0)
-                    if tid <= 0:
-                        self._turn_counter += 1
-                        tid = self._turn_counter
-                        m["turn_id"] = tid
-                    else:
-                        self._turn_counter = max(self._turn_counter, tid)
-                    chat_scroll.mount(UserMessageCard(content, turn_id=tid))
-                else:
-                    card = AssistantTurnCard(self.current_model_id, initial_text=content)
-                    chat_scroll.mount(card)
+        if not data:
+            self.notify("That session could not be read.", severity="error", timeout=4.0)
+            return
 
-            chat_scroll.scroll_end(animate=False)
-            self._update_terminal_title()
+        self.reset_session()
+        self.current_session_id = session_id
+        self.messages = data.get("messages", []) or []
+        self.session_title = str(data.get("title", "") or "")
+        self.stats = data.get("stats") or {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "tok_per_sec": 0.0,
+            "tools_run": 0,
+        }
+        if data.get("model_id"):
+            self.current_model_id = data.get("model_id")
+            self.update_meta_bars()
+
+        # A session saved before the transcript existed is rebuilt from the
+        # conversation, so its tool calls still stop looking like things the
+        # user typed.
+        transcript = data.get("transcript")
+        if not isinstance(transcript, list) or not transcript:
+            transcript = transcript_from_messages(self.messages)
+        self._transcript = [t for t in transcript if isinstance(t, dict)]
+
+        # reset_session() ends on the hero screen. Without switching back the
+        # cards below are mounted into a hidden view and the load looks like it
+        # did nothing at all.
+        self._switch_to_chat()
+        self._replay_transcript(self._transcript)
+        self._update_terminal_title()
 
     def _on_prompt_selected(self, result: Any) -> None:
         if not result:
@@ -2693,6 +2944,7 @@ class CMDAICodeTUI(App):
                     adds = len(str(res.get("content", "")).splitlines()) or 1
                 self._turn_diff_stats["added"] += adds
                 self._turn_diff_stats["deleted"] += dels
+            self._record_tool(tool_name, target, res)
             self.call_from_thread(assistant_card.finish_tool, res)
             self.call_from_thread(self._scroll_chat_to_end_if_enabled)
             self.call_from_thread(self.refresh)
@@ -2956,6 +3208,7 @@ class CMDAICodeTUI(App):
                     if kind == "text":
                         text_chunk = data
                         self.call_from_thread(assistant_card.append_text_block, text_chunk)
+                        self._record_assistant_text(text_chunk)
                         self.call_from_thread(self._scroll_chat_to_end_if_enabled)
                         idx += 1
                     elif kind == "tool":
@@ -3031,6 +3284,19 @@ class CMDAICodeTUI(App):
                                 "role": "user",
                                 "content": self.agent_runner.format_tool_result_for_llm("subagent", sub_res),
                             })
+                            # One transcript entry per marker, each carrying its
+                            # own subagent's result. Recording the whole batch on
+                            # every marker would make a reloaded session show N
+                            # markers that all open the same full report.
+                            for call_args, agent in zip(batch, _match_agents_to_calls(
+                                    batch, sub_res.get("subagents", []))):
+                                self._transcript.append({
+                                    "kind": "subagent",
+                                    "role": str(call_args.get("name") or call_args.get("role") or "Subagent").strip()[:60] or "Subagent",
+                                    "goal": str(call_args.get("goal") or call_args.get("task") or call_args.get("description") or "").strip(),
+                                    "system": str(call_args.get("system") or call_args.get("system_prompt") or call_args.get("prompt") or "").strip(),
+                                    "agent": agent,
+                                })
                             self.call_from_thread(assistant_card.clear_generating_tool)
                             self.call_from_thread(self.refresh)
                             idx = j

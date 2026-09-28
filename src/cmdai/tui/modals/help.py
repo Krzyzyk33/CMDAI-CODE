@@ -38,6 +38,8 @@ COMMANDS_DOC: Dict[str, str] = {
     "/mode": "Toggle/cycle agent execution mode (auto / plan / ask)",
     "/thinking": "Cycle/set thinking reasoning level (Off / On / Low / Med / High) if supported",
     "/changelog": "Show GitHub releases changelog (>= v3.0-alpha)",
+    "/update": "Pull the latest code - same as `cmdai code update`",
+    "/updatesettings": "Automatic updates: on/off, check interval, check or update now",
     "/mcp": "MCP servers status (/mcp restart|logs <name>)",
     "/quit": "Quit CMDAI CODE",
 }
@@ -47,7 +49,7 @@ HELP_CATEGORIES: List[Tuple[str, List[str]]] = [
     ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/test", "/review", "/plan", "/debug", "/index", "/mode"]),
     ("Context & Files", ["/cd", "/add", "/drop", "/context"]),
     ("Model & Reasoning", ["/models", "/modelinfo", "/params", "/system", "/thinking"]),
-    ("Configuration & Engine", ["/settings", "/loader", "/changelog", "/mcp", "/quit"]),
+    ("Configuration & Engine", ["/settings", "/loader", "/update", "/updatesettings", "/changelog", "/mcp", "/quit"]),
 ]
 
 

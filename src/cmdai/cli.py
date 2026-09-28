@@ -135,174 +135,36 @@ def _animated_step(label, work_fn, min_time=1.0, timeout=300.0, header="", gap=0
     return (status, result.get("detail", ""))
 
 
+class _CliReporter:
+    """Draws the update steps in a terminal, the way install.bat does.
+
+    Holds the only animation the update path has ever used. The TUI gets its
+    own reporter over the same `core.updater.run_update`, which is what keeps
+    `cmdai code update` and `/update` behaving identically.
+    """
+
+    def step(self, label, work_fn, min_time=1.0, timeout=300.0, header="", gap=0):
+        return _animated_step(label, work_fn, min_time=min_time, timeout=timeout,
+                              header=header, gap=gap)
+
+    def message(self, text: str) -> None:
+        print(text)
+
+    def finish(self, text: str) -> None:
+        try:
+            _load_animator().print_footer(text)
+        except Exception:
+            print(text)
+
+
 def handle_update():
     """Updates CMDAI CODE from GitHub repository without modifying user's personal config."""
-    import subprocess
+    from cmdai.core.releases import write_pending_notice
+    from cmdai.core.updater import run_update
 
-    def _run(args):
-        return subprocess.run(args, cwd=APP_ROOT, text=True, capture_output=True)
-
-    try:
-        subprocess.check_output(["git", "--version"], stderr=subprocess.DEVNULL)
-    except Exception:
-        print("[!] Error: Git is not installed or not found in system PATH.")
-        print(f"[!] You can re-clone manually: git clone {REPO_URL}")
-        return 1
-
-    # Auto-fix: Git "dubious ownership" on Windows (e.g. E:/CMDAI-CODE on a
-    # filesystem that does not record ownership). Add APP_ROOT to global
-    # safe.directory list if missing.
-    try:
-        res = subprocess.run(
-            ["git", "config", "--global", "--get-all", "safe.directory"],
-            text=True, capture_output=True,
-        )
-        existing = (res.stdout or "").splitlines() if res.returncode == 0 else []
-        norm_root = APP_ROOT.replace("\\", "/")
-        norm_existing = [p.strip().replace("\\", "/") for p in existing]
-        if norm_root not in norm_existing and APP_ROOT not in [p.strip() for p in existing]:
-            _add = subprocess.run(
-                ["git", "config", "--global", "--add", "safe.directory", APP_ROOT],
-                text=True, capture_output=True,
-            )
-            if _add.returncode != 0:
-                # Retry with forward-slash form (Git on Windows prefers it).
-                subprocess.run(
-                    ["git", "config", "--global", "--add", "safe.directory", norm_root],
-                    text=True, capture_output=True,
-                )
-    except Exception:
-        pass
-
-    # Auto-fix: missing upstream tracking (bare `git pull` fails with
-    # "There is no tracking information for the current branch").
-    try:
-        upstream = _run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        if upstream.returncode != 0:
-            branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-            cur = (branch.stdout or "").strip() if branch.returncode == 0 else ""
-            candidates = []
-            if cur and cur != "HEAD":
-                candidates.append(f"origin/{cur}")
-            # Common fallbacks if current branch has no same-name remote.
-            for fallback in ("origin/main", "origin/master"):
-                if fallback not in candidates:
-                    candidates.append(fallback)
-            for cand in candidates:
-                verify = _run(["git", "rev-parse", "--verify", f"refs/remotes/{cand}"])
-                if verify.returncode == 0:
-                    _run(["git", "branch", "--set-upstream-to", cand])
-                    break
-    except Exception:
-        pass
-
-    def _display_version() -> str:
-        try:
-            sys.path.insert(0, os.path.join(APP_ROOT, "src"))
-            from cmdai.core.releases import get_display_version as _gdv
-            ver = (_gdv() or "").strip()
-            if ver and not ver.lower().startswith("v"):
-                ver = f"v{ver}"
-            return ver
-        except Exception:
-            pass
-        try:
-            tag = _run(["git", "describe", "--tags", "--abbrev=0"])
-            ver = (tag.stdout or "").strip() if tag.returncode == 0 else ""
-            if ver and not ver.lower().startswith("v"):
-                ver = f"v{ver}"
-            return ver
-        except Exception:
-            return ""
-
-    ver_before = _display_version()
-
-    def _pull_work():
-        res = _run(["git", "pull", "--rebase", "--autostash"])
-        status = "OK" if res.returncode == 0 else "FAIL"
-        return (status, f"{res.stdout or ''}\n{res.stderr or ''}")
-
-    pull_status, pull_out = _animated_step(
-        "Pulling latest changes", _pull_work,
-        min_time=1.2, timeout=300.0,
-        header="update cmdai code", gap=3,
-    )
-    if pull_status != "OK":
-        if "dubious ownership" in pull_out:
-            print(f"Hint: run: git config --global --add safe.directory {APP_ROOT}")
-        elif "no tracking information" in pull_out:
-            print("Hint: no upstream set. Run: git branch --set-upstream-to=origin/main (or origin/master)")
-        elif "Your local changes" in pull_out or "would be overwritten" in pull_out:
-            print("Hint: you have local changes. Run: git stash push -m update-backup, then retry update.")
-        print("Error: update failed.")
-        return 1
-
-    req_path = os.path.join(APP_ROOT, "requirements.txt")
-    if os.path.exists(req_path):
-        def _pip_work():
-            pip = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", req_path,
-                 "--quiet", "--disable-pip-version-check"],
-                cwd=APP_ROOT, text=True, capture_output=True,
-            )
-            pip_text = f"{pip.stdout or ''}\n{pip.stderr or ''}"
-            # Filter pip noise: broken "~" dist warnings and self-version notice.
-            # Real errors (ERROR/Failed) are still shown.
-            interesting = []
-            for line in pip_text.splitlines():
-                s = line.strip()
-                if not s:
-                    continue
-                if "Ignoring invalid distribution" in s:
-                    continue
-                if "new release of pip is available" in s:
-                    continue
-                if s.startswith("[notice]"):
-                    continue
-                if "to update, run:" in s and "pip install" in s:
-                    continue
-                interesting.append(s)
-            status = "OK" if pip.returncode == 0 else "FAIL"
-            return (status, "\n".join(interesting[-15:]))
-
-        pip_status, pip_detail = _animated_step(
-            "Synchronizing packages", _pip_work,
-            min_time=1.0, timeout=900.0, gap=3,
-        )
-        if pip_status != "OK":
-            if pip_detail.strip():
-                print(pip_detail)
-            print("Error: dependency sync failed (see lines above).")
-
-    # Refresh release/version cache so hero shows the new tag immediately.
-    def _refresh_work():
-        sys.path.insert(0, os.path.join(APP_ROOT, "src"))
-        from cmdai.core.releases import get_releases as _gr, get_display_version as _gdv2
-        _gr(refresh=True)
-        ver_after = (_gdv2() or "").strip()
-        if ver_after and not ver_after.lower().startswith("v"):
-            ver_after = f"v{ver_after}"
-        return ("OK", ver_after)
-
-    ver_after = ver_before
-    refresh_status, refresh_out = _animated_step(
-        "Refreshing version", _refresh_work,
-        min_time=1.0, timeout=120.0,
-    )
-    if refresh_status == "OK" and refresh_out:
-        ver_after = refresh_out
-
-    if ver_before and ver_after and ver_before != ver_after:
-        result_text = f"Updated: {ver_before} -> {ver_after}"
-    elif ver_after:
-        result_text = f"Already up to date ({ver_after})"
-    else:
-        result_text = "CMDAI CODE has been successfully updated!"
-    try:
-        _load_animator().print_footer(result_text)
-    except Exception:
-        print(result_text)
-    return 0
+    result = run_update(APP_ROOT, reporter=_CliReporter(),
+                        on_updated=write_pending_notice)
+    return 0 if result.ok else 1
 
 
 def handle_add_local_model():
@@ -404,7 +266,8 @@ CLI_HELP = """
   [bold]Usage[/]
     cmdai code [target]            launch the app (default)
     cmdai code help | -h | --help  show this help
-    cmdai editor [file]            open the code editor
+    cmdai editor [folder]          CMDAI EDITOR: pick/create a project,
+                                   or open <folder> right away
     cmdai code update              update from GitHub
     cmdai addlocal                 add a local model (.gguf)
 
@@ -422,9 +285,51 @@ CLI_HELP = """
     /diff                review working changes
     /plan                task checklist (CMDAIPLAN.md)
     /editor              code editor in a new window
+    /update              pull the latest code (same as this command)
+    /updatesettings      automatic updates on / off / check interval
+    /changelog           GitHub releases (>= v3.0-alpha)
 
   [dim]{repo}[/]
 """
+
+
+def _cmdaieditor_main() -> str:
+    """Sciezka do `editor/main.py` albo pusty napis, gdy go nie ma."""
+    # `src/cmdai/cli.py` -> `src/cmdai` -> `src` -> korzen repo.
+    # Liczymy od `__file__`, nie od `cwd`: `cmdai` jest instalowany
+    # globalnie i bywa wywolywany z kazdego katalogu.
+    korzen = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    main_py = os.path.join(korzen, "editor", "main.py")
+    return main_py if os.path.isfile(main_py) else ""
+
+
+def launch_cmdaieditor(args: list) -> int:
+    """`cmdai editor [folder]` - uruchamia edytor CMDAI.
+
+    Zwraca kod wyjścia procesu albo 1, gdy nie da się uruchomić.
+    """
+    main_py = _cmdaieditor_main()
+    if not main_py:
+        print("CMDAI EDITOR not found: expected editor/main.py next to src/.",
+              file=sys.stderr)
+        return 1
+
+    # Ten sam interpreter, ktory uruchomił `cmdai`. Dzięki temu
+    # edytor dostaje te same pakiety co aplikacja (a jego
+    # `requirements-editor.txt` jest podzbiorem `requirements.txt`).
+    polecenie = [sys.executable, main_py, *[str(a) for a in args if str(a)]]
+    try:
+        import subprocess
+
+        # Bez `shell=True` - argumenty zostaja argumentami, a nazwa
+        # folderu ze spacja albo cudzysłowem nie robi sie komenda.
+        return subprocess.call(polecenie)
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        print(f"Cannot start CMDAI EDITOR: {exc}", file=sys.stderr)
+        return 1
 
 
 def print_cli_help() -> None:
@@ -469,7 +374,10 @@ def main():
 
     # `help` / `-h` / `--help` print the CMDAI CODE help. Handled before
     # argparse so it never falls through to its own "usage: cmdai.py" output.
-    if any(a in ("help", "-h", "--help", "-?", "/?") for a in raw_args):
+    # `cmdai editor --help` NIE jest helpem CMDAI CODE - to edytor, i
+    # ten gałąź obsługuje siebie sam (`--no-picker` itd.).
+    if not (raw_args and raw_args[0] == "editor") and \
+            any(a in ("help", "-h", "--help", "-?", "/?") for a in raw_args):
         print_cli_help()
         return
 
@@ -496,6 +404,21 @@ def main():
         install_global_launcher(silent=True)
     except Exception:
         pass
+
+    # `cmdai editor` -> EDYTOR CMDAI (osobna aplikacja w `editor/`).
+    #
+    # To jest DODATKOWA gałąź, nie zamiana. Gałąź poniżej
+    # (`if "editor" in raw_args`) obsługuje `cmdai code editor` i
+    # celowo zostaje nietknięta - to inna aplikacja, inny kod
+    # (`cmdai.editor.editor_app`), inne zachowanie. Użytkownik
+    # wyraźnie poprosił, żeby CMDAI CODE było niezależne.
+    #
+    # Uruchamiamy `editor/main.py` jako PROCES POTOMNY w tym samym
+    # terminalu, a nie `import` - edytor ma własny `main()`,
+    # własne ustawienia kodowania (SetConsoleOutputCP) i własny
+    # `sys.path`. `import` przeplatałby te trzy rzeczy z CLI.
+    if raw_args and raw_args[0] == "editor":
+        sys.exit(launch_cmdaieditor(sys.argv[2:]))
 
     if "editor" in raw_args:
         from cmdai.editor.editor_app import CMDAICodeEditor
