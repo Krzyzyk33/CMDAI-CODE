@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import traceback
+from typing import List
 
 REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
 FIXED_ROOT_NAME = "CMDAI-CODE"
@@ -358,6 +359,51 @@ def print_cli_help() -> None:
         print(body)
 
 
+# Flags that consume the next argument. Everything else starting with "-" is
+# a switch and takes no value.
+_VALUE_FLAGS = {"--workdir", "--provider", "--model"}
+
+_HELP_TOKENS = ("help", "-h", "--help", "-?", "/?")
+
+
+def _bare_words(argv: List[str]) -> List[str]:
+    """The positional words in the arguments, in order.
+
+    A subcommand is never reliably at position 0. The global launcher
+    (`cmdai.cmd`) and the npm wrapper (`bin/cmdai.js`) both inject
+    `--workdir <path>` ahead of whatever the user typed, so `cmdai update`,
+    `cmdai code update` and `npx cmdai-code update` all arrive differently. The
+    old `raw_args[0] == "update"` only ever matched one of those spellings, and
+    the npm path fell through to argparse and tried to launch the TUI instead of
+    updating.
+
+    Flag values are skipped, or a directory called `update` would read as the
+    update command.
+    """
+    words: List[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        low = str(arg).lower()
+        if low.startswith("-"):
+            if "=" not in low and low in _VALUE_FLAGS:
+                skip_next = True
+            continue
+        words.append(low)
+    return words
+
+
+def _editor_target_args(argv: List[str]) -> List[str]:
+    """Words meant for the editor: no flags, no flag values, no subcommand.
+
+    `editor/main.py` is a separate application with its own options, so the
+    launcher's own `--workdir` must not be forwarded to it.
+    """
+    return [a for a in _bare_words(argv) if a not in ("editor", "code", "launch")]
+
+
 def main():
     setup_crash_logger()
     # Windows PL console (cp1250) can't encode box glyphs — force UTF-8 output.
@@ -370,21 +416,25 @@ def main():
         pass
 
     raw_args = [a.lower() for a in sys.argv[1:]]
-    args_joined = " ".join(raw_args)
+    words = _bare_words(sys.argv[1:])
+    first = words[0] if words else ""
 
     # `help` / `-h` / `--help` print the CMDAI CODE help. Handled before
     # argparse so it never falls through to its own "usage: cmdai.py" output.
-    # `cmdai editor --help` NIE jest helpem CMDAI CODE - to edytor, i
-    # ten gałąź obsługuje siebie sam (`--no-picker` itd.).
-    if not (raw_args and raw_args[0] == "editor") and \
-            any(a in ("help", "-h", "--help", "-?", "/?") for a in raw_args):
+    # Both `cmdai editor` and `cmdai code editor` mean the editor, and that
+    # application handles its own `--help`; the app help must not swallow it.
+    # Only the first two words are considered, so a `code`/`launch` prefix in
+    # front of `editor` is skipped without letting a later argument disable the
+    # app help.
+    editor_early = bool(words[:2]) and "editor" in words[:2]
+    if not editor_early and any(a in _HELP_TOKENS for a in raw_args):
         print_cli_help()
         return
 
-    if "code update" in args_joined or (len(raw_args) >= 1 and raw_args[0] == "update"):
+    if "update" in words:
         sys.exit(handle_update())
 
-    if "code addlocal" in args_joined or "addlocal" in args_joined or "add-model" in args_joined:
+    if "addlocal" in words or "add-model" in words:
         sys.exit(handle_add_local_model())
 
     parser = argparse.ArgumentParser(prog="cmdai code", add_help=False,
@@ -417,26 +467,13 @@ def main():
     # terminalu, a nie `import` - edytor ma własny `main()`,
     # własne ustawienia kodowania (SetConsoleOutputCP) i własny
     # `sys.path`. `import` przeplatałby te trzy rzeczy z CLI.
-    if raw_args and raw_args[0] == "editor":
-        sys.exit(launch_cmdaieditor(sys.argv[2:]))
+    if first == "editor":
+        sys.exit(launch_cmdaieditor(_editor_target_args(sys.argv[1:])))
 
-    if "editor" in raw_args:
+    if "editor" in words:
         from cmdai.editor.editor_app import CMDAICodeEditor
-        raw_list = sys.argv[1:]
-        target_file = "."
-        i = 0
-        while i < len(raw_list):
-            a = raw_list[i]
-            if a.lower() in ("editor", "code"):
-                i += 1
-                continue
-            if a.startswith("-"):
-                i += 1
-                if "=" not in a and i < len(raw_list):
-                    i += 1
-                continue
-            target_file = a
-            break
+        target_words = _editor_target_args(sys.argv[1:])
+        target_file = target_words[0] if target_words else "."
         app = CMDAICodeEditor(initial_path=os.path.abspath(target_file))
         app.run()
         return
