@@ -7,6 +7,12 @@ __pycache__/
 env/
 venv/
 ENV/
+*-venv/
+
+# Modele GGUF sa duze; katalog ustawia CMDAI_MODELS_DIR albo config["models_dir"].
+models/
+*.gguf
+*.gguf.part
 
 .pytest_cache/
 cache/
