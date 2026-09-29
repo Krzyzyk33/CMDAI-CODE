@@ -589,6 +589,9 @@ class MCPClient:
     def __init__(self, config_path: str = ""):
         self.config_path = config_path
         self.servers: Dict[str, MCPServer] = {}
+        # Set when the config file exists but could not be read, so callers
+        # can say so instead of reporting an empty server list.
+        self.load_error = ""
 
     # ----------------------------------------------------------- config
 
@@ -602,11 +605,19 @@ class MCPClient:
 
         Accepts both shapes in the wild: Claude Desktop's
         ``{"mcpServers": {...}}`` and a bare ``{name: {...}}`` map.
+
+        Read as utf-8-sig, not utf-8: PowerShell's own `Set-Content
+        -Encoding UTF8` writes a BOM, and plain utf-8 raises on it. The old
+        version swallowed that as "no servers configured", so a config that
+        was present and correct looked identical to a missing file.
         """
         try:
-            with open(self.config_file(app_root), "r", encoding="utf-8") as handle:
+            with open(self.config_file(app_root), "r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
-        except Exception:
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            self.load_error = f"{self.config_file(app_root)}: {exc}"
             return {}
         if not isinstance(data, dict):
             return {}
@@ -630,10 +641,15 @@ class MCPClient:
         path = self.config_file(app_root)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as handle:
+            # newline="\n" and no BOM: this file is read by a Node launcher
+            # on Windows as well as by us, and a BOM there shows up as a
+            # stray character in the first key.
+            with open(path, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
+            self.load_error = ""
             return True
-        except Exception:
+        except Exception as exc:
+            self.load_error = str(exc)
             return False
 
     def _server_from_config(self, name: str, cfg: Dict[str, Any]) -> MCPServer:

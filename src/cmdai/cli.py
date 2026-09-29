@@ -191,6 +191,17 @@ def handle_mcp(argv: List[str]):
             return 0
         print(f"\n[*] {path}\n")
         cfg = client.load_config(APP_ROOT)
+        if client.load_error:
+            # A file that exists but will not parse must not look the same as
+            # an empty one, or the user goes looking for servers that are
+            # sitting right there in the file.
+            print(f"[!] Could not read the config: {client.load_error}")
+            print("    Common cause: a byte-order mark from PowerShell")
+            print("    `Set-Content -Encoding UTF8`. Rewrite it without:")
+            print('      python -c "import json,io;d=json.load(io.open(r\'')
+            print(f"{path}'" + r''',encoding='utf-8-sig'));io.open(r''')
+            print(f"{path}'" + r''','w',encoding='utf-8').write(json.dumps(d,indent=2))"''')
+            return 1
         if not cfg:
             print("[i] Config is empty.")
             return 0
