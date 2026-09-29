@@ -20,6 +20,9 @@ cache/
 htmlcov/
 
 config.json
+# Trzyma tokeny w `env`, wiec nie moze byc sledzony. mcp_config.example.json
+# jest sledzony i pokazuje ksztalt bez sekretow.
+mcp_config.json
 .CMDAISETTINGS.json
 .cmdai_code_project/
 .cmdai/

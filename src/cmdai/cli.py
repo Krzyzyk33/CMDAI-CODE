@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import traceback
-from typing import List
+from typing import Any, Dict, List
 
 REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
 FIXED_ROOT_NAME = "CMDAI-CODE"
@@ -166,6 +166,178 @@ def handle_update():
     result = run_update(APP_ROOT, reporter=_CliReporter(),
                         on_updated=write_pending_notice)
     return 0 if result.ok else 1
+
+
+def handle_mcp(argv: List[str]):
+    """`cmdai mcp <subcommand>` - manage MCP servers from the command line.
+
+    Servers are added here or by editing mcp_config.json directly. The model
+    has no way to add one: a model that can register its own tool endpoints
+    is a model that can be talked into loading something the user never
+    reviewed. Adding stays a deliberate human action.
+    """
+    from cmdai.mcp.client import MCPClient, sanitize_name
+
+    client = MCPClient()
+    path = client.config_file(APP_ROOT)
+    sub = (argv[0].lower() if argv else "list")
+    args = argv[1:]
+
+    if sub in ("list", "ls", "status"):
+        if not os.path.isfile(path):
+            print(f"[i] No MCP config yet at {path}")
+            print("    Add one with:  cmdai mcp add <name> <command> [args...]")
+            print("               or:  cmdai mcp add <name> --url http://127.0.0.1:8765/mcp")
+            return 0
+        print(f"\n[*] {path}\n")
+        cfg = client.load_config(APP_ROOT)
+        if not cfg:
+            print("[i] Config is empty.")
+            return 0
+        print(f"[*] {len(cfg)} server(s) configured\n")
+        for name in sorted(cfg):
+            entry = cfg[name] or {}
+            kind = "http" if entry.get("url") else "stdio"
+            if entry.get("type"):
+                kind = entry["type"]
+            flag = "" if entry.get("enabled", True) else "  [disabled]"
+            if kind == "stdio":
+                target = " ".join([entry.get("command", "")] + list(entry.get("args") or []))
+            else:
+                target = entry.get("url", "")
+            auto = "" if entry.get("autostart", True) else "  [no autostart]"
+            print(f"  {name}")
+            print(f"      {kind}: {target}{flag}{auto}")
+        print("\n[i] Connect state is reported by the app; run /mcp inside CMDAI CODE.")
+        return 0
+
+    if sub == "add":
+        # Split out only the flags this command owns. Stripping every token
+        # starting with "-" would eat the server's own options, so
+        # `cmdai mcp add s python -c "print(1)"` would silently lose "-c".
+        raw = list(args)
+        url = ""
+        env: Dict[str, str] = {}
+        autostart = True
+        enabled = True
+        positional: List[str] = []
+
+        index = 0
+        while index < len(raw):
+            token = raw[index]
+            if token == "--url":
+                if index + 1 >= len(raw):
+                    print("[!] --url needs a value.")
+                    return 2
+                url = raw[index + 1]
+                index += 2
+                continue
+            if token == "--env":
+                if index + 1 >= len(raw) or "=" not in raw[index + 1]:
+                    print("[!] --env needs KEY=value")
+                    return 2
+                key, _, value = raw[index + 1].partition("=")
+                env[key] = value
+                index += 2
+                continue
+            if token == "--no-autostart":
+                autostart = False
+                index += 1
+                continue
+            if token == "--disabled":
+                enabled = False
+                index += 1
+                continue
+            positional.append(token)
+            index += 1
+
+        if not positional:
+            print("[!] Usage: cmdai mcp add <name> <command> [args...]")
+            print("    or:     cmdai mcp add <name> --url <url>")
+            return 2
+
+        name = sanitize_name(positional[0])
+        if name == "server":
+            print(f"[!] '{positional[0]}' is not a usable server name.")
+            return 2
+        cfg = client.load_config(APP_ROOT)
+        if name in cfg:
+            print(f"[!] '{name}' already exists. Remove it first: cmdai mcp remove {name}")
+            return 2
+
+        rest = positional[1:]
+        entry: Dict[str, Any] = {}
+        if url:
+            if rest:
+                print("[!] Give either --url or a command, not both.")
+                return 2
+            entry = {"type": "http", "url": url}
+        elif rest:
+            entry = {"command": rest[0], "args": rest[1:]}
+        else:
+            print("[!] Give either a command to run or --url <url>.")
+            print("    Usage: cmdai mcp add <name> <command> [args...]")
+            print("           cmdai mcp add <name> --url <url>")
+            return 2
+
+        if env:
+            entry["env"] = env
+        if not autostart:
+            entry["autostart"] = False
+        if not enabled:
+            entry["enabled"] = False
+
+        cfg[name] = entry
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] Added '{name}' to {path}")
+        if name != positional[0]:
+            print(f"     stored as '{name}' (tool names use underscores)")
+        if env:
+            print("     Values written as ${VAR} are expanded at launch, so tokens can")
+            print("     stay in your environment instead of this file.")
+        return 0
+
+    if sub in ("remove", "rm", "delete"):
+        if not args:
+            print("[!] Usage: cmdai mcp remove <name>")
+            return 2
+        name = sanitize_name(args[0])
+        cfg = client.load_config(APP_ROOT)
+        if name not in cfg:
+            known = ", ".join(sorted(cfg)) or "(none)"
+            print(f"[!] No server named '{name}'. Configured: {known}")
+            return 2
+        cfg.pop(name)
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] Removed '{name}'")
+        return 0
+
+    if sub in ("enable", "disable"):
+        if not args:
+            print(f"[!] Usage: cmdai mcp {sub} <name>")
+            return 2
+        name = sanitize_name(args[0])
+        cfg = client.load_config(APP_ROOT)
+        if name not in cfg:
+            known = ", ".join(sorted(cfg)) or "(none)"
+            print(f"[!] No server named '{name}'. Configured: {known}")
+            return 2
+        entry = cfg[name] or {}
+        entry["enabled"] = (sub == "enable")
+        cfg[name] = entry
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] '{name}' is now {sub}d")
+        return 0
+
+    print(f"[!] Unknown: cmdai mcp {sub}")
+    print("    Subcommands: list, add, remove, enable, disable")
+    return 2
 
 
 def handle_add_local_model():
@@ -440,6 +612,10 @@ def main():
 
     if "addlocal" in words or "add-model" in words:
         sys.exit(handle_add_local_model())
+
+    if "mcp" in words:
+        index = sys.argv[1:].index("mcp")
+        sys.exit(handle_mcp(sys.argv[index + 2:]))
 
     parser = argparse.ArgumentParser(prog="cmdai code", add_help=False,
                                      description="CMDAI CODE - Next-gen Terminal Code Agent")

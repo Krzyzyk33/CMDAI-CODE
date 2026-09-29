@@ -383,17 +383,15 @@ class MCPServer:
             self.session_id = resp.headers.get("Mcp-Session-Id", "") or self.session_id
 
         ctype = (resp.headers.get("Content-Type") or "").lower()
+        message = None
         if "text/event-stream" in ctype:
-            return _first_sse_json(resp.text)
-        try:
-            body = resp.json()
-        except Exception:
-            return None
-        if isinstance(body, dict) and "error" in body:
-            err = body["error"] or {}
-            raise MCPError(f"{err.get('code', '?')}: {err.get('message', 'unknown error')}")
-        result = body.get("result") if isinstance(body, dict) else None
-        return result if isinstance(result, dict) else None
+            message = _first_sse_json(resp.text)
+        else:
+            try:
+                message = resp.json()
+            except Exception:
+                message = None
+        return _unwrap_result(message)
 
     def _negotiate(self) -> None:
         result = self._initialize()
@@ -619,6 +617,10 @@ class MCPClient:
             raw = data
         out: Dict[str, Dict[str, Any]] = {}
         for name, cfg in raw.items():
+            # Keys starting with "_" are comments, the convention the example
+            # file uses to annotate its own entries.
+            if str(name).startswith("_"):
+                continue
             if isinstance(cfg, dict):
                 out[sanitize_name(name)] = cfg
         return out
@@ -797,6 +799,24 @@ def _expand_env(value: str) -> str:
     """${VAR} and $VAR from the environment, so tokens stay out of config."""
     out = os.path.expandvars(value)
     return out
+
+
+def _unwrap_result(message: Any) -> Optional[Dict[str, Any]]:
+    """Take a JSON-RPC message and return its result, raising on error.
+
+    Needed because an SSE frame carries the whole envelope
+    ``{"jsonrpc":..., "id":..., "result": {...}}`` while the plain-JSON path
+    already hands back a bare result. Unwrapping in one place keeps the
+    two transports from drifting: returning the envelope from one of them
+    produced a server that negotiated fine and then reported zero tools.
+    """
+    if not isinstance(message, dict):
+        return None
+    if "error" in message:
+        err = message.get("error") or {}
+        raise MCPError(f"{err.get('code', '?')}: {err.get('message', 'unknown error')}")
+    result = message.get("result")
+    return result if isinstance(result, dict) else None
 
 
 def _first_sse_json(text: str) -> Optional[Dict[str, Any]]:

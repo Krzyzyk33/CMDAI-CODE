@@ -72,6 +72,49 @@ def connected():
 # ------------------------------------------------------------ pure logic
 
 
+class TestSseUnwrapping:
+    """The SSE path hands back the whole JSON-RPC envelope, not result.
+
+    Regression: returning the envelope instead of its result made a server
+    negotiate a version correctly and then report zero tools, because
+    .get("tools") was looking inside {"jsonrpc":..., "result": {...}}.
+    """
+
+    def test_envelope_is_unwrapped(self):
+        from cmdai.mcp.client import _unwrap_result
+        message = {"jsonrpc": "2.0", "id": 1,
+                   "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "x"}}}
+        assert _unwrap_result(message) == {
+            "protocolVersion": "2025-06-18", "serverInfo": {"name": "x"}}
+
+    def test_error_in_envelope_raises(self):
+        from cmdai.mcp.client import MCPError, _unwrap_result
+        with pytest.raises(MCPError):
+            _unwrap_result({"jsonrpc": "2.0", "id": 1,
+                            "error": {"code": -32601, "message": "nope"}})
+
+    def test_non_message_yields_none(self):
+        from cmdai.mcp.client import _unwrap_result
+        assert _unwrap_result(None) is None
+        assert _unwrap_result("tekst") is None
+
+    def test_first_sse_json_reads_a_data_frame(self):
+        from cmdai.mcp.client import _first_sse_json
+        body = (
+            "event: message\n"
+            'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a"}]}}\n\n'
+        )
+        assert _first_sse_json(body)["result"]["tools"] == [{"name": "a"}]
+
+    def test_both_transports_land_on_the_same_shape(self):
+        # A transport that returns a different shape is a bug that only
+        # shows up against a real server, so compare them directly.
+        from cmdai.mcp.client import _first_sse_json, _unwrap_result
+        sse = _first_sse_json('data: {"result":{"tools":[{"name":"a"}]}}\n\n')
+        plain = {"result": {"tools": [{"name": "a"}]}}
+        assert _unwrap_result(sse) == _unwrap_result(plain)
+
+
 class TestClassification:
     def test_read_only(self):
         assert classify_tool({"annotations": {"readOnlyHint": True}}) == PERM_READ

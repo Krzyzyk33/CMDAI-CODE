@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "CMDAI CODE - MCP servers. Copy to mcp_config.json and edit that instead.",
+    "mcp_config.json holds tokens, so it is gitignored. This example is tracked.",
+    "",
+    "Two transports:",
+    "  stdio           the client launches the command and talks over stdin/stdout",
+    "  http            Streamable HTTP, for a server that runs on its own",
+    "",
+    "Give tokens through env using ${VAR}, not literally. The value is read from",
+    "your environment at launch, so the secret stays out of this file:",
+    "    \"env\": { \"GITHUB_TOKEN\": \"${GITHUB_TOKEN}\" }",
+    "",
+    "Keys may also be a bare map, or use the key mcp_servers, if you are copying",
+    "a block written for another client.",
+    "",
+    "Servers can be added from the command line instead:",
+    "    cmdai mcp add <name> <command> [args...]",
+    "    cmdai mcp add <name> --url http://127.0.0.1:8765/mcp",
+    "    cmdai mcp list | remove | enable | disable"
+  ],
+
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/you/Documents"],
+      "autostart": true
+    },
+
+    "github": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server:latest"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+
+    "xph-docs": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "autostart": true
+    },
+
+    "_comment_slow_start": "A server that takes a while to boot. No autostart means it connects only when you ask for it with /mcp restart NAME.",
+    "slow-server": {
+      "command": "python",
+      "args": ["-m", "some_server"],
+      "autostart": false,
+      "timeout": 60
+    },
+
+    "_comment_disabled": "Configured but not started. `cmdai mcp enable slow-server` turns it back on.",
+    "not-now": {
+      "command": "some-command",
+      "enabled": false
+    }
+  }
+}
