@@ -1,6 +1,17 @@
+import json
+import os
 import re
+import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..mcp.client import (
+    PERM_DESTRUCTIVE,
+    PERM_READ,
+    PERM_WRITE,
+    TOOL_NAME_PREFIX,
+    block_texts,
+    image_blocks,
+)
 from .render import render_command_output, render_edit_diff_opencode, render_tool_header
 from .tools import (
     AgentContext,
@@ -18,6 +29,36 @@ from .tools import (
     tool_bugs,
     tool_code_search,
 )
+
+
+def _parse_json_body(body: str, tool_name: str) -> Dict[str, Any]:
+    """Parse an MCP tool's JSON argument object.
+
+    Returns flat key/value pairs that fit the rest of the dispatch, which is
+    typed as Dict[str, str]. A malformed body is reported back to the model
+    as a readable sentence naming the tool, because a generic "invalid call"
+    is the kind of message a small local model retries the exact same way
+    twice before trying anything else.
+
+    Nested values are kept as JSON text rather than flattened away: a server
+    that expects {"filter": {"a": 1}} must receive that structure, and the
+    client re-parses before sending.
+    """
+    text = (body or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        return {"__json_error__": f"Arguments for {tool_name} are not valid JSON: {exc}"}
+    if not isinstance(data, dict):
+        return {"__json_error__": (
+            f"Arguments for {tool_name} must be a JSON object with named fields, "
+            f"got {type(data).__name__}.")}
+    out: Dict[str, Any] = {}
+    for key, value in data.items():
+        out[str(key)] = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return out
 
 
 def _all_tools_failed(events: List[Any]) -> bool:
@@ -65,6 +106,7 @@ class AgentRunner:
         on_todo_updated: Optional[Callable[[List[str]], None]] = None,
         ask_handler: Optional[Callable[[str, List[str]], str]] = None,
         mcp_client: Any = None,
+        vision_capable: Optional[Callable[[], bool]] = None,
     ):
         self.ctx = ctx
         self.workdir = getattr(ctx, "workdir", ".")
@@ -73,24 +115,277 @@ class AgentRunner:
         self.on_todo_updated = on_todo_updated
         self.ask_handler = ask_handler
         self.mcp = mcp_client
-        self._mcp_unlocked = False
+        # Optional hook telling us whether the loaded model can accept images.
+        # Defaults to False so an image from a tool is never silently attached
+        # to a text-only model - the caller gets told instead.
+        self.vision_capable = vision_capable
+        # Permission gate state per server: "closed" -> "open" -> "write_granted".
+        # Replaces a single boolean that either unlocked everything or nothing.
+        self._mcp_state: Dict[str, str] = {}
         self.provider_id = "local_gguf"
 
-    def _mcps_status(self) -> Dict[str, Any]:
-        if not self.mcp:
-            return {"success": True, "servers": [], "note": "MCP not configured (mcp_config.json)."}
-        lines = self.mcp.status_lines()
-        self._mcp_unlocked = True
-        return {"success": True, "servers": lines,
-                "note": "Connected server tools are now available as <server>_<tool> (e.g. github_list_prs)."}
+    # ------------------------------------------------------------- MCP gate
 
-    def _dynamic_mcp_tool(self, name: str) -> Optional[Tuple[str, str]]:
-        if not self.mcp or not self._mcp_unlocked:
+    def _mcp_state_of(self, server: str) -> str:
+        return self._mcp_state.get(server, "closed")
+
+    def _mcp_set_state(self, server: str, state: str) -> None:
+        self._mcp_state[server] = state
+
+    def _mcp_list_servers(self) -> Dict[str, Any]:
+        """`<tool:mcp />` - always visible to the model, lists what exists."""
+        if not self.mcp:
+            return {"success": True, "servers": [],
+                    "note": "MCP not configured. Add a server with `cmdai mcp add`."}
+        lines = list(self.mcp.status_lines())
+        if not lines:
+            return {"success": True, "servers": [],
+                    "note": "No MCP servers configured. Add one with `cmdai mcp add`."}
+        return {
+            "success": True,
+            "servers": lines,
+            "note": ("To use one, call <tool:mcp open server=\"NAME\" />. It returns that "
+                     "server's tools with their exact call syntax. Do not guess tool names."),
+        }
+
+    def _mcp_open_server(self, server_key: str) -> Dict[str, Any]:
+        """`<tool:mcp open server="..." />` - the only unlock step.
+
+        Tool schemas are returned as the result of this call, not injected
+        into the system prompt. The prompt prefix therefore stays byte-identical
+        between turns, which is what keeps llama.cpp's prompt cache working.
+        """
+        if not self.mcp:
+            return {"success": False, "error": "MCP is not configured."}
+        key = (server_key or "").strip().lower()
+        target = self.mcp.servers.get(key)
+        if target is None:
+            known = ", ".join(self.mcp.server_names()) or "(none)"
+            return {"success": False,
+                    "error": f"No MCP server named '{key}'. Available: {known}"}
+        if target.status != "connected":
+            return {"success": False,
+                    "error": f"MCP server '{key}' is {target.status}, not connected."
+                             f" {target.error}"}
+
+        defs = self.mcp.tool_definitions(only_servers=[key])
+        if not defs:
+            return {"success": False, "error": f"MCP server '{key}' exposed no tools."}
+
+        self._mcp_set_state(key, "open")
+        lines = [f"MCP server '{key}' is open. {len(defs)} tools available.", ""]
+        for d in defs:
+            schema = d.get("inputSchema") or {}
+            required = schema.get("required") or []
+            props = list((schema.get("properties") or {}).keys())
+            arg_doc = ", ".join(props) if props else "none"
+            lines.append(f"- {d['name']}  [perm: {d['permission']}]")
+            if d.get("description"):
+                lines.append(f"    {d['description']}")
+            lines.append(f"    args: {arg_doc}; required: {', '.join(required) or 'none'}")
+            lines.append("    call: <tool:%s>{\"arg\": \"value\"}</tool:%s>" % (d["name"], d["name"]))
+        lines.append("")
+        lines.append("Send arguments as a JSON object between the tags. "
+                     "Write tools need the user's approval; you do not get to grant it yourself.")
+        return {"success": True, "server": key, "tools": [d["name"] for d in defs],
+                "schema_text": "\n".join(lines)}
+
+    def _mcp_resolve(self, qualified: str) -> Optional[Tuple[str, str, str]]:
+        """qualified name -> (server, real tool name, permission)."""
+        if not self.mcp:
             return None
         try:
-            return self.mcp.dynamic_tools().get(name.lower())
+            tools = self.mcp.dynamic_tools()
         except Exception:
             return None
+        found = tools.get((qualified or "").lower())
+        if not found:
+            return None
+        server, real = found
+        return server, real, self.mcp.permission_for(qualified)
+
+    def _mcp_gate(self, server: str, tool: str, permission: str) -> Tuple[bool, str]:
+        """Decide whether a call may proceed. Returns (allowed, reason)."""
+        if permission == PERM_READ:
+            return True, ""
+
+        if permission == PERM_DESTRUCTIVE:
+            # Asked every time, and answering yes does not grant anything:
+            # deleting something cannot be undone, so no standing consent.
+            if not self.ask_handler:
+                return False, ("This tool is marked destructive and no confirmation "
+                               "handler is available. Ask the user to run it themselves.")
+            answer = self.ask_handler(
+                f"MCP tool '{tool}' on server '{server}' is marked destructive. "
+                f"This cannot be undone. Run it?", ["Yes", "No"])
+            if str(answer).strip().lower().startswith("yes"):
+                return True, ""
+            return False, "User declined a destructive MCP call."
+
+        # PERM_WRITE
+        if self._mcp_state_of(server) == "write_granted":
+            return True, ""
+        if not self.ask_handler:
+            return False, ("This tool writes, and no confirmation handler is available. "
+                           "Ask the user to allow it first.")
+        answer = self.ask_handler(
+            f"MCP tool '{tool}' on server '{server}' writes data. "
+            f"Allow it?", ["Yes", "Always", "No"])
+        lowered = str(answer).strip().lower()
+        if lowered.startswith("always"):
+            self._mcp_set_state(server, "write_granted")
+            return True, "granted"
+        if lowered.startswith("yes"):
+            return True, ""
+        return False, "User declined the write."
+
+    def _mcp_legacy_status(self) -> Dict[str, Any]:
+        return self._mcp_list_servers()
+
+    def _validate_mcp_args(self, server: str, tool: str,
+                           args: Dict[str, Any]) -> Optional[str]:
+        """Check arguments against the tool's own inputSchema.
+
+        Cheap, and it happens before the call rather than after, so a
+        malformed request does not reach a server that might act on half of
+        it. Returns a human-readable problem, or None when fine.
+        """
+        schema = None
+        for candidate in self.mcp.servers[server].tools:
+            if str(candidate.get("name") or "") == tool:
+                schema = candidate.get("inputSchema")
+                break
+        if not isinstance(schema, dict):
+            return None
+        try:
+            import jsonschema  # already a project dependency
+        except Exception:
+            return None  # validation is a bonus, not a hard gate
+        try:
+            jsonschema.validate(instance=dict(args), schema=schema)
+        except jsonschema.ValidationError as exc:
+            where = "/".join(str(p) for p in exc.absolute_path) or "(root)"
+            return f"Invalid arguments for {tool}: at '{where}', {exc.message}"
+        except Exception:
+            return None
+        return None
+
+    def _execute_mcp_tool(self, name: str, args: Dict[str, Any],
+                          notify: bool) -> Dict[str, Any]:
+        """Run one MCP tool, behind the permission gate."""
+        if notify and self.on_tool_start:
+            self.on_tool_start(name, "")
+
+        def finish(res: Dict[str, Any], target: str = "") -> Dict[str, Any]:
+            if notify and self.on_tool_finish:
+                self.on_tool_finish(name, target, res)
+            return res
+
+        json_error = str(args.pop("__json_error__", "") or "")
+        if json_error:
+            return finish({"success": False, "error": json_error})
+
+        resolved = self._mcp_resolve(name)
+        if resolved is None:
+            return finish({
+                "success": False,
+                "error": f"No connected MCP tool named '{name}'. Call <tool:mcp /> to list "
+                         f"servers, then <tool:mcp open server=\"NAME\" /> for the exact "
+                         f"tool names. Do not guess them.",
+            })
+        server, real_tool, permission = resolved
+
+        # "open" and "write_granted" both count as open. Testing for the
+        # literal "open" here would lock the server out again the moment the
+        # user granted write access, which is the opposite of what granting
+        # is supposed to do.
+        if self._mcp_state_of(server) == "closed":
+            return finish({
+                "success": False,
+                "error": f"Server '{server}' is not open yet. Call "
+                         f"<tool:mcp open server=\"{server}\" /> first and use the tool "
+                         f"name it returns.",
+            })
+
+        allowed, reason = self._mcp_gate(server, real_tool, permission)
+        if not allowed:
+            return finish({"success": False, "error": reason})
+
+        problem = self._validate_mcp_args(server, real_tool, args)
+        if problem:
+            # One retry is worth the round trip: the message names the field
+            # and says what is wrong, which small local models act on well.
+            return finish({"success": False, "error": problem})
+
+        try:
+            out = self.mcp.call_tool(server, real_tool, args)
+        except Exception as exc:
+            return finish({"success": False, "error": str(exc)[:500]})
+
+        result = (out or {}).get("result") or {}
+        texts = block_texts(result.get("content"))
+        images = image_blocks(result)
+        structured = result.get("structuredContent")
+
+        if images and not (self.vision_capable and self.vision_capable()):
+            # Say so. Dropping the image silently leaves the model claiming it
+            # saw something it never received.
+            texts.insert(0, (
+                f"[{len(images)} image(s) returned by this tool, but the loaded model "
+                f"is not vision-capable, so they were not attached. Switch to a "
+                f"multimodal model to use them."
+            ))
+
+        payload: Dict[str, Any] = {"success": True, "server": server, "tool": real_tool}
+        if texts:
+            payload["text"] = "\n".join(texts)
+        if structured is not None:
+            payload["structured"] = structured
+        if images and self.vision_capable and self.vision_capable():
+            saved = self._queue_mcp_images(images, real_tool)
+            if saved:
+                payload["images"] = saved
+                payload["text"] = (payload.get("text", "") +
+                                   f"\n{len(saved)} image(s) from this tool were saved and "
+                                   f"will be attached to the next request: "
+                                   f"{', '.join(saved)}").strip()
+            else:
+                payload["text"] = (payload.get("text", "") +
+                                   "\nImages were returned but could not be written to "
+                                   "disk, so they were not attached.").strip()
+        return finish(payload)
+
+    def _queue_mcp_images(self, images: List[Dict[str, Any]], tool: str) -> List[str]:
+        """Write tool-returned images to disk and queue them for the next turn.
+
+        Reuses the same pending_images queue as the vision tool, so images
+        from an MCP server and images from a screenshot take one path to the
+        request instead of two that can drift apart.
+        """
+        saved: List[str] = []
+        for index, item in enumerate(images):
+            try:
+                directory = os.path.join(tempfile.gettempdir(), "cmdaicode-mcp")
+                os.makedirs(directory, exist_ok=True)
+                ext = ".png"
+                mime = str(item.get("mimeType") or "")
+                if "jpeg" in mime or "jpg" in mime:
+                    ext = ".jpg"
+                elif "webp" in mime:
+                    ext = ".webp"
+                path = os.path.join(
+                    directory, f"mcp_{re.sub(r'[^a-z0-9]+', '_', tool.lower())}_{index}{ext}")
+                with open(path, "wb") as handle:
+                    handle.write(item["data"])
+                saved.append(path)
+            except Exception:
+                continue
+        for path in saved:
+            try:
+                self.ctx.pending_images.append({"path": path, "question": ""})
+            except Exception:
+                pass
+        return saved
 
     def parse_chronological_segments(self, text: str) -> List[Tuple[str, Any]]:
         if not text:
@@ -172,6 +467,17 @@ class AgentRunner:
                     attrs["new"] = new_m.group(1)
                 elif not old_m and "new" not in attrs:
                     attrs["new"] = body
+            elif tool_name == "mcp":
+                # <tool:mcp /> takes no arguments; everything else is an
+                # open call keyed on the server attribute.
+                pass
+            elif tool_name.startswith(TOOL_NAME_PREFIX) and body:
+                # MCP tool arguments are a JSON object between the tags:
+                #   <tool:mcp__docs__create>{"title":"x"}</tool:mcp__docs__create>
+                # The tag parser is attribute-based (key="value"), which
+                # cannot express nested objects, typed values or arrays -
+                # all of which appear in real inputSchema definitions.
+                attrs.update(_parse_json_body(body, tool_name))
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
 
         single_tag_pattern = re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*/?>', re.DOTALL | re.IGNORECASE)
@@ -553,12 +859,13 @@ class AgentRunner:
                     self.on_tool_finish("vision", image_path, res)
                 return res
 
-            elif name == "mcps":
+            elif name == "mcp":
                 if notify and self.on_tool_start:
-                    self.on_tool_start("mcps", "")
-                res = self._mcps_status()
+                    self.on_tool_start("mcp", "")
+                wanted = (args.get("server") or args.get("name") or "").strip()
+                res = self._mcp_open_server(wanted) if wanted else self._mcp_list_servers()
                 if notify and self.on_tool_finish:
-                    self.on_tool_finish("mcps", "", res)
+                    self.on_tool_finish("mcp", wanted, res)
                 return res
 
             elif name == "subagent":
@@ -575,19 +882,8 @@ class AgentRunner:
                     self.on_tool_finish("agent_note", "", res)
                 return res
 
-            else:
-                dyn = self._dynamic_mcp_tool(name)
-                if dyn:
-                    sname, mcp_tool = dyn
-                    if notify and self.on_tool_start:
-                        self.on_tool_start(name, "")
-                    try:
-                        res = self.mcp.call_tool(sname, mcp_tool, args)
-                    except Exception as e:
-                        res = {"success": False, "error": str(e)}
-                    if notify and self.on_tool_finish:
-                        self.on_tool_finish(name, "", res)
-                    return res
+            elif name.startswith(TOOL_NAME_PREFIX):
+                return self._execute_mcp_tool(name, args, notify)
 
             return {"success": False, "error": f"Unknown tool: {name}"}
         except Exception as e:
@@ -905,13 +1201,25 @@ class AgentRunner:
                 lines.append("Review before telling the user it is done: "
                              "<tool:command cmd=\"git diff --stat\" />, then <tool:read> the files that matter, "
                              "verify with <tool:bugs />, and describe the result in your own words.")
-        elif name == "mcps":
+        elif name == "mcp":
             for s in res.get("servers", []):
                 lines.append(s)
+            if res.get("schema_text"):
+                # The whole point: schemas live in the transcript, so the
+                # prompt prefix stays identical between turns.
+                lines.append(res["schema_text"])
             if res.get("note"):
                 lines.append(res["note"])
+        elif name.startswith(TOOL_NAME_PREFIX):
+            if res.get("text"):
+                lines.append(res["text"])
+            if res.get("structured") is not None:
+                lines.append(json.dumps(res["structured"], ensure_ascii=False, indent=2))
+            if res.get("images"):
+                lines.append(f"({len(res['images'])} image(s) attached to this request.)")
+            if not res.get("text") and res.get("structured") is None and not res.get("images"):
+                lines.append(f"{res.get('tool')} returned no content.")
         else:
-            import json
             clean_res = {k: v for k, v in res.items() if k not in ("diff_entries",)}
             lines.append(json.dumps(clean_res, indent=2, ensure_ascii=False))
 
@@ -961,7 +1269,13 @@ def get_agent_system_prompt(workdir: str = ".", mode: str = "auto", vision: bool
         "9. Web Search: <tool:web query=\"docs or query or https://url\" />\n"
         "10. Syntax Bug Check: <tool:bugs />\n"
         "11. Plan/Todo Tracker: <tool:todo action=\"add\" note=\"step description\" />\n"
-        "12. MCP Servers: <tool:mcps /> (lists configured MCP servers; connected ones unlock <server>_<tool>)\n"
+        "12. MCP Servers: <tool:mcp /> lists the configured servers. Then "
+        "<tool:mcp open server=\"NAME\" /> returns that server's tools, their arguments "
+        "and their exact call names. Call those tools as "
+        "<tool:mcp__NAME__TOOL>{\"arg\": \"value\"}</tool:mcp__NAME__TOOL> with a JSON "
+        "object between the tags. Only the two `mcp` tools are listed here on purpose: "
+        "server tools appear in context only after you open a server, so you never have to "
+        "guess a name. Writing tools are approved by the user at call time.\n"
         "13. Spawn Subagent: <tool:subagent name=\"Role\" system=\"instructions for the subagent\">the task it must do</tool:subagent>\n"
         + (
             "14. Screenshot: <tool:screenshot target=\"active_window\" /> (captures a window to a PNG file)\n"

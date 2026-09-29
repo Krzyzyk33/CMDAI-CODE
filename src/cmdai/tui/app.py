@@ -259,7 +259,7 @@ class CMDAICodeTUI(App):
             "- <tool:web>url_or_query</tool:web> : Web fetch or search\n"
             "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue\n"
             "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation\n"
-            "- <tool:mcps /> : List configured MCP servers (connected ones unlock <server>_<tool>)\n"
+            "- <tool:mcp /> : List MCP servers. Then <tool:mcp open server=\"NAME\" /> reveals that server's tools; call them as <tool:mcp__NAME__TOOL>{\"arg\":\"v\"}</tool:mcp__NAME__TOOL>\n"
             "- <tool:screenshot target=\"active_window\" /> + <tool:vision image_path=\"file.png\" question=\"...\" /> : Only listed in the agent section below when the loaded model supports vision\n"
         )
 
@@ -287,7 +287,7 @@ class CMDAICodeTUI(App):
         self.pinned_files: Dict[str, str] = {}
         self._last_modified_files: List[str] = []
         try:
-            from ..mcp.client import MCPClient
+            from ..mcp.client import MCPClient, sanitize_name
             self.mcp_client = MCPClient()
         except Exception:
             self.mcp_client = None
@@ -295,6 +295,9 @@ class CMDAICodeTUI(App):
             ctx=self.agent_ctx,
             on_todo_updated=self._on_todo_updated,
             mcp_client=self.mcp_client,
+            # Lets the runner attach images returned by MCP tools when the
+            # loaded model can actually see them, and say so when it cannot.
+            vision_capable=self._model_supports_vision,
         )
         self._current_assistant_card: Optional[AssistantTurnCard] = None
 
@@ -1952,6 +1955,14 @@ class CMDAICodeTUI(App):
         except Exception:
             pass
 
+    def _model_supports_vision(self) -> bool:
+        """Whether the model currently loaded can accept images."""
+        try:
+            cap = get_model_capability(self.current_model_id, self.current_provider)
+            return bool(getattr(cap, "vision", False))
+        except Exception:
+            return False
+
     def _cmd_mcp(self, arg: str = "") -> None:
         parts = (arg or "").split()
         if self.mcp_client is None:
@@ -1962,8 +1973,18 @@ class CMDAICodeTUI(App):
             self._feedback(f"[b #58a6ff]/mcp restart {parts[1]}:[/] {'connected' if ok else 'failed'}")
             return
         if len(parts) >= 2 and parts[0] == "logs":
-            srv = self.mcp_client.servers.get(parts[1])
-            logs = (srv.stderr_log[-20:] if srv else ["unknown server"])
+            # The registry key is sanitized, so a server configured as
+            # "my-server" is stored as "my_server". Looking up the raw
+            # argument meant `/mcp logs my-server` always reported
+            # "unknown server".
+            key = sanitize_name(parts[1])
+            srv = self.mcp_client.servers.get(key)
+            if srv is None:
+                known = ", ".join(self.mcp_client.server_names()) or "(none)"
+                self._feedback(f"[b #58a6ff]/mcp logs:[/] [warn]no server named "
+                               f"'{parts[1]}'[/]. Known: {known}")
+                return
+            logs = srv.stderr_log[-20:] or ["(stderr is empty)"]
             self._feedback("[b #58a6ff]/mcp logs:[/]\n" + "\n".join(logs))
             return
         lines = self.mcp_client.status_lines() or ["[dim]No MCP servers configured (mcp_config.json).[/dim]"]
