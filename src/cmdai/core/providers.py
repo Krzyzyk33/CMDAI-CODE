@@ -439,34 +439,12 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
         return []
 
     if provider_id == "local_gguf":
-        from .settings import get_settings
-        models_dir = get_settings().config.get("models_dir", "models")
-        candidates = [
-            models_dir,
-            os.path.join(os.getcwd(), models_dir),
-            "D:/CMDAI CODE/models",
-            "D:\\CMDAI CODE\\models",
-            "E:/CMDAI CODE/models",
-            "E:\\CMDAI CODE\\models",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models"),
-        ]
-        found_dir = None
-        for cand in candidates:
-            if cand and os.path.exists(cand) and os.path.isdir(cand):
-                try:
-                    if any(f.endswith(".gguf") for f in os.listdir(cand)):
-                        found_dir = cand
-                        break
-                except Exception:
-                    pass
-        if not found_dir:
-            for cand in candidates:
-                if cand and os.path.exists(cand) and os.path.isdir(cand):
-                    found_dir = cand
-                    break
-        if not found_dir:
+        from .model_paths import list_gguf_files, resolve_models_dir
+        # Was six candidates, four of them hardcoded D:/E: paths under a
+        # "CMDAI CODE" name that no longer exists.
+        models_dir = resolve_models_dir("")
+        if not os.path.isdir(models_dir):
             return []
-        models_dir = found_dir
 
         found = []
         for f in sorted(os.listdir(models_dir)):

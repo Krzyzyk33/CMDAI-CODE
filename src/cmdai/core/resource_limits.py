@@ -82,24 +82,17 @@ def _gguf_field_int(field) -> Optional[int]:
         return None
 
 
-def find_local_model_file(model_id: str, models_dir: str = "models", workdir: str = "") -> str:
-    base = os.path.basename(model_id)
-    candidates = [
-        os.path.join(models_dir, model_id) if models_dir else "",
-        os.path.join(models_dir, base) if models_dir else "",
-        os.path.join(workdir, "models", model_id) if workdir else "",
-        os.path.join(workdir, "models", base) if workdir else "",
-        os.path.join("D:/CMDAI CODE/models", model_id),
-        os.path.join("D:/CMDAI CODE/models", base),
-        os.path.join("E:/CMDAI CODE/models", model_id),
-        os.path.join("E:/CMDAI CODE/models", base),
-        model_id,
-        os.path.abspath(model_id),
-    ]
-    for c in candidates:
-        if c and os.path.exists(c) and os.path.isfile(c):
-            return os.path.abspath(c)
-    return ""
+def find_local_model_file(model_id: str, models_dir: str = "", workdir: str = "") -> str:
+    """Find a model file. Delegates to core.model_paths.
+
+    This used to carry its own candidate list, including four hardcoded
+    D:/E:/C: paths under a "CMDAI CODE" name with a space in it. Those
+    stopped matching when the checkout moved to E:\\CMDAI-CODE and the
+    guessing had been dead weight since, hidden behind a candidate that
+    happened to work.
+    """
+    from .model_paths import resolve_model_file
+    return resolve_model_file(model_id, models_dir=models_dir, workdir=workdir)
 
 
 def read_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
@@ -204,7 +197,7 @@ def get_dynamic_context_limit(
     provider_id: str = "openrouter",
     model_path: Optional[str] = None,
     api_key: str = "",
-    models_dir: str = "models",
+    models_dir: str = "",
     workdir: str = "",
 ) -> int:
     if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)):

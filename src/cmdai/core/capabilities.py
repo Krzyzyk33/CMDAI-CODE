@@ -256,17 +256,10 @@ def get_model_capability(
     if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)) or model_id.endswith(".gguf"):
         actual_path = model_path
         if not actual_path or not os.path.exists(actual_path):
-            for candidate in [
-                os.path.join("models", model_id),
-                os.path.join(os.getcwd(), "models", model_id),
-                os.path.join(r"D:\CMDAI CODE\models", os.path.basename(model_id)),
-                os.path.join(r"E:\CMDAI CODE\models", os.path.basename(model_id)),
-                os.path.join(r"D:\Swift\models", os.path.basename(model_id)),
-                model_id,
-            ]:
-                if os.path.exists(candidate):
-                    actual_path = candidate
-                    break
+            # Was a six-entry candidate list including D:\\, E:\\ and
+            # D:\\Swift\\models - the last belonging to an unrelated project.
+            from .model_paths import resolve_model_file
+            actual_path = resolve_model_file(model_id) or actual_path
 
         if actual_path and os.path.exists(actual_path):
             cap = inspect_gguf_metadata(actual_path)

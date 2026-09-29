@@ -216,7 +216,11 @@ def handle_add_local_model():
         return 0
 
     model_filename = os.path.basename(selected_file)
-    models_dir = os.path.join(APP_ROOT, "models")
+    from cmdai.core.model_paths import resolve_models_dir
+    # Was hardcoded to APP_ROOT/models, ignoring both CMDAI_MODELS_DIR and
+    # config["models_dir"] - so a user who configured a different directory
+    # had `cmdai addlocal` drop the model somewhere the loader would not look.
+    models_dir = resolve_models_dir("")
     os.makedirs(models_dir, exist_ok=True)
     dest_path = os.path.join(models_dir, model_filename)
 
