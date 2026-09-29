@@ -12,11 +12,17 @@ def render_tool_header(
     is_running: bool = False,
     spinner_frame: str = "",
     is_error: bool = False,
+    display_name: str = "",
 ) -> Text:
     text = Text()
 
     tl = tool_name.lower()
-    if tl in ("scratch", "todo", "tasks"):
+    if display_name:
+        # Subagents render as their own role instead of the literal tool name,
+        # so the chat line reads "<glyph> <role> <tool> <arg>".
+        t_name = str(display_name).strip() or tool_name.capitalize()
+        summary = target_summary
+    elif tl in ("scratch", "todo", "tasks"):
         t_name = "Todo"
         summary = ""
     elif tl in ("bugs", "tool_bugs", "debug", "scan_bugs") or "syntax error" in str(target_summary).lower() or "scanning project" in str(target_summary).lower():
@@ -25,6 +31,9 @@ def render_tool_header(
     elif tl in ("summarizing", "summarize", "compact", "context_compact"):
         t_name = "Summarizing"
         summary = target_summary or ""
+    elif tl in ("agent_note", "note"):
+        t_name = "Agent note"
+        summary = target_summary
     elif tl == "ask":
         t_name = "Ask"
         if target_summary and "question" in target_summary.lower():

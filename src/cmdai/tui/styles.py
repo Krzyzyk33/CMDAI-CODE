@@ -741,6 +741,41 @@ Input .input--cursor {
     color: #e6edf3;
 }
 
+/* Update: steps run in the window, esc only closes it. */
+#modal-dialog.update-dialog {
+    width: 76;
+    height: auto;
+    max-height: 80%;
+}
+
+#modal-dialog.update-dialog #update-step {
+    width: 100%;
+    height: 1;
+    color: #d29922;
+    margin: 1 0 0 0;
+}
+
+#update-log {
+    width: 100%;
+    height: auto;
+    max-height: 10;
+    overflow-y: auto;
+    background: #0d1117;
+    border: none;
+    border-top: solid #21262d;
+    padding: 1 0 0 0;
+    margin: 1 0 0 0;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
+#update-log-body {
+    width: 100%;
+    height: auto;
+    color: #e6edf3;
+}
+
 /* Agent tools: flat list like /help, click opens a stacked window. */
 #modal-dialog.tools-dialog {
     width: 76;

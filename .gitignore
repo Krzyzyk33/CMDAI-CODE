@@ -24,6 +24,16 @@ models/
 logs/
 *.log
 
+# `config.json` jest NASTĘPNIE w `git ls-files`, mimo wpisu powyżej -
+# `.gitignore` działa TYLKO dla plików nieśledzonych. Dopóki plik jest
+# w indeksie, wpisanie klucza API i `git add .` wyśle go do publicznego
+# repo. Jednorazowo wywal go z indeksu:
+#
+#     git rm --cached config.json
+#
+# Szablon struktury jest w config.example.json (w repo). Dziś klucze są
+# puste - sprawdzone także w historii gita.
+
 test_*.svg
 sim_*.log
 scratch/
@@ -37,6 +47,10 @@ node_modules/
 zrzuty/
 zrzuty2/
 
-# edytor trzymany poza repo
-editor/
+# edytor jest CZĘŚCIĄ repo - osobną aplikacją, ale w tym samym drzewie.
+# Śmieci edytora łapie `editor/.gitignore` (celowo zdublowane, żeby
+# edytor działał nawet po wyjściu z tego katalogu).
+#
+# Historia: wpis `editor/` był tu do 2026-09-28 i trzymał 104 pliki
+# poza gitem. Wyprostowane.
 /

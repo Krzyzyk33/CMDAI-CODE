@@ -17,4 +17,9 @@ tree-sitter-rust>=0.23.0
 tree-sitter-go>=0.23.0
 tree-sitter-markdown>=0.4.0
 tree-sitter-bash>=0.23.0
-
+ruff>=0.16
+# Uzywany przez `editor/icons/build_font.py` do generowania fontu ikon.
+# Wczesniej byl importowany w kodzie, ale nieobecny na liscie -
+# instalacja `pip install -r requirements.txt` dzialala tylko
+# przypadkiem, na maszynie z fontami.
+fonttools>=4.60

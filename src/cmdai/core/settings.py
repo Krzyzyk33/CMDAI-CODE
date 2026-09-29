@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "port": 8080,
         "host": "127.0.0.1",
+    },
+    "updates": {
+        # `auto_update` is a git pull the user did not ask for, so it stays off
+        # until they turn it on. `check_on_start` only reports; it never pulls.
+        "auto_update": False,
+        "check_on_start": True,
+        "interval_hours": 24,
+        "last_check": 0,
     },
     "settings": {
         "confirm_exit": False,
@@ -62,12 +71,17 @@ class SettingsManager:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    merged = dict(DEFAULT_CONFIG)
-                    merged.update(data)
-                    return merged
+                # Deep copy, not dict(): the defaults hold nested blocks
+                # (server, generation, updates), and a shallow copy would hand
+                # every SettingsManager the same dict objects. Saving one
+                # setting would then leak into DEFAULT_CONFIG and into every
+                # other manager built later in the process.
+                merged = copy.deepcopy(DEFAULT_CONFIG)
+                merged.update(data)
+                return merged
             except Exception:
                 pass
-        return dict(DEFAULT_CONFIG)
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     def _load_cmdai_settings(self) -> None:
         if os.path.exists(self.cmdai_settings_path):

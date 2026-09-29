@@ -7,7 +7,7 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from ...core.releases import get_releases
+from ...core.releases import get_release_list, get_releases, offline_notice_text
 
 
 class ReleaseNoteModal(ModalScreen[None]):
@@ -27,7 +27,11 @@ class ReleaseNoteModal(ModalScreen[None]):
         name = self.release.get("name", "")
         date = self.release.get("published_at", "")
         pre = " [pre-release]" if self.release.get("prerelease") else ""
-        body = (self.release.get("body") or "_No description._").strip()
+        body = (self.release.get("body") or "").strip()
+        if not body:
+            # The entry is listed but its notes were never fetched, so there is
+            # nothing to render. Say why instead of showing a blank page.
+            body = offline_notice_text(str(tag))
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static(f"[bold white]{tag}[/]", id="modal-title")
@@ -57,6 +61,7 @@ class ReleasesModal(ModalScreen[None]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.releases: List[Dict[str, Any]] = []
+        self.offline = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog", classes="releases-dialog"):
@@ -69,9 +74,14 @@ class ReleasesModal(ModalScreen[None]):
                 yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
-        self.releases, _src = get_releases(refresh=True)
-        if not self.releases:
-            self.releases, _src = get_releases(refresh=False)
+        rels, source = get_releases(refresh=True)
+        if not rels:
+            # No network. The list still opens: the bundled release is on disk
+            # in the source, and showing one usable entry beats showing an error.
+            rels, source = get_releases(refresh=False)
+        self.offline = source in ("none", "cache") and not rels
+        self.releases = get_release_list(rels)
+
         ol = self.query_one("#modal-list", OptionList)
         ol.clear_options()
         if not self.releases:
@@ -79,11 +89,15 @@ class ReleasesModal(ModalScreen[None]):
             return
         for r in self.releases:
             pre = " [pre-release]" if r.get("prerelease") else ""
+            mark = "" if r.get("has_notes") else " [dim](notes offline)[/dim]"
             ol.add_option(Option(
-                f"  [b #58a6ff]{r['tag']}[/]  [dim]{r.get('published_at', '')}{pre}[/]  {r.get('name', '')[:50]}"
+                f"  [b #58a6ff]{r['tag']}[/]  [dim]{r.get('published_at', '')}{pre}[/]  {r.get('name', '')[:50]}{mark}"
             ))
         ol.highlighted = 0
         ol.focus()
+        if self.offline:
+            self.query_one("#modal-footer-right", Static).update(
+                "[dim]no internet - only the bundled release is shown[/dim]")
 
     def action_cursor_up(self) -> None:
         self.query_one("#modal-list", OptionList).action_cursor_up()
@@ -106,47 +120,60 @@ class ReleasesModal(ModalScreen[None]):
 
 
 class UpdateNoticeModal(ModalScreen[None]):
-    """Simplest centered header shown once after update. Content always comes
-    from the newest GitHub release (>= v3.0-alpha). No search, no selection."""
+    """Post-update notice: what the newest release changed.
+
+    Shown once, on the first launch after the version moved. The release is
+    handed in already resolved rather than fetched here - this screen is built
+    while the app is still coming up, and a network call on that path stalls
+    startup for the length of the timeout and shows nothing at all when the
+    machine is offline, which is common right after an update.
+    """
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("enter", "close", "Close", show=False),
     ]
 
-    def __init__(self, version: str = "", notes: str = "", **kwargs):
+    def __init__(self, version: str = "", release: Optional[Dict[str, Any]] = None, **kwargs):
         super().__init__(**kwargs)
         self.version = version
-        self.notes = notes
+        self.release = dict(release or {})
 
     def compose(self) -> ComposeResult:
+        # The headline is the version actually installed, not the version the
+        # bundled notes describe. Those can differ whenever the checkout is
+        # ahead of the last regenerated release, and a notice that claimed the
+        # wrong version was the worse of the two.
+        notes_tag = str(self.release.get("tag") or "")
+        headline = self.version or notes_tag
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
-                yield Static("Changelog", id="modal-title")
+                yield Static(f"[bold white]Updated to {headline}[/]", id="modal-title")
                 yield Static("[dim]esc[/]", id="modal-esc")
             with VerticalScroll(id="releases-preview"):
-                yield Static("Loading latest release...", id="update-notice-body")
+                yield Static("", id="update-notice-hint")
+                yield Static("", id="update-notice-body")
 
     def on_mount(self) -> None:
+        notes_tag = str(self.release.get("tag") or "")
         try:
-            from ...core.releases import get_releases
-            rels, _src = get_releases(refresh=True)
-            if not rels:
-                rels, _src = get_releases(refresh=False)
-            if rels:
-                latest = rels[0]
-                self.version = latest.get("tag", self.version)
-                body = (latest.get("body") or "_No description._").strip()
-                self.notes = f"{latest.get('name', '')}\n\n{body}"
+            # Name the release the notes came from, but only when it is not the
+            # one in the headline - otherwise the line is just noise.
+            if notes_tag and notes_tag != self.version:
+                self.query_one("#update-notice-hint", Static).update(
+                    f"[dim]Release notes: {notes_tag}[/dim]")
         except Exception:
             pass
+
+        body_widget = self.query_one("#update-notice-body", Static)
+        body = str(self.release.get("body") or "").strip()
+        if not body:
+            body = "_No release notes were bundled with this build._"
         try:
             from rich.markdown import Markdown
-            self.query_one("#update-notice-body", Static).update(
-                Markdown(f"# Updated to {self.version}\n\n{self.notes}"))
+            body_widget.update(Markdown(body))
         except Exception:
-            self.query_one("#update-notice-body", Static).update(
-                f"Updated to {self.version}\n\n{self.notes}")
+            body_widget.update(body)
 
     def action_close(self) -> None:
         self.dismiss(None)

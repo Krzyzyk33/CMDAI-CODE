@@ -93,6 +93,13 @@ function main() {
   ensureFirstRun(root, py);
   const entry = path.join(root, "cmdai.py");
   const userArgs = process.argv.slice(2);
+
+  // --workdir goes first, ahead of the user's own words. That used to break
+  // subcommands: cmdai.py matched `update` only at position 0, so
+  // `npx cmdai-code update` fell through to argparse and tried to launch the
+  // TUI. The CLI now recognises a subcommand anywhere in the arguments, so this
+  // ordering is safe - `code` is added only when the user typed nothing, to
+  // keep the documented `cmdai code` form.
   const args = [...py.prefix, entry, "--workdir", process.cwd(), ...(userArgs.length ? userArgs : ["code"])];
   const res = spawnSync(py.cmd, args, { stdio: "inherit" });
   process.exit(res.status ?? 1);

@@ -1,0 +1,50 @@
+# Normalizacja końców linii.
+#
+# Bez tego pliku git nie normalizuje niczego, a repo mieszało oba
+# style: zmierzone w `editor/` było 113 linii CRLF i 2943 LF w tych
+# samych plikach. Na Linusie każda taka linia wygląda w `git diff` jak
+# zmieniona, a `git blame` wskazuje niewłaściwą osobę.
+
+* text=auto eol=lf
+
+# Pliki wsadowe: CRLF konwencjonalnie.
+#
+# NIE jest to naprawa wykazanej awarii. Sprawdzilem to dokladnie:
+# `cmd.exe` parsuje `if ( ... ) else ( ... )` poprawnie takze przy
+# samych LF - wycialem blok z `editor\run.bat` (plik ma LF) i wykonalem
+# go: zero bledow "not recognized", zmienna `TARGET` ustawiona
+# poprawnie. Wiec LF samo w sobie nie psuje batcha.
+#
+# Robimy to z dwóch powodow praktycznych:
+#   1. `install.bat` w korzeniu jest zapisany z CRLF, wiec caly repo
+#      ma jeden format i `git diff` nie pokazuje zmian koncow linii
+#      na calych plikach,
+#   2. batch z CRLF nie zalezy od tego, czym edytor akurat zapisal
+#      plik.
+#
+# Gdyby ktos chcial LF, wystarczy usunac te dwie linie - nic innego
+# w repo na tym nie polega.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Pliki binarne - git nie ma ich ruszać.
+# `cmdai-icons.ttf` jest GENEROWANY przez `editor/icons/build_font.py`
+# z prymitywów geometrycznych (fontTools), należy do tego projektu i nie
+# zawiera obrysów glifów skopiowanych z innego fontu.
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.png   binary
+*.jpg   binary
+*.svg   binary
+*.ico   binary
+
+# Zrzuty ekranu TUI (generator: tools/tui_screenshots.py)
+zrzuty/    text eol=lf
+zrzuty2/   text eol=lf
+
+# Markdown i teksty - LF, żeby diffy były czytelne.
+*.md       text eol=lf
+*.txt      text eol=lf
+LICENSE    text eol=lf

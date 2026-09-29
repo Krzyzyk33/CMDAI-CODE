@@ -37,6 +37,7 @@ class SettingsModal(ModalScreen[bool]):
 
     def on_mount(self) -> None:
         self.rebuild_options()
+        self.query_one("#modal-list", OptionList).focus()
 
     def rebuild_options(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
@@ -48,14 +49,20 @@ class SettingsModal(ModalScreen[bool]):
         port = self.settings.config.get("server", {}).get("port", 8080)
         active_loader = self.settings.config.get("active_loader", "cpu")
 
-        ol.add_option(Option(f"  Confirm Exit:            {'[ON]' if conf_exit else '[OFF]'}"))
-        ol.add_option(Option(f"  Auto-copy selection:     {'[ON]' if auto_copy else '[OFF]'}"))
-        ol.add_option(Option(f"  Background API Port:     {port}"))
-        ol.add_option(Option(f"  Active GGUF Loader:      {active_loader}"))
-        ol.add_option(Option("  Install Global Launcher: [Run cmdai code installer]"))
-
-        if prev is not None:
-            ol.highlighted = prev
+        # No square brackets around ON/OFF: Textual parses those as markup and
+        # silently drops them, so the value column rendered empty. The trailing
+        # space is what the brackets used to supply visually.
+        on = "[b #3fb950]ON[/] "
+        off = "[dim]OFF[/] "
+        ol.add_option(Option(f"  Confirm Exit:            {on if conf_exit else off}"))
+        ol.add_option(Option(f"  Auto-copy selection:     {on if auto_copy else off}"))
+        ol.add_option(Option(f"  Background API Port:     {on}{port}"))
+        ol.add_option(Option(f"  Active GGUF Loader:      {on}{active_loader}"))
+        ol.add_option(Option("  Install Global Launcher: [b #58a6ff]Run[/] [dim]cmdai code installer[/dim]"))
+        # OptionList ignores `enter` while `highlighted` is None, so no
+        # OptionSelected is ever posted and the row cannot be changed. Default
+        # the cursor; the window used to open dead to the keyboard.
+        ol.highlighted = prev if prev is not None else 0
 
     def action_cancel(self) -> None:
         self.dismiss(True)
@@ -124,8 +131,11 @@ class LoaderModal(ModalScreen[Optional[str]]):
     def on_mount(self) -> None:
         curr = get_settings().config.get("active_loader", "cpu").lower()
         ol = self.query_one("#modal-list", OptionList)
-        if curr in self.LOADERS:
-            ol.highlighted = self.LOADERS.index(curr)
+        # Default the cursor: OptionList drops `enter` while highlighted is
+        # None, which would make the list unusable until the user pressed an
+        # arrow key first.
+        ol.highlighted = self.LOADERS.index(curr) if curr in self.LOADERS else 0
+        ol.focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
