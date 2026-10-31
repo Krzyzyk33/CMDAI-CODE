@@ -43,22 +43,11 @@ class ModelWorker:
         self._listener_thread = None
 
     def find_model_path(self, model_filename: str) -> Optional[str]:
-        base_name = os.path.basename(model_filename)
-        pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-        candidates = [
-            os.path.join("models", model_filename),
-            os.path.join("models", base_name),
-            os.path.abspath(model_filename),
-            os.path.join(r"D:\CMDAI CODE\models", base_name),
-            os.path.join(r"E:\CMDAI CODE\models", base_name),
-            os.path.join(r"C:\CMDAI CODE\models", base_name),
-            os.path.join(pkg_root, "models", base_name),
-            os.path.join(os.path.expanduser("~"), ".cmdai", "models", base_name),
-        ]
-        for c in candidates:
-            if c and os.path.exists(c):
-                return c
-        return None
+        from .model_paths import resolve_model_file
+        # Was eight candidates including D:\\, E:\\ and C:\\ paths under a
+        # "CMDAI CODE" name that no longer exists. The worker used to be
+        # able to find a model the rest of the app could not.
+        return resolve_model_file(model_filename) or None
 
     def load(self, model_filename: str, loader_type: str = "cpu", n_ctx: int = 2048) -> Dict[str, Any]:
         if not Llama:
@@ -254,12 +243,19 @@ class ModelWorker:
                     raise first_err
 
             elapsed = time.time() - t0
+            p_tok = total_toks
+            c_tok = _count_tokens("".join(full_text) + "".join(full_thinking))
             sys.stdout.write(json.dumps({
                 "type": "done",
                 "response": "".join(full_text),
                 "thinking": "".join(full_thinking),
                 "elapsed": elapsed,
                 "aborted": self.abort_requested,
+                "usage": {
+                    "prompt_tokens": p_tok,
+                    "completion_tokens": c_tok,
+                    "total_tokens": p_tok + c_tok,
+                },
             }) + "\n")
             sys.stdout.flush()
 

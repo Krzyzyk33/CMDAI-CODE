@@ -1,4 +1,26 @@
-import threading
+"""`/models`: one row per provider, then a screen of that provider's models.
+
+This used to be an accordion. Every provider was a row, and expanding one pushed
+its models into the same flat list underneath, which meant the arrows and the
+up/down keys moved through two different kinds of thing and the search box mixed
+providers with models in one result set. A provider and its models are two
+questions, so they are two screens now.
+
+Two decisions worth stating, because both undo something that looked deliberate:
+
+* **No fabricated model lists.** Twenty-eight providers ship a hardcoded
+  `default_models` list that used to be shown whenever a fetch failed, so the
+  card looked like a catalogue and was not one. A card now carries a *state* -
+  key required, no answer, loading, and how old the answer is - and never a list
+  that nobody asked a server for.
+* **A state is not a model.** `anthropic` has `supports_remote_fetch=False`, so
+  its card used to be permanently empty. models.dev lists its models, so the
+  card has a real list marked as coming from the catalogue rather than from an
+  account.
+"""
+
+import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from rich.text import Text
@@ -10,53 +32,101 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ...core.providers import PROVIDERS_CATALOG, fetch_remote_models
+from ...core import model_catalog as MC
+from ...core.providers import PROVIDERS_CATALOG, fetch_remote_models, has_reasoning
 from ...core.settings import get_settings
 from .add_model import AddModelModal
 from .api_key import ApiKeyModal
 
+# Providers that run on this machine and need no key.
+LOCAL_PROVIDERS = ("local_gguf", "ollama", "lmstudio", "vllm")
 
-class ModalSearchInput(Input):
+# A card that can be opened without a key.
+KEYLESS = ("openrouter",) + LOCAL_PROVIDERS
+
+# Pinned to the top of the list and kept blue. It is the one provider that
+# works with nothing configured and nothing purchased, and it was sorting
+# between LM Studio and Ollama by name in the same dim grey as the ones that
+# need a key and cannot answer.
+TOP_PROVIDER = "local_gguf"
+
+# The same pair as the thinking block and the input-bar marker. Ambiguous width,
+# so the glyph is always followed by a space in its own style run - that is what
+# keeps the spare cell from being overdrawn by the provider name beside it.
+SPINNER_FRAMES = ["⌬", "✻"]
+SPINNER_INTERVAL = 0.18
+
+
+def _age_text(when: float) -> str:
+    """How old an answer is, in words a person would use."""
+    if not when:
+        return "never"
+    seconds = max(0, int(time.time() - when))
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)} min ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} d ago"
+
+
+def _unusable_note(model: Dict[str, Any]) -> str:
+    """The reason a model is marked unusable, if it is.
+
+    Pulled out of the badge string rather than read from a field, because the
+    badge is the only thing a plugin sets and its shape is not ours to fix.
+    The prose after the marker is kept for `/modelinfo` and dropped here: one
+    word is enough to stop a selection, a sentence is enough to make the list
+    unreadable.
+    """
+    badge = str(model.get("badge") or "")
+    for part in badge.split(" · "):
+        if part.upper().startswith("UNUSABLE"):
+            return part
+    return ""
+
+
+class ModelSearchInput(Input):
+    """The search box, which hands the navigation keys back to the list.
+
+    Written against `getattr` rather than `isinstance` so the same widget works
+    in both screens. It used to check for one modal class by name, which meant
+    the box silently stopped working the moment a second screen existed.
+    """
 
     def on_key(self, event: events.Key) -> None:
-        modal = self.screen
-        if not isinstance(modal, ModelSelectModal):
+        screen = self.screen
+        if not hasattr(screen, "action_cursor_down"):
             return
 
         if event.key == "down":
             event.prevent_default()
             event.stop()
-            modal.action_cursor_down()
+            screen.action_cursor_down()
         elif event.key == "up":
             event.prevent_default()
             event.stop()
-            modal.action_cursor_up()
-        elif event.key == "right":
-            event.prevent_default()
-            event.stop()
-            modal.action_expand_node()
-        elif event.key == "left":
-            event.prevent_default()
-            event.stop()
-            modal.action_collapse_node()
+            screen.action_cursor_up()
         elif event.key == "enter":
             event.prevent_default()
             event.stop()
-            modal.action_select_or_toggle()
+            action = getattr(screen, "action_activate", None)
+            if action:
+                action()
 
+
+# --------------------------------------------------------------------------
+# screen 1: providers
+# --------------------------------------------------------------------------
 
 class ModelSelectModal(ModalScreen[Tuple[str, str]]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "select_or_toggle", "Select/Toggle"),
-        Binding("right", "expand_node", "Expand"),
-        Binding("left", "collapse_node", "Collapse"),
-        Binding("up", "cursor_up", "Up"),
-        Binding("down", "cursor_down", "Down"),
+        Binding("enter", "open_provider", "Open"),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
         Binding("ctrl+d", "configure_key", "Set API Key"),
-        Binding("ctrl+a", "add_custom_model_shortcut", "Add Model"),
-        Binding("slash", "focus_search", "Search"),
+        Binding("ctrl+r", "refresh_all", "Refresh"),
     ]
 
     def __init__(self, current_provider: str = "", current_model: str = "", **kwargs):
@@ -65,333 +135,535 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
         self.current_model = current_model
         self.settings = get_settings()
 
-        self.expanded_providers: set = set()
         self.provider_models: Dict[str, List[Dict[str, Any]]] = {}
         self.fetching_providers: set = set()
-        self.filtered_items: List[Tuple[str, str, Dict[str, Any]]] = []
+        self.failed_providers: set = set()
+        # When each provider's list last came back, for the "3 h ago" stamp.
+        self.fetched_at: Dict[str, float] = {}
+        self.filtered_items: List[str] = []
+        self._spinner_idx = 0
+        self._spinner_timer = None
+
+    # ------------------------------------------------------------- layout
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
-                yield Static("Models — Providers Tree", id="modal-title")
+                yield Static("Models", id="modal-title")
                 yield Static("[dim]esc[/]", id="modal-esc")
-
-            yield ModalSearchInput(placeholder="Type to filter models... [Press / to search]", id="modal-search")
 
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[↑/↓: Move]  [→/←: Expand/Collapse]  [enter: Select/Add]  [ctrl+d: Key]")
+                yield Static("[enter: Open]  [ctrl+d: Key]  [ctrl+r: Refresh]")
+                yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
-        self.rebuild_tree()
-        ol = self.query_one("#modal-list", OptionList)
-        ol.focus()
-        self.refresh_all_models()
+        self.rebuild()
+        self.query_one("#modal-list", OptionList).focus()
+        self.refresh_all()
+        # A spinner rather than a word, for the same reason the input bar has
+        # one: 33 providers loading at once with the word "loading" on each of
+        # them is a wall of text that says less than one moving dot per card.
+        self._spinner_timer = self.set_interval(SPINNER_INTERVAL, self._tick_spinner)
 
-    def refresh_all_models(self) -> None:
+    def _tick_spinner(self) -> None:
+        if not self.fetching_providers:
+            return
+        self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
+        self.rebuild()
+
+    def _spinner_for(self, pid: str) -> str:
+        return SPINNER_FRAMES[self._spinner_idx]
+
+    # ---------------------------------------------------------- fetching
+
+    def refresh_all(self) -> None:
         for pid in PROVIDERS_CATALOG:
             key = self.settings.get_api_key(pid)
-            if key or pid in ("openrouter", "local_gguf", "ollama", "lmstudio", "vllm"):
+            if key or pid in KEYLESS:
                 self.fetch_provider_models(pid, key)
+
+    def _fetch_one(self, pid: str) -> None:
+        """Fetch exactly one provider. `ctrl+r` on a row means this provider."""
+        self.fetch_provider_models(pid, self.settings.get_api_key(pid))
 
     @work(thread=True)
     def fetch_provider_models(self, pid: str, api_key: str) -> None:
         self.fetching_providers.add(pid)
-        self.app.call_from_thread(self.rebuild_tree)
+        self.failed_providers.discard(pid)
+        self.app.call_from_thread(self.rebuild)
+
         models = fetch_remote_models(pid, api_key)
-        if not models and pid in PROVIDERS_CATALOG:
-            pinfo = PROVIDERS_CATALOG[pid]
-            if pinfo.default_models:
-                models = [
-                    {
-                        "id": m,
-                        "name": m,
-                        "badge": "free" if "free" in m.lower() else "",
-                        "thinking": any(k in m.lower() for k in ("r1", "o1", "o3", "claude-3-7", "thinking")),
-                    }
-                    for m in pinfo.default_models
-                ]
+
         custom_list = self.settings.get_custom_models(pid)
+        known = {str(m.get("id")) for m in models}
         for cm in custom_list:
-            if not any(m.get("id") == cm for m in models):
+            if cm not in known:
                 models.append({
                     "id": cm,
                     "name": cm,
                     "badge": "custom",
-                    "thinking": any(k in cm.lower() for k in ("r1", "o1", "o3", "claude-3-7", "thinking")),
+                    "thinking": has_reasoning(pid, cm) or False,
                 })
-        self.provider_models[pid] = models
-        self.fetching_providers.discard(pid)
-        self.app.call_from_thread(self.rebuild_tree)
 
-    def rebuild_tree(self) -> None:
-        search_term = ""
+        self.provider_models[pid] = models
+        self.fetched_at[pid] = time.time()
+        if not models:
+            self.failed_providers.add(pid)
+        self.fetching_providers.discard(pid)
+        self.app.call_from_thread(self.rebuild)
+
+    def refresh_catalog(self) -> None:
+        """Pull models.dev again. Separate from the provider list on purpose.
+
+        The provider says what this account can reach; the catalogue says what
+        each model can do. Refreshing one has no reason to wait on the other.
+        """
+        self.fetch_catalog_from_thread()
+
+    @work(thread=True)
+    def fetch_catalog_from_thread(self) -> None:
         try:
-            inp = self.query_one("#modal-search", ModalSearchInput)
-            search_term = inp.value.strip().lower()
+            MC.refresh()
         except Exception:
             pass
+        self.app.call_from_thread(self.rebuild)
 
+    # ------------------------------------------------------------ drawing
+
+    def _state_text(self, pid: str) -> Tuple[str, str]:
+        """What the card says: plain text and a style, never markup.
+
+        Returning a markup string was the bug that put
+        `[dim #8b949e]key required[/]` on the screen as literal text. These
+        cells are built with `rich.text.Text`, which does not parse markup -
+        it appends it. So the state is text plus a style and the styling is
+        applied by whoever appends it.
+        """
+        if pid in self.fetching_providers:
+            return ("loading", "dim #58a6ff")
+
+        count = len(self.provider_models.get(pid, []))
+        key = self.settings.get_api_key(pid)
+        from_catalog = count > 0 and all(
+            m.get("from_catalog") for m in self.provider_models.get(pid, [])
+        )
+
+        if count:
+            parts = [f"{count} models"]
+            if from_catalog:
+                parts.append("catalog")
+            elif pid in LOCAL_PROVIDERS:
+                parts.append("local")
+            elif key:
+                parts.append("key set")
+            when = self.fetched_at.get(pid)
+            if when and (time.time() - when) > 300:
+                parts.append(_age_text(when))
+            return ("  ".join(parts), "#7ee787")
+
+        if pid == "huggingface":
+            # It hosts weights, it does not serve them. Asking it for a model
+            # list would return the catalogue of the hub, which is not what this
+            # screen is choosing from.
+            return ("add a model - no list to fetch", "dim #8b949e")
+        if not key and pid not in KEYLESS:
+            return ("key required", "dim #8b949e")
+        if pid in self.failed_providers:
+            return ("no answer", "#f0883e")
+        return ("nothing yet", "dim #8b949e")
+
+    def rebuild(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
-        prev_idx = ol.highlighted
-
+        prev = ol.highlighted
         ol.clear_options()
         self.filtered_items.clear()
 
-        catalog_items = sorted(PROVIDERS_CATALOG.items(), key=lambda x: 0 if x[0] == "local_gguf" else 1)
-        for pid, pinfo in catalog_items:
-            models = list(self.provider_models.get(pid, []))
-            if not models and pinfo.default_models:
-                models = [
-                    {
-                        "id": m,
-                        "name": m,
-                        "badge": "free" if "free" in m.lower() else "",
-                        "thinking": any(k in m.lower() for k in ("r1", "o1", "o3", "claude-3-7", "thinking")),
-                    }
-                    for m in pinfo.default_models
-                ]
-            custom_list = self.settings.get_custom_models(pid)
-            for cm in custom_list:
-                if not any(m.get("id") == cm for m in models):
-                    models.append({
-                        "id": cm,
-                        "name": cm,
-                        "badge": "custom",
-                        "thinking": any(k in cm.lower() for k in ("r1", "o1", "o3", "claude-3-7", "thinking")),
-                    })
-            api_key = self.settings.get_api_key(pid)
-            is_fetching = pid in self.fetching_providers
+        for pid, pinfo in self._ordered_providers():
+            is_active = pid == self.current_provider
+            loading = pid in self.fetching_providers
 
-            provider_matches = search_term in pinfo.name.lower() or search_term in pid.lower()
-            matching_models = [
-                m for m in models
-                if search_term in str(m.get("id", "")).lower() or search_term in str(m.get("name", "")).lower()
-            ] if search_term else models
-
-            if search_term and not (provider_matches or matching_models):
-                continue
-
-            is_expanded = (pid in self.expanded_providers) or (bool(search_term) and bool(matching_models))
-
-            arrow = "▾" if is_expanded else "▸"
-            header_text = Text()
-            header_text.append(f"{arrow} ", style="bold #58a6ff")
-            header_text.append(f"{pinfo.name} ", style="bold white")
-
-            if is_fetching:
-                header_text.append("[⟳ fetching models...]", style="dim #58a6ff")
-            elif api_key:
-                header_text.append(f"[{len(models)} models · Key set]", style="#7ee787")
-            elif pid in ("local_gguf", "ollama", "lmstudio", "vllm"):
-                header_text.append(f"[{len(models)} models · Local]", style="#58a6ff")
-            elif pid == "openrouter":
-                header_text.append(f"[{len(models)} models · Free models available]", style="#58a6ff")
+            text = Text()
+            if loading:
+                text.append(self._spinner_for(pid) + " ", style="#58a6ff")
+            # The one provider that works with nothing configured stays blue and
+            # stays on top. It was sorting between LM Studio and Ollama by name,
+            # in the same grey as the ones that need a key and cannot answer.
+            if pid == TOP_PROVIDER:
+                text.append(f"{pinfo.name}", style="bold #58a6ff")
             else:
-                header_text.append("[Key required · Ctrl+D to add]", style="dim #8b949e")
+                text.append(f"{pinfo.name} ", style="bold white")
 
-            ol.add_option(Option(header_text, id=f"prov_{pid}"))
-            self.filtered_items.append(("provider", pid, {"name": pinfo.name}))
+            if not loading:
+                state, state_style = self._state_text(pid)
+                text.append("  ")
+                text.append(state, style=state_style)
+            if is_active:
+                text.append(" *", style="bold #58a6ff")
 
-            if is_expanded:
-                models_to_show = matching_models if search_term else models
-                if models_to_show:
-                    def _is_free_model(item: Dict[str, Any]) -> bool:
-                        i_id = str(item.get("id") or "").lower()
-                        i_name = str(item.get("name") or "").lower()
-                        i_badge = str(item.get("badge") or "").lower()
-                        return "free" in i_id or ":free" in i_id or "free" in i_name or "free" in i_badge
+            ol.add_option(Option(text, id=f"prov_{pid}"))
+            self.filtered_items.append(pid)
 
-                    models_to_show = sorted(
-                        models_to_show,
-                        key=lambda x: (0 if _is_free_model(x) else 1, str(x.get("id") or x.get("name") or "").lower())
-                    )
-                if not models_to_show:
-                    if pid == "local_gguf":
-                        empty_text = Text("    [No .gguf models found in models/ folder. Press Enter to refresh]", style="dim #8b949e")
-                        ol.add_option(Option(empty_text, id=f"empty_{pid}"))
-                        self.filtered_items.append(("hint", pid, {"is_local": True}))
-                    elif not api_key and pid not in ("ollama", "lmstudio", "vllm", "openrouter"):
-                        empty_text = Text("    [No API Key configured. Press Ctrl+D to add key]", style="dim #8b949e")
-                        ol.add_option(Option(empty_text, id=f"empty_{pid}"))
-                        self.filtered_items.append(("hint", pid, {}))
-                    elif pid == "ollama":
-                        empty_text = Text("    [No local Ollama models detected. Run 'ollama pull <name>' or add below]", style="dim #8b949e")
-                        ol.add_option(Option(empty_text, id=f"empty_ollama_{pid}"))
-                        self.filtered_items.append(("hint", pid, {"is_local": True}))
-                    elif is_fetching:
-                        empty_text = Text("    [Fetching live model catalog...]", style="dim #58a6ff")
-                        ol.add_option(Option(empty_text, id=f"fetching_{pid}"))
-                        self.filtered_items.append(("hint", pid, {"is_local": True}))
-                    else:
-                        empty_text = Text("    [No models currently available. Add model below]", style="dim #8b949e")
-                        ol.add_option(Option(empty_text, id=f"none_{pid}"))
-                        self.filtered_items.append(("hint", pid, {"is_local": pid in ("ollama", "lmstudio", "vllm")}))
-                else:
-                    for m in models_to_show:
-                        mid = str(m.get("id") or m.get("name") or "")
-                        is_active = (pid == self.current_provider and mid == self.current_model)
-                        is_free = _is_free_model(m)
-                        m_text = Text()
-                        m_text.append("    ")
-                        if is_active:
-                            m_text.append("● ", style="bold #58a6ff")
-                            m_text.append(f"{mid} ", style="bold #58a6ff")
-                        else:
-                            m_text.append("  ", style="#8b949e")
-                            m_text.append(f"{mid} ", style="white")
-
-                        if is_free:
-                            m_text.append("[FREE] ", style="bold #7ee787")
-
-                        badge = m.get("badge")
-                        if badge:
-                            cleaned_badge = " · ".join(part for part in badge.split(" · ") if part.upper() != "FREE")
-                            if cleaned_badge:
-                                m_text.append(f"[{cleaned_badge}]", style="dim #8b949e")
-
-                        ol.add_option(Option(m_text, id=f"mod_{pid}_{mid}"))
-                        self.filtered_items.append(("model", pid, m))
-
-                if pid != "local_gguf":
-                    add_text = Text("    + Add model...", style="bold #58a6ff")
-                    ol.add_option(Option(add_text, id=f"add_mod_{pid}"))
-                    self.filtered_items.append(("add_model", pid, {}))
-
-        if prev_idx is not None and prev_idx < len(self.filtered_items):
-            ol.highlighted = prev_idx
+        if prev is not None and prev < len(self.filtered_items):
+            ol.highlighted = prev
         elif self.filtered_items and ol.highlighted is None:
             ol.highlighted = 0
 
-    @on(Input.Changed, "#modal-search")
-    def on_search_changed(self, event: Input.Changed) -> None:
-        self.rebuild_tree()
+    def _ordered_providers(self):
+        """Local GGUF first, everything else alphabetically by name.
 
-    def action_focus_search(self) -> None:
-        self.query_one("#modal-search", ModalSearchInput).focus()
+        By name and not by whether a key is set: a list that reorders itself as
+        keys are added is a list you cannot learn to navigate.
+        """
+        pinned = [(TOP_PROVIDER, PROVIDERS_CATALOG[TOP_PROVIDER])]
+        rest = sorted(
+            ((pid, info) for pid, info in PROVIDERS_CATALOG.items() if pid != TOP_PROVIDER),
+            key=lambda kv: kv[1].name.lower(),
+        )
+        return pinned + rest
+
+    # ----------------------------------------------------------- actions
+
+    def _current(self) -> str:
+        ol = self.query_one("#modal-list", OptionList)
+        if ol.highlighted is None or ol.highlighted >= len(self.filtered_items):
+            return ""
+        return self.filtered_items[ol.highlighted]
 
     def action_cursor_up(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        ol.action_cursor_up()
+        self.query_one("#modal-list", OptionList).action_cursor_up()
 
     def action_cursor_down(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        ol.action_cursor_down()
-
-    def action_expand_node(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        if ol.highlighted is None or ol.highlighted >= len(self.filtered_items):
-            return
-        item_type, pid, data = self.filtered_items[ol.highlighted]
-        if item_type == "provider":
-            self.expanded_providers.add(pid)
-            self.rebuild_tree()
-
-    def action_collapse_node(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        if ol.highlighted is None or ol.highlighted >= len(self.filtered_items):
-            return
-        item_type, pid, data = self.filtered_items[ol.highlighted]
-        if item_type == "provider":
-            self.expanded_providers.discard(pid)
-            self.rebuild_tree()
+        self.query_one("#modal-list", OptionList).action_cursor_down()
 
     def action_cancel(self) -> None:
         self.dismiss(("", ""))
 
-    def action_refresh_models(self) -> None:
-        self.refresh_all_models()
+    def action_open_provider(self) -> None:
+        pid = self._current()
+        if pid:
+            self.app.push_screen(ModelListModal(pid, self.current_model), self._on_models_chosen)
+
+    def _on_models_chosen(self, result: Optional[Tuple[str, str]]) -> None:
+        """The list screen either picked a model or just came back."""
+        if result and result[0] and result[1]:
+            self.dismiss(result)
+
+    def action_refresh_all(self) -> None:
+        pid = self._current()
+        if pid:
+            self._fetch_one(pid)
+        self.refresh_catalog()
 
     def action_configure_key(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        if ol.highlighted is None or ol.highlighted >= len(self.filtered_items):
+        pid = self._current()
+        if not pid:
             return
-        item_type, pid, data = self.filtered_items[ol.highlighted]
-
-        if pid in ("local_gguf", "ollama", "lmstudio", "vllm"):
-            if pid == "local_gguf":
-                self.notify("Local GGUF scans models directly from models/ folder. No API key needed.", timeout=3.0)
-            else:
-                self.notify(f"{pid.upper()} runs locally. No API key needed.", timeout=3.0)
+        if pid in LOCAL_PROVIDERS:
+            self.notify(
+                "Local providers need no key. They serve what is on this machine.",
+                timeout=3.0,
+            )
             return
 
         def on_key_saved(saved: bool) -> None:
             if saved:
-                key = self.settings.get_api_key(pid)
-                self.fetch_provider_models(pid, key)
-                self.rebuild_tree()
-                self.notify(f"API key for {pid} saved successfully!", timeout=3.0)
+                self._fetch_one(pid)
+                self.rebuild()
+                self.notify(f"API key for {PROVIDERS_CATALOG[pid].name} saved.", timeout=3.0)
 
         self.app.push_screen(ApiKeyModal(pid), on_key_saved)
 
-    def action_select_or_toggle(self) -> None:
+    @on(OptionList.OptionSelected)
+    def on_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.action_open_provider()
+
+
+# --------------------------------------------------------------------------
+# screen 2: one provider's models
+# --------------------------------------------------------------------------
+
+class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
+    """The models one provider offers, with its own search box.
+
+    Separate from the provider list rather than expanded inside it: a provider
+    can serve hundreds of models, and mixing those into the same list as the 33
+    providers meant the arrow keys walked through both and the search matched
+    across both without saying so.
+    """
+
+    BINDINGS = [
+        Binding("escape", "back", "Back"),
+        Binding("enter", "activate", "Select"),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
+        Binding("f5", "refresh", "Refresh"),
+        Binding("ctrl+d", "configure_key", "Set API Key"),
+        Binding("ctrl+a", "add_model", "Add Model"),
+    ]
+
+    def __init__(self, provider_id: str, current_model: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.provider_id = provider_id
+        self.current_model = current_model
+        self.settings = get_settings()
+        self.info = PROVIDERS_CATALOG.get(provider_id)
+        self.models: List[Dict[str, Any]] = []
+        self.fetching = False
+        self.fetched_at = 0.0
+        self.failed = False
+        self.filtered_items: List[Tuple[str, Dict[str, Any]]] = []
+        self._spinner_idx = 0
+        self._spinner_timer = None
+
+    # ------------------------------------------------------------- layout
+
+    def compose(self) -> ComposeResult:
+        name = self.info.name if self.info else self.provider_id
+        with Vertical(id="modal-dialog"):
+            with Horizontal(id="modal-header"):
+                yield Static(name, id="modal-title")
+                yield Static("[dim]esc[/]", id="modal-esc")
+
+            yield ModelSearchInput(placeholder="Search this provider's models...",
+                                   id="provider-search")
+
+            yield OptionList(id="modal-list")
+
+            with Horizontal(id="modal-footer"):
+                yield Static("[enter: Select]  [ctrl+a: Add]  [F5: Refresh]  [esc: Back]")
+                yield Static("", id="modal-footer-right")
+
+    def on_mount(self) -> None:
+        self.rebuild()
+        self.query_one("#modal-list", OptionList).focus()
+        self.fetch()
+        self._spinner_timer = self.set_interval(SPINNER_INTERVAL, self._tick_spinner)
+
+    def _tick_spinner(self) -> None:
+        if not self.fetching:
+            return
+        self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
+        self.rebuild()
+
+    # ---------------------------------------------------------- fetching
+
+    def fetch(self) -> None:
+        """Take what the parent already has, then go get it again.
+
+        The parent has usually finished by the time this screen opens, so
+        waiting would show an empty list for a second on every visit. Its result
+        is a starting point, not the answer - the fetch still runs.
+        """
+        cached = self.app.screen
+        inherited = getattr(cached, "provider_models", {}).get(self.provider_id)
+        if inherited:
+            self.models = list(inherited)
+            self.rebuild()
+        self.fetch_models_from_thread()
+
+    @work(thread=True)
+    def fetch_models_from_thread(self) -> None:
+        self.fetching = True
+        self.failed = False
+        self.app.call_from_thread(self.rebuild)
+
+        models = fetch_remote_models(self.provider_id, self.settings.get_api_key(self.provider_id))
+
+        custom_list = self.settings.get_custom_models(self.provider_id)
+        known = {str(m.get("id")) for m in models}
+        for cm in custom_list:
+            if cm not in known:
+                models.append({
+                    "id": cm,
+                    "name": cm,
+                    "badge": "custom",
+                    "thinking": has_reasoning(self.provider_id, cm) or False,
+                })
+
+        self.models = models
+        self.fetched_at = time.time()
+        self.failed = not models
+        self.fetching = False
+        self.app.call_from_thread(self.rebuild)
+
+        # Hand the result back so the card behind shows the same count.
+        parent = self.app.screen
+        if hasattr(parent, "provider_models"):
+            parent.provider_models[self.provider_id] = models
+            parent.fetched_at[self.provider_id] = self.fetched_at
+            parent.rebuild()
+
+    # ------------------------------------------------------------ drawing
+
+    def _search_term(self) -> str:
+        try:
+            return self.query_one("#provider-search", ModelSearchInput).value.strip().lower()
+        except Exception:
+            return ""
+
+    def _is_free(self, item: Dict[str, Any]) -> bool:
+        i_id = str(item.get("id") or "").lower()
+        i_name = str(item.get("name") or "").lower()
+        i_badge = str(item.get("badge") or "").lower()
+        return any("free" in s for s in (i_id, i_name, i_badge))
+
+    def rebuild(self) -> None:
+        term = self._search_term()
+        ol = self.query_one("#modal-list", OptionList)
+        prev = ol.highlighted
+        ol.clear_options()
+        self.filtered_items.clear()
+
+        shown = [
+            m for m in self.models
+            if not term
+            or term in str(m.get("id", "")).lower()
+            or term in str(m.get("name", "")).lower()
+        ]
+        shown.sort(key=lambda m: (0 if self._is_free(m) else 1,
+                                  str(m.get("id") or m.get("name") or "").lower()))
+
+        if self.fetching:
+            spin = Text()
+            spin.append("  " + SPINNER_FRAMES[self._spinner_idx], style="#58a6ff")
+            spin.append(" loading", style="dim #58a6ff")
+            ol.add_option(Option(spin, id="row_loading", disabled=True))
+            self.filtered_items.append(("hint", {}))
+        elif not shown:
+            ol.add_option(Option(Text(f"  {self._empty_hint()}", style="dim #8b949e"),
+                                 id="row_empty", disabled=True))
+            self.filtered_items.append(("hint", {}))
+        else:
+            for m in shown:
+                self._add_model_row(ol, m)
+
+        # Every provider offers Add. There is no separate mode for the ones that
+        # publish no list - the button is the same button and the difference is
+        # only whether anything came back before it.
+        if self.provider_id != "local_gguf":
+            ol.add_option(Option(Text("  + Add model...", style="bold #58a6ff"),
+                                 id="row_add"))
+            self.filtered_items.append(("add", {}))
+
+        if prev is not None and prev < len(self.filtered_items):
+            ol.highlighted = prev
+        elif self.filtered_items and ol.highlighted is None:
+            ol.highlighted = 0
+
+    def _empty_hint(self) -> str:
+        if self.provider_id == "huggingface":
+            return "This provider publishes no list. Add the model by name below."
+        if self.provider_id in LOCAL_PROVIDERS:
+            return "Nothing found on this machine."
+        if not self.settings.get_api_key(self.provider_id) and self.provider_id not in KEYLESS:
+            return "No API key set. Ctrl+D adds one."
+        if self.failed:
+            when = _age_text(self.fetched_at) if self.fetched_at else ""
+            return f"No answer from the provider{f' ({when})' if when else ''}."
+        return "Nothing matches that search."
+
+    def _add_model_row(self, ol: OptionList, m: Dict[str, Any]) -> None:
+        """A row says the model's name and whether it is free. Nothing else.
+
+        The current model is blue and nothing more. It carried a marker as well -
+        `●`, then `*` - which was the second thing on the line saying what the
+        colour already said, and it shifted the name one column right of where
+        every other name sat.
+
+        `UNUSABLE` is kept, because that one word is what stops a user picking a
+        model that stalls every turn. Everything else the provider or plugin put
+        in `badge` is dropped: it arrived as one to four lines per row - a
+        context size, a recommendation, a sentence about why a model is unusable,
+        a thinking-ladder listing - and made the name the smallest thing on
+        screen.
+        """
+        mid = str(m.get("id") or m.get("name") or "")
+        is_active = mid == self.current_model
+
+        text = Text()
+        text.append("  ")
+        text.append(mid, style="bold #58a6ff" if is_active else "white")
+
+        if self._is_free(m):
+            text.append("  FREE", style="bold #7ee787")
+
+        unusable = _unusable_note(m)
+        if unusable:
+            text.append("  UNUSABLE", style="bold #f85149")
+
+        ol.add_option(Option(text, id=f"mod_{mid}"))
+        self.filtered_items.append(("model", m))
+
+    # ----------------------------------------------------------- actions
+
+    def _current(self) -> Tuple[str, Dict[str, Any]]:
         ol = self.query_one("#modal-list", OptionList)
         if ol.highlighted is None or ol.highlighted >= len(self.filtered_items):
+            return ("hint", {})
+        return self.filtered_items[ol.highlighted]
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#modal-list", OptionList).action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#modal-list", OptionList).action_cursor_down()
+
+    def action_activate(self) -> None:
+        kind, data = self._current()
+        if kind == "model":
+            self.dismiss((self.provider_id, str(data.get("id") or "")))
+        elif kind == "add":
+            self.action_add_model()
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+    def action_refresh(self) -> None:
+        self.fetch_models_from_thread()
+
+    def action_configure_key(self) -> None:
+        if self.provider_id in LOCAL_PROVIDERS:
+            self.notify("Local providers need no key.", timeout=3.0)
             return
 
-        item_type, pid, data = self.filtered_items[ol.highlighted]
-        if item_type == "provider":
-            if pid in self.expanded_providers:
-                self.expanded_providers.discard(pid)
-            else:
-                self.expanded_providers.add(pid)
-            self.rebuild_tree()
-        elif item_type == "model":
-            mid = str(data.get("id") or data.get("name") or "")
-            if pid in ("opencode", "opencode_zen"):
-                key = self.settings.get_api_key(pid)
-                if not key:
-                    self.notify("OpenCode Zen requires an API key. Press Ctrl+D to configure.", timeout=4.0)
-                    self.action_configure_key()
-                    return
-            elif pid == "openrouter":
-                key = self.settings.get_api_key(pid)
-                if not key:
-                    self.notify("Notice: OpenRouter free models require a free key from openrouter.ai/keys. Configure via Ctrl+D or config.json.", timeout=4.0)
-            self.dismiss((pid, mid))
-        elif item_type == "add_model":
-            self.action_add_custom_model(pid)
-        elif item_type == "hint":
-            if data.get("is_local") or pid in ("local_gguf", "ollama", "lmstudio", "vllm"):
-                self.refresh_all_models()
-            else:
-                self.action_configure_key()
+        def on_key_saved(saved: bool) -> None:
+            if saved:
+                self.fetch_models_from_thread()
+                self.notify("API key saved.", timeout=3.0)
 
-    def action_add_custom_model_shortcut(self) -> None:
-        ol = self.query_one("#modal-list", OptionList)
-        if ol.highlighted is not None and ol.highlighted < len(self.filtered_items):
-            _, pid, _ = self.filtered_items[ol.highlighted]
-            if pid and pid != "local_gguf":
-                self.action_add_custom_model(pid)
+        self.app.push_screen(ApiKeyModal(self.provider_id), on_key_saved)
 
-    def action_add_custom_model(self, pid: Optional[str] = None) -> None:
-        if not pid:
-            ol = self.query_one("#modal-list", OptionList)
-            if ol.highlighted is not None and ol.highlighted < len(self.filtered_items):
-                _, pid, _ = self.filtered_items[ol.highlighted]
-        if not pid or pid == "local_gguf":
+    def action_add_model(self) -> None:
+        if self.provider_id == "local_gguf":
+            self.notify("Local models are files in the models folder.", timeout=3.0)
             return
 
         def on_model_added(model_name: Optional[str]) -> None:
-            if model_name:
-                clean_name = model_name.strip()
-                if clean_name:
-                    self.settings.add_custom_model(pid, clean_name)
-                    models = self.provider_models.setdefault(pid, [])
-                    if not any(m.get("id") == clean_name for m in models):
-                        models.append({
-                            "id": clean_name,
-                            "name": clean_name,
-                            "badge": "custom",
-                            "thinking": any(k in clean_name.lower() for k in ("r1", "o1", "o3", "claude-3-7", "thinking")),
-                        })
-                    self.expanded_providers.add(pid)
-                    self.rebuild_tree()
-                    self.dismiss((pid, clean_name))
+            if not model_name:
+                return
+            clean = model_name.strip()
+            if not clean:
+                return
+            self.settings.add_custom_model(self.provider_id, clean)
+            if not any(m.get("id") == clean for m in self.models):
+                self.models.append({
+                    "id": clean,
+                    "name": clean,
+                    "badge": "custom",
+                    "thinking": has_reasoning(self.provider_id, clean) or False,
+                    "levels": [],
+                })
+            self.rebuild()
+            self.dismiss((self.provider_id, clean))
 
-        self.app.push_screen(AddModelModal(pid), on_model_added)
+        self.app.push_screen(AddModelModal(self.provider_id), on_model_added)
+
+    @on(Input.Changed, "#provider-search")
+    def on_search_changed(self, event: Input.Changed) -> None:
+        self.rebuild()
 
     @on(OptionList.OptionSelected)
     def on_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.action_select_or_toggle()
+        self.action_activate()

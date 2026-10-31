@@ -107,7 +107,7 @@ class SubagentOrchestrator:
     def run_subagent(
         self,
         task: SubagentTask,
-        model_call: Optional[Callable[[List[Dict[str, Any]]], str]] = None,
+        model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
         max_turns: int = 8,
         on_progress: Optional[Callable[[SubagentProgress], None]] = None
@@ -175,6 +175,19 @@ class SubagentOrchestrator:
             _emit("failed", thought="No model backend wired.")
             return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False)
 
+        # One argument or two. The protocol carries the task so a backend with
+        # server-side tools can attribute what ran; a backend from before that
+        # still takes only the history. Checked once, not per turn, and by
+        # signature rather than by catching TypeError - which would also
+        # swallow a real bug raised inside the call.
+        _takes_task = False
+        if model_call is not None:
+            try:
+                import inspect as _inspect
+                _takes_task = len(_inspect.signature(model_call).parameters) >= 2
+            except (TypeError, ValueError):
+                _takes_task = False
+
         import re as _re
         for _ in range(max(1, max_turns)):
             sub_history = list(history)
@@ -184,7 +197,14 @@ class SubagentOrchestrator:
                 # so a subagent doing real work kept re-reading the same files.
                 sub_history = [sub_history[0], sub_history[1]] + sub_history[-18:]
             try:
-                text = model_call(sub_history) or ""
+                # The task travels with the call, so a model backend that runs
+                # its own tools server-side can attribute what ran to the
+                # subagent it ran for. A bare history cannot say that, which is
+                # how server-side tool calls used to vanish: the loop only
+                # understood `<tool:...>` tags in the text, and a model that
+                # calls native tools instead emits none.
+                text = (model_call(sub_history, task) if _takes_task
+                        else model_call(sub_history)) or ""
             except Exception as e:
                 last_text = f"Subagent {task.role} model error: {e}"
                 break
@@ -253,7 +273,11 @@ class SubagentOrchestrator:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             notes=list(task.notes),
-            events=list(events),
+            # Locally executed tools first. The window pairs parsed `<tool:...>`
+            # calls with events by position, so the locally produced events
+            # must stay where the text put them; server-side outcomes recorded
+            # on the task trail behind, and render as their own blocks.
+            events=list(events) + list(task.events),
             elapsed=max(0.0, _time.monotonic() - _t0),
             success=not is_model_err,
         )
@@ -281,7 +305,7 @@ class SubagentOrchestrator:
         tasks: List[SubagentTask],
         on_progress: Optional[Callable[[SubagentProgress], None]] = None,
         is_local: Optional[bool] = None,
-        model_call: Optional[Callable[[List[Dict[str, Any]]], str]] = None,
+        model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
         max_turns: int = 8,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,
@@ -298,7 +322,7 @@ class SubagentOrchestrator:
         self,
         tasks: List[SubagentTask],
         on_progress: Optional[Callable[[SubagentProgress], None]] = None,
-        model_call: Optional[Callable[[List[Dict[str, Any]]], str]] = None,
+        model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
         max_turns: int = 8,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,
@@ -326,7 +350,7 @@ class SubagentOrchestrator:
         self,
         tasks: List[SubagentTask],
         on_progress: Optional[Callable[[SubagentProgress], None]] = None,
-        model_call: Optional[Callable[[List[Dict[str, Any]]], str]] = None,
+        model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
         max_turns: int = 8,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,

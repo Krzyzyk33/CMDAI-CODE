@@ -2,7 +2,9 @@ import glob as py_glob
 import os
 import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+import tempfile
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -13,13 +15,19 @@ from .test_runner import run_project_tests
 class AgentContext:
     def __init__(self, workdir: str = "."):
         self.workdir = os.path.abspath(workdir)
+        self.current_cwd = self.workdir
         self.todo_list: List[str] = []
         self.mode: str = "auto"
         self.pending_images: List[Dict[str, str]] = []
+        self.on_before_file_modify: Optional[Callable[[str], None]] = None
 
     def resolve_path(self, path: str) -> str:
         if os.path.isabs(path):
             return path
+        base = getattr(self, "current_cwd", None) or self.workdir
+        cand = os.path.normpath(os.path.join(base, path))
+        if os.path.exists(cand):
+            return cand
         return os.path.normpath(os.path.join(self.workdir, path))
 
     def rel_path(self, path: str) -> str:
@@ -29,10 +37,103 @@ class AgentContext:
             return path
 
 
+def _smart_replace(content: str, old: str, new: str) -> Optional[Tuple[str, int, str]]:
+    """OpenCode-inspired multi-stage replacer.
+
+    Returns `(new_content, start_line_1based, matched_old_text)` or `None` if no
+    stage could uniquely locate `old` inside `content`.
+    """
+    if not old:
+        return None
+
+    # Stage 1: Exact substring match
+    if old in content:
+        idx = content.find(old)
+        line_no = content[:idx].count("\n") + 1
+        return content.replace(old, new, 1), line_no, old
+
+    # Stage 2: CRLF / LF normalized match
+    use_crlf = "\r\n" in content
+    norm_content = content.replace("\r\n", "\n")
+    norm_old = old.replace("\r\n", "\n")
+    norm_new = new.replace("\r\n", "\n")
+    if norm_old in norm_content:
+        idx = norm_content.find(norm_old)
+        line_no = norm_content[:idx].count("\n") + 1
+        replaced = norm_content.replace(norm_old, norm_new, 1)
+        if use_crlf:
+            replaced = replaced.replace("\n", "\r\n")
+        return replaced, line_no, norm_old
+
+    content_lines = norm_content.split("\n")
+    old_lines = norm_old.strip("\n").split("\n")
+    new_lines = norm_new.strip("\n").split("\n")
+    n_old = len(old_lines)
+    if n_old == 0 or n_old > len(content_lines):
+        return None
+
+    # Stage 3: Line-trimmed match (ignores trailing spaces on each line)
+    old_rstripped = [ln.rstrip() for ln in old_lines]
+    for i in range(len(content_lines) - n_old + 1):
+        window = content_lines[i : i + n_old]
+        if [ln.rstrip() for ln in window] == old_rstripped:
+            matched_old = "\n".join(window)
+            replaced_lines = content_lines[:i] + new_lines + content_lines[i + n_old :]
+            replaced = ("\r\n" if use_crlf else "\n").join(replaced_lines)
+            return replaced, i + 1, matched_old
+
+    # Stage 4: Indentation-flexible match (preserves file's actual base indentation)
+    def _min_indent(lines_list: List[str]) -> int:
+        non_empty = [len(ln) - len(ln.lstrip(" \t")) for ln in lines_list if ln.strip()]
+        return min(non_empty) if non_empty else 0
+
+    old_base_indent = _min_indent(old_lines)
+    old_dedented = [
+        (ln[old_base_indent:].rstrip() if len(ln) >= old_base_indent else ln.strip())
+        for ln in old_lines
+    ]
+    for i in range(len(content_lines) - n_old + 1):
+        window = content_lines[i : i + n_old]
+        win_base_indent = _min_indent(window)
+        win_dedented = [
+            (ln[win_base_indent:].rstrip() if len(ln) >= win_base_indent else ln.strip())
+            for ln in window
+        ]
+        if win_dedented == old_dedented and any(ln.strip() for ln in old_dedented):
+            # Calculate indentation delta and apply to new_lines
+            first_non_empty_win = next((ln for ln in window if ln.strip()), "")
+            indent_prefix = first_non_empty_win[: len(first_non_empty_win) - len(first_non_empty_win.lstrip(" \t"))]
+            new_base_indent = _min_indent(new_lines)
+            adjusted_new = []
+            for nl in new_lines:
+                if not nl.strip():
+                    adjusted_new.append("")
+                else:
+                    rel = nl[new_base_indent:] if len(nl) >= new_base_indent else nl.lstrip(" \t")
+                    adjusted_new.append(indent_prefix + rel)
+            matched_old = "\n".join(window)
+            replaced_lines = content_lines[:i] + adjusted_new + content_lines[i + n_old :]
+            replaced = ("\r\n" if use_crlf else "\n").join(replaced_lines)
+            return replaced, i + 1, matched_old
+
+    return None
+
+
 def tool_read(ctx: AgentContext, path: str, lines: Optional[str] = None) -> Dict[str, Any]:
     full_path = ctx.resolve_path(path)
     if not os.path.exists(full_path):
         return {"success": False, "error": f"File not found: {path}"}
+
+    if os.path.isdir(full_path):
+        try:
+            entries = os.listdir(full_path)[:30]
+            entries_str = ", ".join(entries) if entries else "(empty directory)"
+            return {
+                "success": False,
+                "error": f"'{path}' is a directory, not a file. Files in directory: {entries_str}",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"'{path}' is a directory, not a file ({e})."}
 
     try:
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -74,21 +175,23 @@ def tool_edit(
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
-        if old not in content:
+        match_res = _smart_replace(content, old, new)
+        if match_res is None:
             return {
                 "success": False,
-                "error": f"Target chunk <old> does not match file content in '{path}' (don't match). Ensure exact matching lines and indentation, or use <tool:read> first.",
+                "error": f"Target chunk <old> does not match file content in '{path}' (don't match). Ensure matching lines or use <tool:read> first.",
             }
 
-        new_content = content.replace(old, new, 1)
+        new_content, start_line_num, matched_old = match_res
+
+        if getattr(ctx, "on_before_file_modify", None):
+            try:
+                ctx.on_before_file_modify(full_path)
+            except Exception:
+                pass
 
         old_lines = content.splitlines()
-        replaced_lines = new_content.splitlines()
-
-        char_idx = content.find(old)
-        start_line_num = content[:char_idx].count("\n") + 1
-
-        old_chunk_lines = old.splitlines()
+        old_chunk_lines = matched_old.splitlines()
         new_chunk_lines = new.splitlines()
 
         diff_entries: List[Tuple[int, str, str]] = []
@@ -157,7 +260,12 @@ def tool_edit(
 def tool_write(ctx: AgentContext, path: str, content: str) -> Dict[str, Any]:
     full_path = ctx.resolve_path(path)
     try:
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        if getattr(ctx, "on_before_file_modify", None):
+            try:
+                ctx.on_before_file_modify(full_path)
+            except Exception:
+                pass
+        os.makedirs(os.path.dirname(full_path) or ".", exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -301,28 +409,92 @@ def tool_search(ctx: AgentContext, query: str, path: str = ".") -> Dict[str, Any
         return {"success": False, "error": str(e)}
 
 
-def tool_command(ctx: AgentContext, cmd: str, timeout: int = 30) -> Dict[str, Any]:
+def tool_command(
+    ctx: AgentContext,
+    cmd: str,
+    timeout: int = 60,
+    background: bool = False,
+    detach_check: Optional[Callable[[], bool]] = None,
+    on_output: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    from .tasks import BackgroundTaskManager
+    active_cwd = getattr(ctx, "current_cwd", None) or ctx.workdir
+    if not os.path.isdir(active_cwd):
+        active_cwd = ctx.workdir
+
+    if background:
+        return BackgroundTaskManager.get_instance().spawn(cmd, active_cwd)
+
+    temp_dir = tempfile.gettempdir()
+    import uuid as _uuid
+    log_path = os.path.join(temp_dir, f"cmdai_fg_{_uuid.uuid4().hex[:8]}.log")
+    log_file = open(log_path, "w+", encoding="utf-8", errors="replace")
+
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = 0x08000000
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             shell=True,
-            cwd=ctx.workdir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
+            cwd=active_cwd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=creation_flags,
         )
-        return {
-            "success": proc.returncode == 0,
-            "cmd": cmd,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "cmd": cmd, "error": f"Command timed out after {timeout}s"}
     except Exception as e:
+        log_file.close()
         return {"success": False, "cmd": cmd, "error": str(e)}
+
+    start = time.time()
+    while proc.poll() is None:
+        if detach_check and detach_check():
+            adopted = BackgroundTaskManager.get_instance().adopt(cmd, proc, log_path)
+            return {
+                "success": True,
+                "background": True,
+                "task_id": adopted["task_id"],
+                "pid": proc.pid,
+                "cmd": cmd,
+                "message": f"Command moved to background as {adopted['task_id']}.",
+            }
+        if time.time() - start > timeout:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    proc.kill()
+            except Exception:
+                pass
+            log_file.seek(0)
+            out = log_file.read()
+            log_file.close()
+            return {"success": False, "cmd": cmd, "error": f"Command timed out after {timeout}s", "stdout": out}
+        time.sleep(0.1)
+
+    log_file.seek(0)
+    out = log_file.read()
+    log_file.close()
+
+    if proc.returncode == 0:
+        for sub_cmd in re.split(r"&&|;", cmd):
+            m_cd = re.match(r"^\s*cd(?:\s+/d)?\s+([^\r\n]+)$", sub_cmd.strip(), flags=re.IGNORECASE)
+            if m_cd:
+                target_dir = m_cd.group(1).strip().strip('"\'')
+                new_cwd = target_dir if os.path.isabs(target_dir) else os.path.normpath(os.path.join(active_cwd, target_dir))
+                if os.path.isdir(new_cwd):
+                    active_cwd = new_cwd
+                    ctx.current_cwd = new_cwd
+
+    return {
+        "success": proc.returncode == 0,
+        "cmd": cmd,
+        "returncode": proc.returncode,
+        "stdout": out,
+        "stderr": "",
+    }
 
 
 def tool_web(ctx: AgentContext, url_or_query: str) -> Dict[str, Any]:

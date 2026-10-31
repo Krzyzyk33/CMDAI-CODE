@@ -65,9 +65,9 @@ Screen {
     background: #161b22;
     border: none;
     outline: none;
-    padding: 1 3 0 3;
-    height: 2;
-    min-height: 2;
+    padding: 1 3 1 3;
+    height: 3;
+    min-height: 3;
     max-height: 8;
     color: #e6edf3;
     scrollbar-size-vertical: 0;
@@ -76,7 +76,7 @@ Screen {
 
 #hero-meta-bar {
     height: auto;
-    padding: 1 3 1 3;
+    padding: 0 3 1 3;
     background: #161b22;
     color: #8b949e;
 }
@@ -125,7 +125,10 @@ Screen {
 
 #chat-scroll {
     background: #000000;
-    padding: 0 2;
+    /* Left gutter 2, right 0. Was 2 on both sides, which left the cards one
+       column narrower than the input below them and made the right margin read
+       as 2 over one card and 1 over the other. */
+    padding: 0 0 0 2;
     margin: 0;
     width: 100%;
     height: 1fr;
@@ -263,6 +266,15 @@ Screen {
     color: #8b949e;
 }
 
+/* A subagent window has nothing after the footer - the task dock is above it -
+   so the last line of the report sat hard against the bottom edge. One line
+   under it. Scoped to the subagent card on purpose: the lead agent's turns are
+   separated by the next user message, so adding a line there would add a line
+   between every pair of turns. */
+.subagent-card .card-footer {
+    margin-bottom: 1;
+}
+
 
 /* ═════════════════════════════════════════════════════════════
    3. BOTTOM DOCK & TODO PREVIEW BAR (Above Input Card)
@@ -272,7 +284,11 @@ Screen {
     height: auto;
     width: 100%;
     background: #000000;
-    padding: 1 2 0 2;
+    /* Left inset 2, right 0. The input runs to the window edge while the
+       transcript keeps a 2-column gutter on the left, so the block you type
+       into is measurably the widest thing on screen and lines up with the user
+       card. Measured at 100 columns: input L=2 R=0, user card L=2 R=0. */
+    padding: 0 0 0 2;
     margin: 0;
 }
 
@@ -408,9 +424,12 @@ HintRow.selected, .cmd-hint.selected {
     background: #161b22;
     border: none;
     outline: none;
-    padding: 1 3 0 3;
-    height: 2;
-    min-height: 2;
+    /* One blank gray line under the text. It was 0, so the last line of what
+       you type sat hard against the meta row below it. Height grows with it:
+       1 over, 1 under, at least 1 for the text itself. */
+    padding: 1 3 1 3;
+    height: 3;
+    min-height: 3;
     max-height: 8;
     color: #e6edf3;
     scrollbar-size-vertical: 0;
@@ -419,7 +438,7 @@ HintRow.selected, .cmd-hint.selected {
 
 #input-meta-bar {
     height: auto;
-    padding: 1 3 1 3;
+    padding: 0 3 1 3;
     background: #161b22;
     color: #8b949e;
 }
@@ -442,6 +461,36 @@ HintRow.selected, .cmd-hint.selected {
 
 #input-meta-spacer {
     width: 1fr;
+}
+
+/* The "more below" control that sits above the input when there is more
+   conversation below. It lives directly under the bottom dock - on the black
+   margin, not inside the gray input card - and collapses to no height at all
+   when the text is empty, which is most of the time. An always-present blank
+   line above the input costs a line forever to say nothing. */
+#jump-bar {
+    height: 1;
+    background: #000000;
+    padding: 0;
+    margin: 0;
+    display: none;
+}
+
+#jump-spacer {
+    width: 1fr;
+    height: 0;
+}
+
+#jump-to-new {
+    width: auto;
+    height: auto;
+    color: #8b949e;
+}
+
+/* No underline on hover. The shared `.meta-clickable` underlines, which reads
+   as a link; this is a jump control and it stays plain, brightening only. */
+#jump-to-new:hover {
+    color: #ffffff;
 }
 
 #input-meta-right {
@@ -490,7 +539,10 @@ HintRow.selected, .cmd-hint.selected {
     width: 100%;
     height: auto;
     padding: 1 2;
-    margin-top: 0;
+    /* One blank line between the header and the opened box. It was 0, so the
+       box's top edge touched the `Thought for 14.4s` line and the two read as
+       one block rather than a summary and its contents. */
+    margin-top: 1;
     background: #0d1117;
     color: #8b949e;
     display: none;
@@ -739,6 +791,144 @@ Input .input--cursor {
     width: 100%;
     height: auto;
     color: #e6edf3;
+}
+
+/* Sessions dialog: wide enough for title, relative time, token badge, model and dir */
+#modal-dialog.sessions-dialog {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 85%;
+}
+
+#modal-dialog.sessions-dialog #modal-list {
+    height: auto;
+    max-height: 16;
+}
+
+/* MCP servers: rows stay one line, prose goes in the line at the bottom. */
+#modal-dialog.mcp-dialog {
+    width: 96;
+    height: auto;
+    max-height: 80%;
+}
+
+#modal-dialog.mcp-dialog #modal-list {
+    height: auto;
+    /* Room for the servers and, in the options view, the six options.
+       Without a cap the list grows and pushes the bottom line off. */
+    max-height: 14;
+    border: none;
+    border-top: solid #21262d;
+    margin: 0;
+    padding: 0;
+}
+
+#mcp-empty {
+    padding: 1 2;
+    color: #6e7681;
+    border: none;
+    border-top: solid #21262d;
+    height: auto;
+}
+
+#mcp-status {
+    /* The one place in the window where prose appears. Sits at the bottom,
+       above the key hints, and is the only scrolling region - the server
+       list keeps its natural height so the rows do not jump around. */
+    height: auto;
+    max-height: 12;
+    background: #0d1117;
+    border: none;
+    border-top: solid #21262d;
+    padding: 0 1;
+    margin: 0;
+    color: #8b949e;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #30363d;
+    scrollbar-background: #0d1117;
+}
+
+#mcp-footer {
+    padding: 0 1;
+    color: #6e7681;
+    border: none;
+    border-top: solid #21262d;
+    height: auto;
+}
+
+/* Add server: a small form, same dialog chrome. */
+#modal-dialog.mcp-add-dialog {
+    width: 74;
+    height: auto;
+}
+
+#mcp-add-form {
+    height: auto;
+    padding: 0 1;
+}
+
+/* Confirmation. Wider than the add form so a long server name does not
+   wrap into an unreadable column.
+
+   Its own class, not `#modal-dialog.mcp-add-dialog:has(#mcp-confirm-body)`.
+   Textual has no :has() in CSS - it is a query-time pseudo-class there, not
+   a selector - and one unknown pseudo-class raises a TokenError that takes
+   the whole stylesheet down with it, blanking every screen in the app. */
+#modal-dialog.mcp-confirm-dialog {
+    width: 72;
+}
+
+#mcp-confirm-body {
+    height: auto;
+    padding: 1 1 0 1;
+}
+
+#mcp-confirm-text {
+    height: auto;
+    color: #c9d1d9;
+}
+
+#mcp-confirm-hint {
+    height: auto;
+    padding-top: 1;
+    color: #6e7681;
+}
+
+#mcp-add-form .mcp-add-label {
+    color: #6e7681;
+    height: 1;
+    margin-top: 1;
+}
+
+#mcp-add-form Input {
+    margin: 0;
+}
+
+#f-type {
+    height: 1;
+    color: #c9d1d9;
+}
+
+#f-type:hover {
+    color: #58a6ff;
+}
+
+#mcp-add-actions {
+    height: 1;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#mcp-add-hint {
+    color: #6e7681;
+    width: 1fr;
+}
+
+#mcp-add-error {
+    color: #f85149;
+    width: 2fr;
+    text-align: right;
 }
 
 /* Update: steps run in the window, esc only closes it. */

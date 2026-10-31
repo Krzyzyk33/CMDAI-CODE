@@ -15,9 +15,9 @@ class ActionMenuModal(ModalScreen[str]):
     ]
 
     ACTIONS = [
-        ("copy", "Copy only this user message"),
-        ("revert", "Remove user + response and revert files"),
-        ("delete", "Remove user + response only"),
+        ("copy", "Copy user message"),
+        ("revert", "Revert turn & restore prompt to input (undo)"),
+        ("delete", "Delete entire turn (user + response)"),
     ]
 
     def __init__(self, **kwargs):
@@ -30,8 +30,8 @@ class ActionMenuModal(ModalScreen[str]):
                 yield Static("[dim]esc[/]", id="modal-esc")
             yield OptionList(
                 Option("  Copy user message"),
-                Option("  Revert turn + files"),
-                Option("  Delete turn"),
+                Option("  Revert turn & restore prompt to input (undo)"),
+                Option("  Delete entire turn (user + response)"),
                 id="modal-list",
             )
             with Horizontal(id="modal-footer"):

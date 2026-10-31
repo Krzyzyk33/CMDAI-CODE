@@ -9,12 +9,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "models_dir": "models",
     "default_model": "",
     "default_provider": "openrouter",
+    # A subagent may run on a different model than the chat it was spawned
+    # from. Empty means "the same one".
+    #
+    # This exists because inheriting is not always safe. A subagent inherits the
+    # chat's provider, and when that provider is a local bridge the subagent
+    # gets a tool loop instead of a report - the window opens on an empty card
+    # with the task at the bottom and nothing above it, and nothing in the
+    # transcript says why.
+    "subagent_provider": "",
+    "subagent_model": "",
     "generation": {
         "temperature": 0.3,
         "top_p": 0.95,
         "max_tokens": 0,
         "repetition_penalty": 1.1,
-        "reasoning_level": "Medium",
+        # A remembered effort level, not a switch. Whether the model reasons at
+        # all is detected per model, so there is no "off" stored here - an
+        # empty value just means "use whatever the model defaults to".
+        "reasoning_level": "",
     },
     "agent": {
         "enabled": True,

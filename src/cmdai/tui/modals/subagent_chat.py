@@ -10,11 +10,27 @@ from textual.widgets import Static
 
 from ..widgets import AssistantTurnCard
 
+# The model-name spinner, so the task label animates the same way rather than
+# inventing a second set of glyphs. It lives in app.py, which cannot be
+# imported from here without a cycle, so the two values are repeated - and the
+# test below fails if app.py's ever change.
+META_MARKERS = ["⌬", "✻"]
+
 SUBAGENT_CHAT_CSS = """
 SubagentChatModal {
+    width: 100%;
+    height: 100%;
+    min-width: 100%;
+    min-height: 100%;
     align: left top;
     background: #000000;
     color: #c9d1d9;
+    padding: 0;
+    margin: 0;
+    overflow: hidden hidden;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
+    scrollbar-gutter: auto;
 }
 
 /* Fullscreen, frameless, no margin - mirrors #chat-scroll in styles.py so the
@@ -28,14 +44,18 @@ SubagentChatModal {
     border: none;
     padding: 0;
     margin: 0;
+    overflow: hidden hidden;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
 }
 
 #subagent-chat-scroll {
     width: 100%;
     height: 1fr;
     margin: 0;
-    padding: 0 2;
+    padding: 0 0 0 2;
     scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
     scrollbar-gutter: auto;
 }
 
@@ -44,7 +64,7 @@ SubagentChatModal {
     height: auto;
     background: transparent;
     border: none;
-    padding: 1 2;
+    padding: 1 0 1 2;
     margin: 1 0;
     color: #e6edf3;
 }
@@ -64,16 +84,23 @@ SubagentChatModal {
     color: #484f58;
 }
 
-/* Task dock: flush to the left, right and bottom edge, no margin, same
-   padding shape as #bottom-dock in the chat. Tall enough that the task reads
-   as a panel instead of a squeezed strip. */
+/* Task dock: sits at the bottom, matches #bottom-dock layout in the chat. */
 #subagent-task-dock {
+    dock: bottom;
     height: auto;
-    min-height: 7;
+    width: 100%;
+    background: #000000;
+    padding: 1 0 0 2;
+    margin: 0;
+}
+
+/* Task card: looks like #input-card, expanding naturally with task height. */
+#subagent-task-card {
+    height: auto;
     max-height: 14;
+    width: 100%;
     background: #161b22;
     border: none;
-    border-top: solid #21262d;
     padding: 1 3 1 3;
     margin: 0;
 }
@@ -82,6 +109,7 @@ SubagentChatModal {
     width: 100%;
     height: 1;
     margin: 0 0 1 0;
+    padding: 0;
 }
 
 #subagent-task-header {
@@ -93,11 +121,22 @@ SubagentChatModal {
 #subagent-task-meta {
     width: auto;
     color: #8b949e;
+    text-align: right;
+    content-align: right middle;
+    padding: 0;
+    margin: 0;
 }
 
 #subagent-task-body {
     width: 100%;
     height: auto;
+    min-height: 1;
+    max-height: 10;
+    overflow-y: auto;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
+    padding: 0;
+    margin: 0;
     color: #e6edf3;
 }
 """
@@ -145,6 +184,7 @@ class SubagentChatModal(ModalScreen[None]):
         # destroyed and recreated and the whole window flickered while only one
         # tool was actually running.
         self._live_done = 0        # items already emitted
+        self._live_notes_done = 0  # progress notes already emitted
         self._live_todo_open = False   # a <tool:todo> run is still open
         self._live_summary = ""    # closing report already appended
         self._live_footed = False  # card.finish() already called
@@ -174,19 +214,44 @@ class SubagentChatModal(ModalScreen[None]):
                 # The real assistant card, not a lookalike: same widgets, same
                 # ToolBlock click-to-expand, same footer as the lead agent chat.
                 yield AssistantTurnCard("Subagent", has_thinking=False, classes="subagent-card")
-            # The task the lead agent wrote, full width, flush to the bottom.
+            # The task the lead agent wrote, in an input-like card that expands with content height.
             with Vertical(id="subagent-task-dock"):
-                with Horizontal(id="subagent-task-header-row"):
-                    yield Static("TASK", id="subagent-task-header")
-                    yield Static("", id="subagent-task-meta")
-                yield Static("", id="subagent-task-body")
+                with Vertical(id="subagent-task-card"):
+                    with Horizontal(id="subagent-task-header-row"):
+                        yield Static("TASK", id="subagent-task-header")
+                        yield Static("[dim]esc[/dim]", id="subagent-task-meta")
+                    yield Static("", id="subagent-task-body")
 
     def on_mount(self) -> None:
+        self._spin_idx = 0
+        self._spin_timer = self.set_interval(0.35, self._advance_spinner)
         # After the first refresh the card is mounted, so its blocks are appended
         # in call order instead of queueing up unordered.
         self.call_after_refresh(self._render_agent)
         if self.live_agent is not None:
             self._refresh_timer = self.set_interval(0.2, self._refresh_live)
+
+    def _advance_spinner(self) -> None:
+        """Animate the TASK label while the shown subagent is working.
+
+        The same marker the model name uses, for the same reason: a static
+        label next to work that is happening reads as finished. Two spaces after
+        the glyph, because a single one let the bright glyph's cell overwrite it.
+        """
+        cur = self._current()
+        if not cur:
+            return
+        running = str(cur.get("status", "")).lower() in ("running", "starting", "working")
+        if not running:
+            return
+        try:
+            marker = META_MARKERS[self._spin_idx % len(META_MARKERS)]
+            self._spin_idx += 1
+            self.query_one("#subagent-task-header", Static).update(
+                f"[b #58a6ff]{marker}[/][b]  TASK[/]"
+            )
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- build
 
@@ -294,12 +359,22 @@ class SubagentChatModal(ModalScreen[None]):
         # The full replay uses the same item list the live path appends from,
         # so a finished subagent and a running one read identically.
         self._live_done = 0
+        self._live_notes_done = 0
         self._live_todo_open = False
         self._live_summary = ""
         self._live_footed = False
         items = self._items(cur)
         self._emit_items(card, items, 0)
         self._live_done = len(items)
+
+        # Progress notes, oldest first. The live path appends only the tail;
+        # a rebuild replays all of them. Without this the window of a running
+        # subagent showed the live line and nothing else.
+        notes = [str(n or "").strip() for n in (cur.get("notes") or [])]
+        notes = [n for n in notes if n]
+        for note in notes:
+            card.append_text_block(note)
+        self._live_notes_done = len(notes)
 
         # The report the lead agent reads, as plain closing text.
         summary = str(cur.get("summary", "")).strip()
@@ -315,26 +390,27 @@ class SubagentChatModal(ModalScreen[None]):
             # Still working: keep the card generating so the footer reads
             # "Running" with the tool it is on, exactly like the lead agent.
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
-            if tool_and_target and tool_and_target != "starting":
+            if tool_and_target and tool_and_target.lower() not in ("starting", "working"):
                 tool = tool_and_target.split(" ", 1)[0]
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
                 card.set_generating_tool(tool, target)
             else:
-                card.set_generating_tool("thinking", "…")
+                card.clear_generating_tool()
         else:
             card.finish(
                 elapsed=elapsed if elapsed >= 0.05 else None,
                 tokens=tokens,
                 tok_s=(tokens / elapsed) if (tokens and elapsed >= 0.05) else 0.0,
             )
-        if self.agent_total > 1:
-            # Sibling position sits in the task dock, as in the mock, so the
-            # header keeps the exact shape the lead agent chat has.
-            try:
-                self.query_one("#subagent-task-meta", Static).update(
-                    f"[dim]Agent {self.agent_index} of {self.agent_total} · esc exit[/dim]")
-            except Exception:
-                pass
+        try:
+            if self.agent_total > 1:
+                meta_lbl = f"[dim]Agent {self.agent_index} of {self.agent_total} · esc[/dim]"
+            else:
+                meta_lbl = "[dim]esc[/dim]"
+            self.query_one("#subagent-task-meta", Static).update(meta_lbl)
+        except Exception:
+
+            pass
         # The task is the text the lead agent wrote for this subagent, shown
         # raw. The generated system prompt stays out of the way.
         try:
@@ -384,6 +460,12 @@ class SubagentChatModal(ModalScreen[None]):
             self._emit_items(card, items, self._live_done)
             self._live_done = len(items)
 
+        notes = [str(n or "").strip() for n in (cur.get("notes") or [])]
+        notes = [n for n in notes if n]
+        for note in notes[self._live_notes_done:]:
+            card.append_text_block(note)
+        self._live_notes_done = len(notes)
+
         # The report, once, when there is one. A live run has none until the
         # subagent wraps up.
         summary = str(cur.get("summary", "") or "").strip()
@@ -397,7 +479,7 @@ class SubagentChatModal(ModalScreen[None]):
             # subagent has nothing to show, and an empty pulsing row there read
             # as a tool that did not work.
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
-            if tool_and_target and tool_and_target != "starting":
+            if tool_and_target and tool_and_target.lower() not in ("starting", "working"):
                 tool = tool_and_target.split(" ", 1)[0]
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
                 card.set_generating_tool(tool, target)

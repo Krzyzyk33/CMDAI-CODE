@@ -7,12 +7,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import requests
-from .capabilities import BUDGET_MAP, REASONING_EFFORT_MAP, get_model_capability
+from .capabilities import (
+    THINKING_OFF,
+    budget_for,
+    clamp_effort,
+    effort_budget_field,
+    get_model_capability,
+    normalize_level,
+    note_reasoning_observed,
+)
 
 TOOL_COMPLETE_PATTERNS = re.compile(
     r'(?:'
-    r'<tool:\w+[^>]*?/>'
-    r'|</tool:\w+>'
+    r'<tool:(?!write\b|edit\b|command\b)\w+[^>]*?/>'
+    r'|<tool:(?:write|edit|command)\b[^>]*?\b(?:content|code|new|cmd|command)=[^>]*?/>'
+    r'|</(?:tool:)?\w+>'
     r'|<tool_call>[^>]*?/>'
     r'|</tool_call>'
     r'|<\|tool_call>[^>]*?/>'
@@ -431,6 +440,92 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
 }
 
 
+def catalog_models(provider_id: str) -> List[Dict[str, Any]]:
+    """Every model models.dev lists for this provider.
+
+    For the providers whose own `/models` returns a bare `id` - or returns
+    nothing at all, as `anthropic` does with `supports_remote_fetch=False` -
+    this is the only list there is. It says what exists; the provider's own
+    endpoint says what *this account* may reach, and the two are not the same
+    question.
+    """
+    try:
+        from . import model_catalog as MC
+    except Exception:
+        return []
+
+    their_id = MC.catalog_provider_id(provider_id)
+    if not their_id:
+        return []
+    provider = MC.load().get(their_id)
+    if not isinstance(provider, dict):
+        return []
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for model_id in models:
+        cap = get_model_capability(model_id, provider_id=provider_id)
+        badge = []
+        if cap.thinking:
+            badge.append("reasoning")
+        out.append({
+            "id": model_id,
+            "name": model_id,
+            "badge": " · ".join(badge),
+            "thinking": cap.thinking,
+            "levels": list(cap.levels),
+            "param_style": cap.param_style,
+            "from_catalog": True,
+        })
+    out.sort(key=lambda m: (0 if m["thinking"] else 1, str(m["id"]).lower()))
+    return out
+
+
+def has_reasoning(provider_id: str, model_id: str) -> Optional[bool]:
+    """Whether a model reasons, or None when nobody will say.
+
+    None is the load-bearing value. Roughly 26 providers publish nothing about
+    reasoning, and reporting False for those would be a confident wrong answer
+    where the honest one is "unknown" - which is how a model that thinks on
+    most turns ends up with no thinking level and no label.
+    """
+    cap = get_model_capability(model_id, provider_id=provider_id)
+    if cap.source == "name_heuristic":
+        return None
+    return bool(cap.thinking)
+
+
+def _merge_catalog_facts(provider_id: str, models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach what models.dev knows to a list the provider just returned.
+
+    The provider decides which models exist for this account. models.dev decides
+    what each one can do. Neither overrides the other: a model the provider did
+    not list stays off the list, and a model it did list is never dropped for
+    being unknown to the catalogue.
+    """
+    if not models:
+        return models
+    out = []
+    for m in models:
+        mid = str(m.get("id") or m.get("name") or "")
+        if not mid:
+            continue
+        entry = dict(m)
+        cap = get_model_capability(mid, provider_id=provider_id)
+        entry["thinking"] = bool(cap.thinking)
+        entry["levels"] = list(cap.levels)
+        entry["param_style"] = cap.param_style
+        if cap.vision:
+            entry["vision"] = True
+        if not m.get("badge") or "reasoning" not in str(m.get("badge")):
+            badge = str(m.get("badge") or "")
+            entry["badge"] = (badge + " · reasoning") if badge else "reasoning"
+        out.append(entry)
+    return out
+
+
 def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, Any]]:
     if provider_id == "opencode_zen":
         provider_id = "opencode"
@@ -439,34 +534,12 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
         return []
 
     if provider_id == "local_gguf":
-        from .settings import get_settings
-        models_dir = get_settings().config.get("models_dir", "models")
-        candidates = [
-            models_dir,
-            os.path.join(os.getcwd(), models_dir),
-            "D:/CMDAI CODE/models",
-            "D:\\CMDAI CODE\\models",
-            "E:/CMDAI CODE/models",
-            "E:\\CMDAI CODE\\models",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models"),
-        ]
-        found_dir = None
-        for cand in candidates:
-            if cand and os.path.exists(cand) and os.path.isdir(cand):
-                try:
-                    if any(f.endswith(".gguf") for f in os.listdir(cand)):
-                        found_dir = cand
-                        break
-                except Exception:
-                    pass
-        if not found_dir:
-            for cand in candidates:
-                if cand and os.path.exists(cand) and os.path.isdir(cand):
-                    found_dir = cand
-                    break
-        if not found_dir:
+        from .model_paths import list_gguf_files, resolve_models_dir
+        # Was six candidates, four of them hardcoded D:/E: paths under a
+        # "CMDAI CODE" name that no longer exists.
+        models_dir = resolve_models_dir("")
+        if not os.path.isdir(models_dir):
             return []
-        models_dir = found_dir
 
         found = []
         for f in sorted(os.listdir(models_dir)):
@@ -478,12 +551,17 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                     "id": f,
                     "name": f,
                     "badge": size_str,
-                    "thinking": "r1" in f.lower() or "qwq" in f.lower() or "thinking" in f.lower(),
                 })
-        return found
+        # `thinking` was three substrings against the filename. It is now read
+        # out of the file's own chat template, which is the only thing that knows
+        # - and which was unreachable behind a hard-coded `gemma` refusal.
+        return _merge_catalog_facts(provider_id, found)
 
     if not api_key and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
-        return []
+        # No key, so the provider will not tell us anything. The catalogue still
+        # can, and a card with a real list beats a card that says "key required"
+        # while the list is sitting there.
+        return catalog_models(provider_id)
 
     url = f"{info.base_url}{info.models_endpoint}"
     headers = {
@@ -500,15 +578,20 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
             data = resp.json()
 
             if "models" in data and isinstance(data["models"], list):
-                return [
+                # Ollama. The template is not in this response - it comes from
+                # /api/show per model - so nothing here may be read as an answer
+                # about reasoning. Was `"<think>" in template` against a field
+                # this endpoint does not return, which is why it always fell
+                # through to the model name.
+                listed = [
                     {
                         "id": m.get("name", m.get("model", "")),
                         "name": m.get("name", m.get("model", "")),
                         "badge": f"{(m.get('size', 0) / (1024**3)):.1f}GB" if m.get("size") else "ollama",
-                        "thinking": "<think>" in str(m.get("template", "")).lower() or "r1" in str(m.get("name", "")).lower(),
                     }
                     for m in data["models"]
                 ]
+                return _merge_catalog_facts(provider_id, listed)
 
             if "data" in data and isinstance(data["data"], list):
                 raw_models = data["data"]
@@ -525,15 +608,28 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         continue
                     name = item.get("name", mid)
 
+                    ctx_len = item.get("context_length", 0)
+
+                    # The provider's own answer first. `supported_parameters`
+                    # naming `reasoning` is better than anything we could look
+                    # up. The name keywords that used to close this expression
+                    # are gone: they were a guess dressed as a check, they missed
+                    # `gemini` and `qwen3`, and they were the reason a card and
+                    # the input bar could disagree about the same model.
                     params = item.get("supported_parameters", [])
-                    has_reasoning = (
+                    reported = (
                         "reasoning" in params
                         or "include_reasoning" in params
                         or bool(item.get("reasoning"))
-                        or any(kw in mid.lower() for kw in ["r1", "o1", "o3", "o4", "claude-3-7", "claude-3.7"])
                     )
+                    if reported:
+                        from .capabilities import register_model_capability
+                        register_model_capability(
+                            mid, provider_id=provider_id, thinking=True,
+                            param_style="reasoning_effort",
+                        )
+                    cap = get_model_capability(mid, provider_id=provider_id)
 
-                    ctx_len = item.get("context_length", 0)
                     ctx_str = ""
                     if ctx_len >= 1_000_000:
                         ctx_str = f"{ctx_len // 1_000_000}M"
@@ -546,7 +642,7 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         badge_parts.append("FREE")
                     if ctx_str:
                         badge_parts.append(ctx_str)
-                    if has_reasoning:
+                    if cap.thinking:
                         badge_parts.append("reasoning")
 
                     if ctx_len > 0:
@@ -557,7 +653,9 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         "id": mid,
                         "name": name,
                         "badge": " · ".join(badge_parts) if badge_parts else "",
-                        "thinking": has_reasoning,
+                        "thinking": cap.thinking,
+                        "levels": list(cap.levels),
+                        "param_style": cap.param_style,
                         "context_length": ctx_len,
                     })
 
@@ -573,7 +671,21 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
     except Exception:
         pass
 
-    return []
+    # The provider did not answer - no key, a 403, a timeout, or it simply does
+    # not publish a list. The catalogue still does, so the card gets a real list
+    # marked as catalogue-derived rather than an empty one that looks like the
+    # account has nothing.
+    return catalog_models(provider_id)
+
+
+class StreamResult(tuple):
+    """2-tuple of (content, thinking) that also carries usage metadata as .usage."""
+    def __new__(cls, content: str, thinking: str, usage: Optional[Dict[str, Any]] = None):
+        obj = super().__new__(cls, (content, thinking))
+        obj.content = content
+        obj.thinking = thinking
+        obj.usage = usage or {}
+        return obj
 
 
 def stream_chat_completion(
@@ -585,10 +697,57 @@ def stream_chat_completion(
     on_token: Optional[Callable[[str], None]] = None,
     on_thinking: Optional[Callable[[str], None]] = None,
     is_aborted: Optional[Callable[[], bool]] = None,
+    on_tool: Optional[Callable[[str, str, str], None]] = None,
+    on_usage: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[str, str]:
+    """One turn against one provider.
+
+    `on_tool(name, phase, detail)` is how a provider that *executes its own
+    tools* reports them. `phase` is one of:
+
+        ``"running"``  the provider is running the tool; `detail` is the
+                       target - a path, a command, whatever it is acting on
+        ``"done"``     it finished; `detail` is a short result summary
+        ``"failed"``   it did not finish; `detail` is the error
+
+    Optional, and every provider but a plugin-supplied one leaves it None: the
+    shipped providers ask the model for a `<tool:name>` tag in its text and this
+    app executes that itself, so there is nothing to report. It exists for a
+    provider that runs tools server-side, where the tool call happens without
+    the text ever naming it.
+    """
     params = generation_params or {}
     cap = get_model_capability(model_id, provider_id=provider_id, api_key=api_key)
-    reasoning_level = params.get("reasoning_level", "Medium")
+    # Normalised at the only place it is read, so a level can arrive from a
+    # config file, a plugin or a legacy caller in any spelling and behave the
+    # same. Three cases, kept apart on purpose:
+    #   * nothing given -> whatever detection said this model defaults to
+    #   * given as off    -> reasoning stays off, in any spelling
+    #   * given as a level-> that level
+    raw_level = params.get("reasoning_level")
+    level = normalize_level(raw_level) if raw_level not in (None, "") else ""
+    if not level:
+        level = normalize_level(cap.default_level) or "medium"
+    reasoning_level = level
+
+    if provider_id in ("opencode", "opencode_zen", "opencode_local", "local_opencode") and not api_key:
+        try:
+            from cmdai_opencode import provider as plugin_provider
+            return plugin_provider.stream_completion(
+                model_id,
+                messages,
+                generation_params=generation_params,
+                on_token=on_token,
+                on_thinking=on_thinking,
+                is_aborted=is_aborted,
+                on_tool=on_tool,
+                on_usage=on_usage,
+            )
+        except Exception as e:
+            err_msg = f"⚠ OpenCode Local Error: {e}"
+            if on_token:
+                on_token(err_msg)
+            return err_msg, ""
 
     if provider_id == "opencode_zen":
         provider_id = "opencode"
@@ -596,7 +755,7 @@ def stream_chat_completion(
     if not info:
         return f"Unknown provider: {provider_id}", ""
 
-    if provider_id not in ("local_gguf", "ollama", "lmstudio", "vllm") and not api_key:
+    if provider_id not in ("local_gguf", "ollama", "lmstudio", "vllm", "opencode_local", "local_opencode") and not api_key:
         err_msg = f"API key required for {info.name}. Please configure your API key with Ctrl+D in /models or in config.json."
         if on_token:
             on_token(err_msg)
@@ -612,6 +771,19 @@ def stream_chat_completion(
     full_text = []
     full_thinking = []
     is_in_thinking = False
+    # Detection by doing, not by guessing from the name. A model that streams
+    # a reasoning channel has just proved it reasons, which is the one fact no
+    # heuristic can supply - and it repairs a cached "no reasoning" verdict.
+    observed_reasoning = [False]
+
+    def _mark_reasoning_observed() -> None:
+        if observed_reasoning[0]:
+            return
+        observed_reasoning[0] = True
+        try:
+            note_reasoning_observed(model_id, provider_id)
+        except Exception:
+            pass
 
     url = f"{info.base_url}/chat/completions"
     headers = {
@@ -629,26 +801,78 @@ def stream_chat_completion(
         headers["Authorization"] = f"Bearer {api_key}"
         headers["x-api-key"] = api_key
 
+    clean_messages = []
+    for m in messages:
+        if isinstance(m, dict):
+            cm = {"role": m.get("role", "user"), "content": m.get("content", "")}
+            if "name" in m:
+                cm["name"] = m["name"]
+            clean_messages.append(cm)
+        else:
+            clean_messages.append(m)
+
     payload: Dict[str, Any] = {
         "model": model_id,
-        "messages": messages,
+        "messages": clean_messages,
         "temperature": params.get("temperature", 0.3),
         "stream": True,
     }
+    # Request token usage statistics in stream chunks (supported by OpenAI, OpenRouter, Groq, Ollama, DeepSeek, etc.)
+    if provider_id not in ("anthropic",):
+        payload["stream_options"] = {"include_usage": True}
+
     mt = params.get("max_tokens", 0)
     if mt and int(mt) > 0:
         payload["max_tokens"] = int(mt)
 
-    if cap.thinking and reasoning_level != "Off":
+    level = normalize_level(reasoning_level)
+    if cap.thinking and level and level != THINKING_OFF:
+        # A local model answers to its own window; everything else to the fixed
+        # ladder. Both come through one call so no call site can pick the wrong
+        # scale for the provider it happens to be serving.
+        budget = budget_for(provider_id, level, cap.context_limit)
+
+        # The budget the user picked is only ever larger than the output we
+        # asked for if we let it be. `max` is 128k, and a 4k response cannot
+        # spend 128k of thinking - the provider rejects the pair rather than
+        # silently truncating, so the request has to fit.
+        if mt and int(mt) > 0:
+            budget = min(budget, max(1024, int(int(mt) * 0.8)))
+
         if cap.param_style == "reasoning_effort":
-            effort = REASONING_EFFORT_MAP.get(reasoning_level, "medium")
-            payload["reasoning_effort"] = effort
+            # `extra` and `max` are our vocabulary, not the API's: it tops out at
+            # `high`, and sending them through is a 400.
+            payload["reasoning_effort"] = clamp_effort(level)
+            # The name alone would throw the number away. Where the provider has
+            # a field for a budget, send it, so the level means what the bar says
+            # it means. Everywhere else it stays ours, and the UI admits it.
+            field = effort_budget_field(provider_id)
+            if field == "__nested_reasoning__":
+                payload["reasoning"] = {"effort": clamp_effort(level),
+                                        "max_tokens": budget}
+            elif field:
+                payload[field] = budget
         elif cap.param_style == "budget_tokens":
-            budget = BUDGET_MAP.get(reasoning_level, 8192)
+            # A numeric ladder, so the top rungs are real here.
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        elif cap.param_style == "chat_template_kwargs":
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": True,
+                "thinking_budget": budget,
+            }
+        # `param_style == "stream_only"` falls through on purpose: the model
+        # reasons on its own and there is no parameter to configure.
 
     try:
         resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60.0)
+        if resp.status_code in (400, 422) and any(k in payload for k in ("stream_options", "thinking", "reasoning_effort", "reasoning", "chat_template_kwargs")):
+            # Some endpoints reject stream_options or custom reasoning fields; retry cleanly
+            payload.pop("stream_options", None)
+            payload.pop("thinking", None)
+            payload.pop("reasoning_effort", None)
+            payload.pop("reasoning", None)
+            payload.pop("chat_template_kwargs", None)
+            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60.0)
         if resp.status_code != 200:
             err_text = resp.text
             clean_err = ""
@@ -695,12 +919,17 @@ def stream_chat_completion(
                 on_token(err_msg)
             return err_msg, ""
 
+        captured_usage: Dict[str, Any] = {}
+
         for line in resp.iter_lines():
             if is_aborted and is_aborted():
                 break
             if not line:
                 continue
-            line_str = line.decode("utf-8")
+            try:
+                line_str = line.decode("utf-8", errors="replace")
+            except Exception:
+                continue
             if not line_str.startswith("data: "):
                 continue
             data_str = line_str[6:].strip()
@@ -709,20 +938,66 @@ def stream_chat_completion(
 
             try:
                 chunk = json.loads(data_str)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-                reasoning_delta = delta.get("reasoning_content")
+                # 1. Capture usage metadata if provided by endpoint (OpenAI, OpenRouter, Groq, Ollama, etc.)
+                raw_usage = chunk.get("usage") or chunk.get("x_groq", {}).get("usage")
+                if not raw_usage and ("prompt_eval_count" in chunk or "eval_count" in chunk):
+                    raw_usage = {
+                        "prompt_tokens": chunk.get("prompt_eval_count", 0),
+                        "completion_tokens": chunk.get("eval_count", 0),
+                        "total_tokens": (chunk.get("prompt_eval_count", 0) or 0) + (chunk.get("eval_count", 0) or 0),
+                    }
+                if not raw_usage:
+                    msg_obj = chunk.get("message") or {}
+                    if isinstance(msg_obj, dict) and "usage" in msg_obj:
+                        raw_usage = msg_obj["usage"]
+                    elif chunk.get("type") == "message_delta" and "usage" in chunk:
+                        raw_usage = chunk["usage"]
+
+                if raw_usage and isinstance(raw_usage, dict):
+                    p_tok = raw_usage.get("prompt_tokens") or raw_usage.get("input_tokens")
+                    c_tok = raw_usage.get("completion_tokens") or raw_usage.get("output_tokens")
+                    t_tok = raw_usage.get("total_tokens")
+                    if p_tok is not None:
+                        captured_usage["prompt_tokens"] = int(p_tok)
+                    if c_tok is not None:
+                        captured_usage["completion_tokens"] = int(c_tok)
+                    if t_tok is not None:
+                        captured_usage["total_tokens"] = int(t_tok)
+                    elif p_tok is not None and c_tok is not None:
+                        captured_usage["total_tokens"] = int(p_tok) + int(c_tok)
+
+                delta = {}
+                choices = chunk.get("choices")
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    first_choice = choices[0]
+                    if isinstance(first_choice, dict):
+                        delta = first_choice.get("delta") or {}
+                        if not delta and "text" in first_choice:
+                            delta = {"content": first_choice.get("text", "")}
+                elif "delta" in chunk and isinstance(chunk["delta"], dict):
+                    delta = chunk["delta"]
+                elif "message" in chunk and isinstance(chunk["message"], dict):
+                    delta = chunk["message"]
+                elif "response" in chunk and isinstance(chunk["response"], str):
+                    delta = {"content": chunk["response"]}
+                elif not raw_usage:
+                    continue
+
+                reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking") or ""
                 if reasoning_delta:
+                    _mark_reasoning_observed()
                     full_thinking.append(reasoning_delta)
                     if on_thinking:
                         on_thinking(reasoning_delta)
                     continue
 
-                content_delta = delta.get("content", "")
+                content_delta = delta.get("content", "") or delta.get("text", "") or ""
                 if not content_delta:
                     continue
 
                 if "<think>" in content_delta:
+                    _mark_reasoning_observed()
                     parts = content_delta.split("<think>", 1)
                     if parts[0] and on_token:
                         full_text.append(parts[0])
@@ -769,10 +1044,27 @@ def stream_chat_completion(
             except Exception:
                 continue
 
+        # If API did not return usage, perform accurate fallback estimation
+        if not captured_usage or not captured_usage.get("completion_tokens"):
+            from .resource_limits import estimate_token_count
+            p_tok = captured_usage.get("prompt_tokens") or estimate_token_count(messages)
+            full_out = "".join(full_text) + "".join(full_thinking)
+            c_tok = estimate_token_count([{"content": full_out}])
+            captured_usage["prompt_tokens"] = p_tok
+            captured_usage["completion_tokens"] = c_tok
+            captured_usage["total_tokens"] = p_tok + c_tok
+            captured_usage["estimated"] = True
+
+        if on_usage:
+            try:
+                on_usage(captured_usage)
+            except Exception:
+                pass
+
     except Exception as e:
         err_msg = f"Connection error: {e}"
         if on_token:
             on_token(err_msg)
-        return err_msg, "".join(full_thinking)
+        return StreamResult(err_msg, "".join(full_thinking), captured_usage)
 
-    return "".join(full_text), "".join(full_thinking)
+    return StreamResult("".join(full_text), "".join(full_thinking), captured_usage)
