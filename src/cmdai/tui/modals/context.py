@@ -11,7 +11,12 @@ from textual.screen import ModalScreen
 from textual.widgets import DirectoryTree, Static
 from textual.widgets.tree import TreeNode
 
-from ...core.capabilities import BUDGET_MAP, get_model_capability
+from ...core.capabilities import (
+    cycle_order,
+    get_model_capability,
+    budget_for,
+    normalize_level,
+)
 from ...core.file_kinds import color_for
 from ...core.settings import get_settings
 
@@ -126,7 +131,10 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
 
         cap = get_model_capability(self.model_id, provider_id=self.provider)
         gen = self.settings.config.get("generation", {})
-        active_reasoning = gen.get("reasoning_level", "Medium")
+        levels = cycle_order(cap.levels) if (cap and cap.thinking) else []
+        active_reasoning = normalize_level(gen.get("reasoning_level")) or (
+            cap.default_level if cap else ""
+        )
 
         lines = [
             f"[dim]Model:[/]  [bold white]{self.model_id}[/] [dim]({self.provider or 'active'})[/dim]",
@@ -140,16 +148,19 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
             "[bold white]Thinking & Reasoning[/]",
         ]
 
-        if cap and cap.thinking:
-            budget = BUDGET_MAP.get(active_reasoning, 8192)
+        if levels:
+            budget = budget_for(
+                self.provider or "", active_reasoning,
+                cap.context_limit if cap else 0,
+            )
             lines.extend([
-                f"  [b #3fb950]•[/] Status:          [b #3fb950]Supported[/]",
-                f"  [b #58a6ff]•[/] Levels:          {', '.join(cap.levels)}",
+                f"  [b #3fb950]•[/] Status:          [b #3fb950]Detected[/]",
+                f"  [b #58a6ff]•[/] Levels:          {', '.join(levels)}",
                 f"  [b #58a6ff]•[/] Active Level:    [b white]{active_reasoning}[/]",
                 f"  [b #58a6ff]•[/] Thinking Budget: [b #bc8cff]{budget:,} tokens[/]",
             ])
         else:
-            lines.append("  [dim]• Status:          Not supported for this model[/dim]")
+            lines.append("  [dim]• Status:          this model does not reason[/dim]")
 
         lines.append(f"\n[bold white]Pinned Files ({len(self.pinned_files)})[/]")
         if not self.pinned_files:

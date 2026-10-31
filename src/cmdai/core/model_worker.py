@@ -243,12 +243,19 @@ class ModelWorker:
                     raise first_err
 
             elapsed = time.time() - t0
+            p_tok = total_toks
+            c_tok = _count_tokens("".join(full_text) + "".join(full_thinking))
             sys.stdout.write(json.dumps({
                 "type": "done",
                 "response": "".join(full_text),
                 "thinking": "".join(full_thinking),
                 "elapsed": elapsed,
                 "aborted": self.abort_requested,
+                "usage": {
+                    "prompt_tokens": p_tok,
+                    "completion_tokens": c_tok,
+                    "total_tokens": p_tok + c_tok,
+                },
             }) + "\n")
             sys.stdout.flush()
 

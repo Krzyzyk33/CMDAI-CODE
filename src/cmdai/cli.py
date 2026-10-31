@@ -34,6 +34,16 @@ if os.path.isdir(SRC_PATH) and SRC_PATH not in sys.path:
 
 from cmdai.core.launcher import install_global_launcher
 from cmdai.core.settings import get_settings
+
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
+try:
+    import cmdai_opencode.patch
+    cmdai_opencode.patch.install(APP_ROOT)
+except Exception:
+    pass
+
 from cmdai.tui.app import CMDAICodeTUI
 
 

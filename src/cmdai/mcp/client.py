@@ -66,6 +66,19 @@ def sanitize_name(name: str) -> str:
     return re.sub(r"\W+", "_", (name or "").strip()).strip("_").lower() or "server"
 
 
+def one_line(text: str, limit: int = 200) -> str:
+    """Flatten a message to one short line.
+
+    A connection failure arrives as a traceback with newlines in it. Pushed
+    into a single list row or a model field it shreds the layout, and into
+    a prompt it reads as several separate problems.
+    """
+    flat = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rstrip() + "…"
+    return flat
+
+
 def qualified_tool_name(server: str, tool: str) -> str:
     """``mcp__<server>__<tool>``, matching Claude Code's convention.
 
@@ -133,6 +146,7 @@ class MCPServer:
         transport: str = "",
         timeout: float = 15.0,
         enabled: bool = True,
+        autostart: bool = True,
     ):
         self.name = sanitize_name(name)
         self.command = command
@@ -143,6 +157,7 @@ class MCPServer:
         self.headers = dict(headers or {})
         self.timeout = float(timeout)
         self.enabled = enabled
+        self.autostart = bool(autostart)
 
         if transport:
             self.transport = transport
@@ -224,7 +239,14 @@ class MCPServer:
     # ------------------------------------------------------------- rpc
 
     def _notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
-        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+        payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        if self.transport == "stdio":
+            self._write(payload)
+        elif self.transport == "http":
+            try:
+                self._http_post(payload, timeout=self.timeout)
+            except Exception as e:
+                self._log(f"[notify error] {e}")
 
     def _serve_server_request(self, msg: Dict[str, Any]) -> None:
         """Answer a server->client request so the server does not hang.
@@ -385,7 +407,7 @@ class MCPServer:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         message = None
         if "text/event-stream" in ctype:
-            message = _first_sse_json(resp.text)
+            message = _first_sse_json(resp.content.decode("utf-8", errors="replace"))
         else:
             try:
                 message = resp.json()
@@ -592,13 +614,45 @@ class MCPClient:
         # Set when the config file exists but could not be read, so callers
         # can say so instead of reporting an empty server list.
         self.load_error = ""
+        # Not every caller wants a writable client (the CLI reads config to
+        # print it). None means "read only", which is what keeps the
+        # /mcp window honest: it offers the Add form only when it can
+        # actually save.
+        self.add_server: Optional[Any] = None
+        self._app_root = ""
 
     # ----------------------------------------------------------- config
 
     def config_file(self, app_root: str = "") -> str:
+        if self.config_path and os.path.exists(self.config_path):
+            return self.config_path
+
+        candidates = []
+        if app_root:
+            candidates.append(os.path.join(app_root, "mcp_config.json"))
+
+        cwd = os.getcwd()
+        candidates.append(os.path.join(cwd, "mcp_config.json"))
+
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        app_install_dir = os.path.dirname(os.path.dirname(os.path.dirname(module_dir)))
+        if app_install_dir:
+            candidates.append(os.path.join(app_install_dir, "mcp_config.json"))
+
+        candidates.append(os.path.expanduser("~/.config/cmdai/mcp_config.json"))
+        candidates.append(os.path.expanduser("~/.cmdai_code/mcp_config.json"))
+
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+
         if self.config_path:
             return self.config_path
-        return os.path.join(app_root or os.getcwd(), "mcp_config.json")
+        if app_root:
+            return os.path.join(app_root, "mcp_config.json")
+        if app_install_dir and os.path.isdir(app_install_dir):
+            return os.path.join(app_install_dir, "mcp_config.json")
+        return os.path.join(cwd, "mcp_config.json")
 
     def load_config(self, app_root: str = "") -> Dict[str, Dict[str, Any]]:
         """Return configured servers keyed by registry name.
@@ -672,6 +726,7 @@ class MCPClient:
             transport=declared,
             timeout=float(cfg.get("timeout") or 15.0),
             enabled=bool(cfg.get("enabled", True)),
+            autostart=bool(cfg.get("autostart", True)),
         )
 
     def configure(self, app_root: str = "") -> List[str]:
@@ -681,13 +736,136 @@ class MCPClient:
         that is configured but not running, and an invalid entry reports as
         "error" instead of silently not existing.
         """
+        self._app_root = app_root
         problems: List[str] = []
         for name, cfg in self.load_config(app_root).items():
             try:
                 self.servers[name] = self._server_from_config(name, cfg)
             except Exception as exc:
                 problems.append(f"{name}: {exc}")
+        if self.add_server is None:
+            # Only offer the in-window Add form when the client can write.
+            self.add_server = self._write_server
         return problems
+
+    def _write_server(self, name: str, entry: Dict[str, Any]) -> bool:
+        key = sanitize_name(name)
+        cfg = self.load_config(self._app_root)
+        cfg[key] = entry
+        if not self.save_config(cfg, self._app_root):
+            return False
+        self.servers[key] = self._server_from_config(key, entry)
+        return True
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        key = sanitize_name(name)
+        cfg = self.load_config(self._app_root)
+        if key not in cfg:
+            return False
+        entry = dict(cfg[key] or {})
+        entry["enabled"] = bool(enabled)
+        cfg[key] = entry
+        if not self.save_config(cfg, self._app_root):
+            return False
+        server = self.servers.get(key)
+        if server is not None:
+            server.enabled = bool(enabled)
+            if not enabled:
+                server.stop()
+        return True
+
+    def set_option(self, name: str, key: str, value: Any) -> bool:
+        """Change one setting of one server.
+
+        A single entry point rather than a method per setting, because the
+        /mcp window offers these as a list of switches and each one used to
+        need its own method. `enabled` is routed through set_enabled
+        because it has to stop the running process, and a switch that
+        reports "on" while the process keeps running is worse than no
+        switch at all.
+        """
+        name = sanitize_name(name)
+        if key == "enabled":
+            return self.set_enabled(name, bool(value))
+        if key == "autostart":
+            entry_key = bool(value)
+        else:
+            entry_key = value
+        cfg = self.load_config(self._app_root)
+        if name not in cfg:
+            return False
+        entry = dict(cfg[name] or {})
+        entry[key] = entry_key
+        cfg[name] = entry
+        if not self.save_config(cfg, self._app_root):
+            return False
+        server = self.servers.get(name)
+        if server is not None and key == "autostart":
+            server.autostart = bool(entry_key)
+        return True
+
+    def get_option(self, name: str, key: str, default: Any = None) -> Any:
+        """One setting of one server, read from the live object where possible."""
+        server = self.servers.get(sanitize_name(name))
+        if server is not None and hasattr(server, key):
+            return getattr(server, key)
+        entry = self.load_config(self._app_root).get(sanitize_name(name))
+        if isinstance(entry, dict) and key in entry:
+            return entry[key]
+        return default
+
+    def remove_server(self, name: str) -> bool:
+        """Drop a server from the config and stop it.
+
+        The process is stopped first. Removing the entry and leaving the
+        server running would keep its tools reachable from a registry that
+        no longer claims it, so the next call would go to something the user
+        believes they deleted.
+        """
+        key = sanitize_name(name)
+        cfg = self.load_config(self._app_root)
+        if key not in cfg:
+            return False
+        server = self.servers.get(key)
+        if server is not None:
+            try:
+                server.stop()
+            except Exception:
+                pass
+        del cfg[key]
+        if not self.save_config(cfg, self._app_root):
+            return False
+        self.servers.pop(key, None)
+        return True
+
+    def rename_server(self, name: str, new_name: str) -> Tuple[bool, str]:
+        """Rename a server, keeping its whole configuration.
+
+        Returns (ok, resulting_name). The name is sanitized, so the result
+        can differ from what was asked for, and the caller is told which one
+        it is rather than being left to guess.
+        """
+        old = sanitize_name(name)
+        new = sanitize_name(new_name)
+        if not new:
+            return False, ""
+        if new == old:
+            return True, old
+        cfg = self.load_config(self._app_root)
+        if old not in cfg:
+            return False, old
+        if new in cfg:
+            return False, new
+        entry = dict(cfg[old] or {})
+        cfg[new] = entry
+        del cfg[old]
+        if not self.save_config(cfg, self._app_root):
+            return False, old
+        server = self.servers.pop(old, None)
+        if server is not None:
+            server.name = new
+            self.servers[new] = server
+        return True, new
 
     def connect_autostart(self, app_root: str = "") -> None:
         """Connect servers marked autostart, in the background.
@@ -705,6 +883,7 @@ class MCPClient:
             server = self.servers.get(name)
             if server is None or not server.enabled:
                 continue
+            server.autostart = bool(cfg.get("autostart", True))
             threading.Thread(
                 target=server.connect, daemon=True, name=f"mcp-{name}"
             ).start()
@@ -734,6 +913,93 @@ class MCPClient:
             server = self.servers[key] = self._server_from_config(key, cfg)
         return server.connect()
 
+    def is_disabled(self, name: str) -> bool:
+        """True when the server is configured but the user switched it off.
+
+        Distinct from "not connected": an off server has no process, no
+        session and no tools, and trying to reach it produces a connection
+        error that looks like a fault. It is not a fault, it is a decision
+        the user made, and the model is told so in those words.
+        """
+        server = self.servers.get(sanitize_name(name))
+        if server is not None:
+            return not server.enabled
+        entry = self.load_config(self._app_root).get(sanitize_name(name))
+        if isinstance(entry, dict):
+            return not bool(entry.get("enabled", True))
+        return False
+
+    def model_servers(self) -> List[Dict[str, Any]]:
+        """The same facts as status_lines(), in fields instead of ASCII.
+
+        status_lines() is built for a person reading a terminal: a mark, a
+        padded name, a padded status, a bracketed note. Handing that to a
+        model costs a turn and invites invented tool names, because the
+        only way to learn what a server offers is to parse a table. This
+        says the same things in a shape a model can act on directly, and
+        it names the reason a server is unusable.
+        """
+        out: List[Dict[str, Any]] = []
+        for name in sorted(self.servers):
+            server = self.servers[name]
+            connected = server.status == "connected"
+            entry: Dict[str, Any] = {
+                "name": name,
+                "enabled": bool(server.enabled),
+                "status": server.status,
+                "connected": connected,
+                "tool_count": len(server.tools) if connected else 0,
+            }
+            if not server.enabled:
+                # Not an error. Wording matters here: a model that reads
+                # "error" retries, apologises, or asks the user to fix
+                # something that is not broken.
+                entry["usable"] = False
+                entry["reason"] = (
+                    "switched off by the user; there is no connection to it and it "
+                    "has no tools. Only the user can turn it on, in the /mcp window. "
+                    "Do not retry and do not guess its tool names."
+                )
+            elif server.status == "error":
+                entry["usable"] = False
+                entry["reason"] = (
+                    f"failed to connect: {one_line(server.error, 200) or 'no detail'}. "
+                    f"The user would have to fix it in the /mcp window."
+                )
+            elif not connected:
+                entry["usable"] = False
+                entry["reason"] = (
+                    "configured but not started yet. It connects on its own at "
+                    "startup; if the user wants it now they can restart it in /mcp."
+                )
+            else:
+                entry["usable"] = True
+                perms = [classify_tool(t) for t in server.tools]
+                entry["tools_by_permission"] = {
+                    "read": perms.count(PERM_READ),
+                    "write": perms.count(PERM_WRITE),
+                    "destructive": perms.count(PERM_DESTRUCTIVE),
+                }
+            out.append(entry)
+        return out
+
+    def server_for_tool_prefix(self, qualified: str) -> Optional[str]:
+        """The configured server a qualified tool name appears to belong to.
+
+        Used only to explain a miss. A model asked for
+        mcp__xph__list_documents should hear "that server is switched off",
+        not "no such tool", because those need different things from the
+        user and only the first one is true.
+        """
+        raw = (qualified or "").strip()
+        if not raw.startswith("mcp__"):
+            return None
+        rest = raw[5:]
+        for name in self.servers:
+            if rest.lower().startswith(name.lower() + "__"):
+                return name
+        return None
+
     def call_tool(self, server: str, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         target = self.servers.get(sanitize_name(server))
         if target is None or target.status != "connected":
@@ -747,9 +1013,26 @@ class MCPClient:
             return {"success": False, "error": str(exc)[:500], "kind": "protocol_error"}
 
     def status_lines(self) -> List[str]:
+        """One flat string per server.
+
+        A server's own status_lines() returns a list, so wrapping those
+        results produced a list of lists and "\n".join() in the TUI raised
+        TypeError on every `/mcp`. Join at the leaf instead of nesting.
+        """
         if not self.servers:
             return []
-        return [self.servers[name].status_lines() for name in sorted(self.servers)]
+        out: List[str] = []
+        for name in sorted(self.servers):
+            try:
+                lines = self.servers[name].status_lines()
+            except Exception as exc:
+                out.append(f"x  {name:<18} error             ({exc})")
+                continue
+            if isinstance(lines, str):
+                out.append(lines)
+            else:
+                out.extend(str(line) for line in lines)
+        return out
 
     def server_names(self) -> List[str]:
         return sorted(self.servers)
@@ -838,15 +1121,19 @@ def _unwrap_result(message: Any) -> Optional[Dict[str, Any]]:
 def _first_sse_json(text: str) -> Optional[Dict[str, Any]]:
     """Pull the first JSON-RPC response out of an SSE body."""
     for block in re.split(r"\n\s*\n", text):
+        lines: List[str] = []
         for line in block.splitlines():
             if line.startswith("data:"):
-                chunk = line[5:].strip()
-                if not chunk or chunk == "[DONE]":
-                    continue
-                try:
-                    return json.loads(chunk)
-                except Exception:
-                    continue
+                lines.append(line[5:].lstrip(" "))
+            elif not line.startswith(("event:", "id:", "retry:")):
+                lines.append(line)
+        chunk = "\n".join(lines).strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            return json.loads(chunk)
+        except Exception:
+            continue
     return None
 
 

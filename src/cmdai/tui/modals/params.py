@@ -7,7 +7,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 from ...core.settings import get_settings
-from ...core.capabilities import get_model_capability
+from ...core.capabilities import cycle_order, get_model_capability, normalize_level
 
 GEN_PARAM_SPECS: List[Tuple[str, str, Any, float, float]] = [
     ("temperature", "temp", float, 0.0, 2.0),
@@ -15,8 +15,8 @@ GEN_PARAM_SPECS: List[Tuple[str, str, Any, float, float]] = [
     ("max_tokens", "maxtok", int, 0, 32768),
     ("repetition_penalty", "rep", float, 1.0, 2.0),
 ]
-
-REASONING_LEVELS = ["Off", "Low", "Medium", "High", "xHigh", "Max"]
+# No list of levels here. They belong to the model, detected per model, and
+# `cycle_order` is the single place that decides their order.
 
 
 class ParamEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
@@ -130,12 +130,15 @@ class ParamsModal(ModalScreen[None]):
             ol.add_option(Option(f"  [b #58a6ff]{key:<22}[/]  {display}", id=f"par_{idx}"))
 
         cap = get_model_capability(self.current_model, self.current_provider)
-        if cap and cap.thinking:
-            r_val = self.gen.get("reasoning_level", cap.default_level or "Medium")
+        levels = cycle_order(cap.levels) if (cap and cap.thinking) else []
+        if levels:
+            r_val = normalize_level(self.gen.get("reasoning_level")) or cap.default_level
             ol.add_option(Option(f"  [b #58a6ff]{'reasoning_level':<22}[/]  [b #3fb950]{r_val}[/]", id="par_reasoning"))
         else:
-            self.gen["reasoning_level"] = "Off"
-            ol.add_option(Option(f"  [dim #8b949e]{'reasoning_level':<22}  Not supported (disabled)[/]", id="par_reasoning", disabled=True))
+            # Detected, not assumed: this model does not reason, so there is no
+            # level to store. The previous one is kept so switching back to a
+            # reasoning model restores what was chosen.
+            ol.add_option(Option(f"  [dim #8b949e]{'reasoning_level':<22}  this model does not reason[/]", id="par_reasoning", disabled=True))
 
         if self._edit_idx is not None:
             ol.highlighted = max(0, min(self._edit_idx, len(GEN_PARAM_SPECS)))
@@ -169,15 +172,15 @@ class ParamsModal(ModalScreen[None]):
             self.app.push_screen(ParamEditScreen(key, current_val, lo, hi, cast), self._on_param_edited)
         else:
             cap = get_model_capability(self.current_model, self.current_provider)
-            if not cap or not cap.thinking:
+            levels = cycle_order(cap.levels) if (cap and cap.thinking) else []
+            if not levels:
                 self.app.notify(
-                    f"Thinking/reasoning is not supported by {self.current_model or 'this model'}",
+                    f"{self.current_model or 'This model'} does not reason",
                     severity="warning",
                     timeout=3.0,
                 )
                 return
-            levels = cap.levels if cap and cap.levels else REASONING_LEVELS
-            curr = self.gen.get("reasoning_level", cap.default_level or "Off")
+            curr = normalize_level(self.gen.get("reasoning_level"))
             next_idx = (levels.index(curr) + 1) % len(levels) if curr in levels else 0
             self.gen["reasoning_level"] = levels[next_idx]
             self.settings.config["generation"] = self.gen

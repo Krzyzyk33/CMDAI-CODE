@@ -162,6 +162,7 @@ class SimpleGGUFLoader:
         on_thinking: Optional[Callable[[str], None]] = None,
         model_filename: Optional[str] = None,
         is_aborted: Optional[Callable[[], bool]] = None,
+        on_usage: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str]:
         if not self._is_loaded:
             target = model_filename or "gemma-4-E4B-it-Q4_0.gguf"
@@ -240,6 +241,12 @@ class SimpleGGUFLoader:
                 elif mtype == "done":
                     resp = msg.get("response", "".join(full_text))
                     think = msg.get("thinking", "".join(full_thinking))
+                    usage = msg.get("usage", {})
+                    if on_usage and usage:
+                        try:
+                            on_usage(usage)
+                        except Exception:
+                            pass
                     return resp, think
                 elif mtype == "error":
                     err = msg.get("error", "Generation error")

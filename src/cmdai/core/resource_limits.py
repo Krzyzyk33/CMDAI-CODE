@@ -12,6 +12,12 @@ except ImportError:
 COMPACTION_THRESHOLD = 0.97
 METADATA_CACHE_FILE = "cache/models_metadata_cache.json"
 
+# Used only when nobody has published a window for the model - not one lookup
+# answered, no file to read, no provider plugin to ask. Named so that the places
+# which display it can say "not known" instead of presenting a guess as a fact,
+# which is what a bare `32_768` in a return statement did.
+FALLBACK_CONTEXT_LIMIT = 32_768
+
 
 def _get_metadata_cache_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -192,6 +198,37 @@ def estimate_model_memory(gguf_path: str, n_ctx: int = 4096) -> Dict[str, float]
     }
 
 
+def published_context_limit(model_id: str, provider_id: str = "") -> int:
+    """The model's real window, as somebody who knows has published it.
+
+    0 means nobody has said. Nothing here guesses: a GGUF's `context_length` read
+    out of the file, models.dev's `limit.context` for an API model, or whatever
+    a provider plugin registered for a server it talks to.
+    """
+    try:
+        from . import model_catalog
+
+        facts = model_catalog.lookup(provider_id, model_id)
+        if facts is not None and facts.context_limit:
+            return int(facts.context_limit)
+    except Exception:
+        pass
+
+    # After the database, because it knows models the catalog has never heard
+    # of: a local server can report its own model's window, and that number came
+    # from the model file rather than from a guess.
+    try:
+        from .capabilities import get_model_capability
+
+        cap = get_model_capability(model_id, provider_id=provider_id)
+        if cap is not None and cap.context_limit:
+            return int(cap.context_limit)
+    except Exception:
+        pass
+
+    return 0
+
+
 def get_dynamic_context_limit(
     model_id: str,
     provider_id: str = "openrouter",
@@ -233,6 +270,18 @@ def get_dynamic_context_limit(
     if model_id.lower() in cache and cache[model_id.lower()].get("context_length"):
         return cache[model_id.lower()]["context_length"]
 
+    # models.dev, and the model file, before OpenRouter.
+    #
+    # The order matters because of what the fallback cost. This used to fall
+    # through to OpenRouter's `/models` and then to a flat 32,768 - and that
+    # number was not only what `/modelinfo` displayed, it was what
+    # `should_summarize` compared against. A model with a 1M window was being
+    # compacted at 32,768 * 0.97, which is 3.2% of its real window: the 97% rule
+    # was right and was being applied to a limit nobody had ever heard of.
+    published = published_context_limit(model_id, provider_id)
+    if published:
+        return published
+
     try:
         import requests
         resp = requests.get("https://openrouter.ai/api/v1/models", timeout=3.0)
@@ -256,7 +305,11 @@ def get_dynamic_context_limit(
     except Exception:
         pass
 
-    return 32_768
+    # 32,768, and it is a guess. Kept rather than dropped because a window is
+    # needed to build a request at all, and a small one is the safe direction to
+    # be wrong in - but it is the *reason* the fallback is not 0, so anything
+    # displaying this number has a way to say so.
+    return FALLBACK_CONTEXT_LIMIT
 
 
 def should_summarize(current_token_count: int, context_limit: int) -> bool:
