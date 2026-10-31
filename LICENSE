@@ -25,3 +25,17 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 This Software utilizes third-party open-source libraries and frameworks which are the intellectual property of their respective copyright holders and are licensed under their respective open-source licenses (such as MIT, Apache-2.0, or BSD). 
 
 Nothing in this License limits, supersedes, or modifies your rights or obligations under the terms of those respective upstream third-party licenses for those specific libraries.
+
+The full list of third-party components, their exact versions, their licences, and the required licence texts are in THIRD_PARTY_NOTICES.md. That file is an integral part of this License and must accompany any redistribution.
+
+For the avoidance of doubt: no clause in this License may revoke, withdraw, or narrow a permission that an upstream third-party author has already granted under their own licence. Sections 2 and 4 apply only to the parts of this distribution that are the copyright of Krzyzyk33.
+
+7. SEPARATE APPLICATIONS
+This repository contains two separately licensed applications:
+
+    (a) The CMDAI application (`src/cmdai`, entry point `cmdai.py`) — licensed under this file.
+
+    (b) CMDAI EDITOR, the code editor (`editor/`, entry point `editor.bat`) — a distinct application, licensed under LICENSE.editor.
+
+The editor imports a small number of modules from the CMDAI application (checkpoint management and the Git / Checkpoints modals) and is therefore not fully standalone. Both applications are covered by this License as a whole; LICENSE.editor additionally applies to the editor.
+

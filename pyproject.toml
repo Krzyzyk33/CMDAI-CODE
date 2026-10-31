@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmdai-code"
-version = "3.0.1a0"
+version = "3.0.4-alpha"
 description = "CMDAI CODE - autonomous terminal coding agent for Windows"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,3 +27,10 @@ Homepage = "https://github.com/Krzyzyk33/CMDAI-CODE"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Both the package under test and the test helpers are imported by path, so a
+# plain `pytest` works from the repo root without an editable install.
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

@@ -1,31 +1,65 @@
-
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyd
 
-models/*.gguf
-models/*.bin
-models/*.zip
-
-logs.db
-logs.db-wal
-logs.db-shm
-backend/*.db
-*.log
-error.txt
-server.log
-
-.env
-.venv
+.venv/
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
+*-venv/
 
-.vscode/
-.idea/
-*.swp
-*.swo
+# Modele GGUF sa duze; katalog ustawia CMDAI_MODELS_DIR albo config["models_dir"].
+models/
+*.gguf
+*.gguf.part
 
-.DS_Store
+.pytest_cache/
+cache/
+.coverage
+htmlcov/
+
+config.json
+# Trzyma tokeny w `env`, wiec nie moze byc sledzony. mcp_config.example.json
+# jest sledzony i pokazuje ksztalt bez sekretow.
+mcp_config.json
+.CMDAISETTINGS.json
+.cmdai_code_project/
+.cmdai/
+conversations/
+app/sessions/*.json
+!app/sessions/.gitkeep
+models/
+logs/
+*.log
+
+# `config.json` jest NASTĘPNIE w `git ls-files`, mimo wpisu powyżej -
+# `.gitignore` działa TYLKO dla plików nieśledzonych. Dopóki plik jest
+# w indeksie, wpisanie klucza API i `git add .` wyśle go do publicznego
+# repo. Jednorazowo wywal go z indeksu:
+#
+#     git rm --cached config.json
+#
+# Szablon struktury jest w config.example.json (w repo). Dziś klucze są
+# puste - sprawdzone także w historii gita.
+
+test_*.svg
+sim_*.log
+scratch/
+
+node_modules/
+*.tgz
+
+# src/**/__pycache__/ lapie juz regula __pycache__/ na gorze
+
+# lokalne zrzuty ekranu (generator: tools/tui_screenshots.py)
+zrzuty/
+zrzuty2/
+
+# edytor jest CZĘŚCIĄ repo - osobną aplikacją, ale w tym samym drzewie.
+# Śmieci edytora łapie `editor/.gitignore` (celowo zdublowane, żeby
+# edytor działał nawet po wyjściu z tego katalogu).
+#
+# Historia: wpis `editor/` był tu do 2026-09-28 i trzymał 104 pliki
+# poza gitem. Wyprostowane.
+/
