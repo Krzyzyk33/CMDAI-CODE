@@ -10,6 +10,16 @@ if SRC_PATH not in sys.path:
 
 from cmdai.core.launcher import install_global_launcher
 from cmdai.core.settings import get_settings
+
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
+try:
+    import cmdai_opencode.patch
+    cmdai_opencode.patch.install(APP_ROOT)
+except Exception:
+    pass
+
 from cmdai.tui.app import CMDAICodeTUI
 
 
@@ -169,10 +179,166 @@ def handle_add_local_model():
     print("    Launch the assistant by running: cmdai.bat\n")
     return 0
 
+def handle_mcp(mcp_args: list) -> int:
+    """Command-line interface for managing Model Context Protocol (MCP) servers."""
+    from cmdai.mcp.client import MCPClient, sanitize_name
+
+    client = MCPClient()
+    cfg_path = client.config_file(APP_ROOT)
+    servers = client.load_config(APP_ROOT)
+
+    if not mcp_args or mcp_args[0] in ("-h", "--help", "help"):
+        print("\n" + "=" * 65)
+        print("  ⌬  CMDAI CODE — Model Context Protocol (MCP)")
+        print("=" * 65 + "\n")
+        print(f"  Plik konfiguracyjny / Config: {cfg_path}\n")
+        print("Użycie / Usage:")
+        print("  cmdai mcp list                  Lista skonfigurowanych serwerów MCP")
+        print("  cmdai mcp add <nazwa> --url <url>   Dodanie serwera HTTP (np. xph-docs)")
+        print("  cmdai mcp add <nazwa> <komenda> [arg...]  Dodanie serwera stdio")
+        print("  cmdai mcp remove <nazwa>        Usunięcie serwera")
+        print("  cmdai mcp enable <nazwa>        Włączenie serwera")
+        print("  cmdai mcp disable <nazwa>       Wyłączenie serwera")
+        print("  cmdai mcp test <nazwa>          Test połączenia i lista narzędzi")
+        print()
+        return 0
+
+    sub = mcp_args[0].lower()
+
+    if sub in ("list", "ls", "status"):
+        print("\n" + "=" * 65)
+        print("  ⌬  CMDAI CODE — Serwery MCP / MCP Servers")
+        print("=" * 65)
+        print(f"  Konfiguracja / Config: {cfg_path}\n")
+        if not servers:
+            print("  [i] Brak skonfigurowanych serwerów MCP.")
+            print("      Dodaj serwer np.: cmdai mcp add xph-docs --url http://127.0.0.1:8765/mcp\n")
+            return 0
+
+        print(f"  {'Nazwa / Name':<18} {'Typ':<8} {'Status/URL/Komenda':<32} {'Autostart':<10}")
+        print("  " + "-" * 70)
+        for name, s in sorted(servers.items()):
+            stype = s.get("type") or ("http" if s.get("url") else "stdio")
+            details = s.get("url") or (s.get("command", "") + " " + " ".join(s.get("args", []))).strip()
+            if len(details) > 30:
+                details = details[:29] + "…"
+            enabled = s.get("enabled", True)
+            auto = "tak" if s.get("autostart", True) else "nie"
+            status_str = f"[{'aktywny' if enabled else 'wyłączony'}] {details}"
+            print(f"  {name:<18} {stype:<8} {status_str:<32} {auto:<10}")
+        print()
+        return 0
+
+    if sub == "add":
+        if len(mcp_args) < 2:
+            print("[!] Użycie: cmdai mcp add <nazwa> [--url <url> | <komenda> [args]]")
+            return 1
+        name = sanitize_name(mcp_args[1])
+        rest = mcp_args[2:]
+        if "--url" in rest:
+            u_idx = rest.index("--url")
+            if u_idx + 1 >= len(rest):
+                print("[!] Brak adresu URL po fladze --url.")
+                return 1
+            url = rest[u_idx + 1]
+            entry = {"type": "http", "url": url, "autostart": True, "enabled": True}
+        elif any(a.startswith("http://") or a.startswith("https://") for a in rest):
+            url = [a for a in rest if a.startswith("http://") or a.startswith("https://")][0]
+            entry = {"type": "http", "url": url, "autostart": True, "enabled": True}
+        else:
+            if not rest:
+                print("[!] Podaj URL (--url http://...) lub komendę (np. npx, python).")
+                return 1
+            cmd = rest[0]
+            c_args = rest[1:]
+            entry = {
+                "type": "stdio",
+                "command": cmd,
+                "args": c_args,
+                "autostart": True,
+                "enabled": True,
+            }
+
+        servers[name] = entry
+        if client.save_config(servers, APP_ROOT):
+            print(f"\n[✔] Pomyślnie dodano serwer MCP '{name}' do konfiguracji: {cfg_path}\n")
+            return 0
+        else:
+            print(f"[!] Błąd zapisu konfiguracji: {client.load_error}")
+            return 1
+
+    if sub in ("remove", "rm", "delete"):
+        if len(mcp_args) < 2:
+            print("[!] Użycie: cmdai mcp remove <nazwa>")
+            return 1
+        name = sanitize_name(mcp_args[1])
+        if name not in servers:
+            print(f"[!] Nie znaleziono serwera '{name}'. Dostępne: {', '.join(servers.keys()) or 'brak'}")
+            return 1
+        del servers[name]
+        if client.save_config(servers, APP_ROOT):
+            print(f"\n[✔] Serwer MCP '{name}' został usunięty z konfiguracji.\n")
+            return 0
+        else:
+            print(f"[!] Błąd zapisu: {client.load_error}")
+            return 1
+
+    if sub in ("enable", "disable"):
+        if len(mcp_args) < 2:
+            print(f"[!] Użycie: cmdai mcp {sub} <nazwa>")
+            return 1
+        name = sanitize_name(mcp_args[1])
+        if name not in servers:
+            print(f"[!] Nie znaleziono serwera '{name}'.")
+            return 1
+        servers[name]["enabled"] = (sub == "enable")
+        if client.save_config(servers, APP_ROOT):
+            state_pl = "włączony" if sub == "enable" else "wyłączony"
+            print(f"\n[✔] Serwer MCP '{name}' został {state_pl}.\n")
+            return 0
+        else:
+            print(f"[!] Błąd zapisu: {client.load_error}")
+            return 1
+
+    if sub in ("test", "check"):
+        if len(mcp_args) < 2:
+            print("[!] Użycie: cmdai mcp test <nazwa>")
+            return 1
+        name = sanitize_name(mcp_args[1])
+        if name not in servers:
+            print(f"[!] Nie znaleziono serwera '{name}'. Dostępne: {', '.join(servers.keys()) or 'brak'}")
+            return 1
+        print(f"\n[*] Łączenie z serwerem MCP '{name}'...")
+        client.configure(APP_ROOT)
+        server = client.servers.get(name)
+        if not server:
+            print("[!] Nie można utworzyć instancji serwera.")
+            return 1
+        ok = server.connect()
+        if ok:
+            print(f"[✔] Połączono pomyślnie z '{name}'!")
+            print(f"    Informacje: {server.server_info.get('name', name)} v{server.server_info.get('version', '?')}")
+            print(f"    Liczba narzędzi: {len(server.tools)}")
+            for t in server.tools:
+                print(f"      - {t.get('name')}: {t.get('description', '')[:60]}")
+            print()
+            server.stop()
+            return 0
+        else:
+            print(f"[!] Błąd połączenia z '{name}': {server.error}\n")
+            return 1
+
+    print(f"[!] Nieznane polecenie mcp: '{sub}'. Wpisz: cmdai mcp help")
+    return 1
+
 
 def main():
     setup_crash_logger()
     try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if hasattr(sys.stderr, "reconfigure"):
@@ -182,6 +348,11 @@ def main():
 
     raw_args = [a.lower() for a in sys.argv[1:]]
     args_joined = " ".join(raw_args)
+
+    if len(raw_args) >= 1 and raw_args[0] == "mcp":
+        sys.exit(handle_mcp(sys.argv[2:]))
+    if len(raw_args) >= 2 and raw_args[0] == "code" and raw_args[1] == "mcp":
+        sys.exit(handle_mcp(sys.argv[3:]))
 
     if "code update" in args_joined or (len(raw_args) >= 1 and raw_args[0] == "update"):
         sys.exit(handle_update())
@@ -222,13 +393,18 @@ def main():
         sys.exit(handle_add_local_model())
 
     if args.command == "editor" or (len(sys.argv) > 1 and sys.argv[1].lower() == "editor"):
-        from cmdai.editor.editor_app import CMDAICodeEditor
+        try:
+            from editor.ui.app import CMDAIEditorApp
+            editor_cls = CMDAIEditorApp
+        except Exception:
+            from cmdai.editor.editor_app import CMDAICodeEditor
+            editor_cls = CMDAICodeEditor
         target_file = args.path or "."
         for a in (sys.argv[2:] if sys.argv[1].lower() == "editor" else sys.argv[1:]):
             if not a.startswith("-") and a.lower() != "editor":
                 target_file = a
                 break
-        app = CMDAICodeEditor(initial_path=os.path.abspath(target_file))
+        app = editor_cls(initial_path=os.path.abspath(target_file))
         app.run()
         return
 
@@ -243,6 +419,7 @@ def main():
 
 \x1b[1mUżycie / Usage:\x1b[0m
   cmdai code [katalog]      Uruchomienie asystenta terminalowego CMDAI CODE
+  cmdai mcp [komenda]       Zarządzanie serwerami MCP (list, add, remove, test)
   cmdai update              Aktualizacja z repozytorium GitHub
   cmdai addlocal            Dodanie lokalnego modelu GGUF
   cmdai editor [plik]       Wbudowany edytor kodu
@@ -264,7 +441,11 @@ def main():
 
     workdir = os.path.abspath(args.path or args.workdir or os.getcwd())
     try:
-        sys.stdout.write("\x1b]11;#000000\x07")
+        os.chdir(workdir)
+    except Exception:
+        pass
+    try:
+        sys.stdout.write("\x1b]11;#0a0a0a\x07")
         sys.stdout.flush()
     except Exception:
         pass

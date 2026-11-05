@@ -52,6 +52,21 @@ def run_file_diagnostics(file_path: str, workdir: Optional[str] = None) -> List[
             except Exception:
                 pass
 
+        if not diagnostics:
+            try:
+                import ast
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                ast.parse(content, filename=file_path)
+            except SyntaxError as e:
+                diagnostics.append({
+                    "source": "syntax",
+                    "message": f"SyntaxError line {e.lineno or 1}: {e.msg}",
+                    "severity": "error"
+                })
+            except Exception:
+                pass
+
     elif ext in (".ts", ".tsx", ".js", ".jsx"):
         if is_tool_available("tsc"):
             try:

@@ -12,6 +12,12 @@ except ImportError:
 COMPACTION_THRESHOLD = 0.97
 METADATA_CACHE_FILE = "cache/models_metadata_cache.json"
 
+# Used only when nobody has published a window for the model - not one lookup
+# answered, no file to read, no provider plugin to ask. Named so that the places
+# which display it can say "not known" instead of presenting a guess as a fact,
+# which is what a bare `32_768` in a return statement did.
+FALLBACK_CONTEXT_LIMIT = 32_768
+
 
 def _get_metadata_cache_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -82,24 +88,17 @@ def _gguf_field_int(field) -> Optional[int]:
         return None
 
 
-def find_local_model_file(model_id: str, models_dir: str = "models", workdir: str = "") -> str:
-    base = os.path.basename(model_id)
-    candidates = [
-        os.path.join(models_dir, model_id) if models_dir else "",
-        os.path.join(models_dir, base) if models_dir else "",
-        os.path.join(workdir, "models", model_id) if workdir else "",
-        os.path.join(workdir, "models", base) if workdir else "",
-        os.path.join("D:/CMDAI CODE/models", model_id),
-        os.path.join("D:/CMDAI CODE/models", base),
-        os.path.join("E:/CMDAI CODE/models", model_id),
-        os.path.join("E:/CMDAI CODE/models", base),
-        model_id,
-        os.path.abspath(model_id),
-    ]
-    for c in candidates:
-        if c and os.path.exists(c) and os.path.isfile(c):
-            return os.path.abspath(c)
-    return ""
+def find_local_model_file(model_id: str, models_dir: str = "", workdir: str = "") -> str:
+    """Find a model file. Delegates to core.model_paths.
+
+    This used to carry its own candidate list, including four hardcoded
+    D:/E:/C: paths under a "CMDAI CODE" name with a space in it. Those
+    stopped matching when the checkout moved to E:\\CMDAI-CODE and the
+    guessing had been dead weight since, hidden behind a candidate that
+    happened to work.
+    """
+    from .model_paths import resolve_model_file
+    return resolve_model_file(model_id, models_dir=models_dir, workdir=workdir)
 
 
 def read_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
@@ -199,12 +198,43 @@ def estimate_model_memory(gguf_path: str, n_ctx: int = 4096) -> Dict[str, float]
     }
 
 
+def published_context_limit(model_id: str, provider_id: str = "") -> int:
+    """The model's real window, as somebody who knows has published it.
+
+    0 means nobody has said. Nothing here guesses: a GGUF's `context_length` read
+    out of the file, models.dev's `limit.context` for an API model, or whatever
+    a provider plugin registered for a server it talks to.
+    """
+    try:
+        from . import model_catalog
+
+        facts = model_catalog.lookup(provider_id, model_id)
+        if facts is not None and facts.context_limit:
+            return int(facts.context_limit)
+    except Exception:
+        pass
+
+    # After the database, because it knows models the catalog has never heard
+    # of: a local server can report its own model's window, and that number came
+    # from the model file rather than from a guess.
+    try:
+        from .capabilities import get_model_capability
+
+        cap = get_model_capability(model_id, provider_id=provider_id)
+        if cap is not None and cap.context_limit:
+            return int(cap.context_limit)
+    except Exception:
+        pass
+
+    return 0
+
+
 def get_dynamic_context_limit(
     model_id: str,
     provider_id: str = "openrouter",
     model_path: Optional[str] = None,
     api_key: str = "",
-    models_dir: str = "models",
+    models_dir: str = "",
     workdir: str = "",
 ) -> int:
     if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)):
@@ -240,6 +270,18 @@ def get_dynamic_context_limit(
     if model_id.lower() in cache and cache[model_id.lower()].get("context_length"):
         return cache[model_id.lower()]["context_length"]
 
+    # models.dev, and the model file, before OpenRouter.
+    #
+    # The order matters because of what the fallback cost. This used to fall
+    # through to OpenRouter's `/models` and then to a flat 32,768 - and that
+    # number was not only what `/modelinfo` displayed, it was what
+    # `should_summarize` compared against. A model with a 1M window was being
+    # compacted at 32,768 * 0.97, which is 3.2% of its real window: the 97% rule
+    # was right and was being applied to a limit nobody had ever heard of.
+    published = published_context_limit(model_id, provider_id)
+    if published:
+        return published
+
     try:
         import requests
         resp = requests.get("https://openrouter.ai/api/v1/models", timeout=3.0)
@@ -263,7 +305,11 @@ def get_dynamic_context_limit(
     except Exception:
         pass
 
-    return 32_768
+    # 32,768, and it is a guess. Kept rather than dropped because a window is
+    # needed to build a request at all, and a small one is the safe direction to
+    # be wrong in - but it is the *reason* the fallback is not 0, so anything
+    # displaying this number has a way to say so.
+    return FALLBACK_CONTEXT_LIMIT
 
 
 def should_summarize(current_token_count: int, context_limit: int) -> bool:
@@ -310,28 +356,25 @@ def build_summarization_payload(
     max_budget_tokens: int = 2500,
 ) -> List[Dict[str, Any]]:
     if not messages:
-        return []
+        raw_msgs = []
+    elif len(messages) <= 4:
+        raw_msgs = [prune_message_for_summarization(m) for m in messages]
+    else:
+        first_m = prune_message_for_summarization(messages[0])
+        recent_m = [prune_message_for_summarization(m, max_content_len=1200) for m in messages[-3:]]
+        middle_m = [prune_message_for_summarization(m, max_content_len=400) for m in messages[1:-3]]
+        raw_msgs = [first_m] + middle_m + recent_m
 
-    first_m = prune_message_for_summarization(messages[0], max_content_len=500)
-    first_toks = estimate_token_count([first_m])
-    history_budget = max(400, max_budget_tokens - 400 - first_toks)
-
-    tail_messages = messages[1:]
-    pruned_tail = []
-    cur_tokens = 0
-    for m in reversed(tail_messages):
-        p = prune_message_for_summarization(m, max_content_len=700)
-        tok = estimate_token_count([p])
-        if cur_tokens + tok <= history_budget:
-            pruned_tail.insert(0, p)
-            cur_tokens += tok
-        else:
-            if history_budget - cur_tokens >= 80:
-                p_short = prune_message_for_summarization(m, max_content_len=200)
-                pruned_tail.insert(0, p_short)
+    pruned_history = []
+    total_tokens = 0
+    for m in reversed(raw_msgs):
+        m_tok = len(str(m.get("content", "")).split())
+        if total_tokens + m_tok <= max_budget_tokens or not pruned_history:
+            pruned_history.insert(0, m)
+            total_tokens += m_tok
+        elif m == raw_msgs[0]:
+            pruned_history.insert(0, prune_message_for_summarization(m, max_content_len=300))
             break
-
-    pruned_history = [first_m] + pruned_tail if tail_messages else [first_m]
 
     lang = detect_conversation_language(messages)
     context_hint = []
@@ -390,7 +433,6 @@ def format_compacted_handoff(
     raw_summary: str = "",
     last_modified_files: Optional[List[str]] = None,
     lang: str = "en",
-    messages: Optional[List[Dict[str, Any]]] = None,
     **kwargs,
 ) -> str:
     import re
@@ -399,31 +441,17 @@ def format_compacted_handoff(
         "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
     ])
     if is_err or not summary:
-        extracted = []
-        if messages:
-            for m in messages:
-                c = str(m.get("content", ""))
-                if m.get("role") == "user" and not c.startswith("[tool:"):
-                    line = c.splitlines()[0][:120].strip()
-                    if line and line not in extracted:
-                        extracted.append(line)
         if lang == "pl":
-            if extracted:
-                summary = "Podsumowanie dotychczasowych celow: " + "; ".join(extracted[:4]) + ".\nDotychczasowe ustalenia i stan kodu zostaly zachowane."
-            else:
-                summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostaly zachowane."
+            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostały zachowane."
         else:
-            if extracted:
-                summary = "Summary of session objectives: " + "; ".join(extracted[:4]) + ".\nSession state and code modifications have been preserved."
-            else:
-                summary = "Previous session state and key code modifications have been preserved."
+            summary = "Previous session state and key code modifications have been preserved."
 
     summary = re.sub(r"^#+\s*CONTEXT COMPACTION STATE HANDOFF\s*", "", summary, flags=re.IGNORECASE).strip()
     summary = re.sub(r"^#+\s*Context Compaction[^\n]*\n*", "", summary, flags=re.IGNORECASE).strip()
     summary = re.sub(r"^●?\s*Conversation Summary[^\n]*\n*", "", summary, flags=re.IGNORECASE).strip()
     if not summary:
         if lang == "pl":
-            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostaly zachowane."
+            summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostały zachowane."
         else:
             summary = "Previous session state and key code modifications have been preserved."
 

@@ -27,35 +27,11 @@ import subprocess
 class SimpleGGUFLoader:
 
     def __init__(self, models_dir: Optional[str] = None):
-        if not models_dir:
-            from .settings import get_settings
-            cfg_dir = get_settings().config.get("models_dir")
-            pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            candidates = [
-                cfg_dir,
-                os.path.abspath("models"),
-                "D:/CMDAI CODE/models",
-                "D:\\CMDAI CODE\\models",
-                "E:/CMDAI CODE/models",
-                "E:\\CMDAI CODE\\models",
-                os.path.join(pkg_root, "models"),
-            ]
-            found_dir = None
-            for cand in candidates:
-                if cand and os.path.exists(cand) and os.path.isdir(cand):
-                    try:
-                        if any(f.endswith(".gguf") for f in os.listdir(cand)):
-                            found_dir = cand
-                            break
-                    except Exception:
-                        pass
-            if not found_dir:
-                for cand in candidates:
-                    if cand and os.path.exists(cand) and os.path.isdir(cand):
-                        found_dir = cand
-                        break
-            models_dir = found_dir or "models"
-        self.models_dir = models_dir
+        from .model_paths import resolve_models_dir
+        # One place decides where models live. This used to try six
+        # candidates, two of them hardcoded under a "CMDAI CODE" path that
+        # no longer exists, and fall back to the bare string "models".
+        self.models_dir = resolve_models_dir(models_dir or "")
         self.current_model_path: Optional[str] = None
         self.current_loader: Optional[str] = None
         self._is_loaded = False
@@ -186,6 +162,7 @@ class SimpleGGUFLoader:
         on_thinking: Optional[Callable[[str], None]] = None,
         model_filename: Optional[str] = None,
         is_aborted: Optional[Callable[[], bool]] = None,
+        on_usage: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str]:
         if not self._is_loaded:
             target = model_filename or "gemma-4-E4B-it-Q4_0.gguf"
@@ -264,6 +241,12 @@ class SimpleGGUFLoader:
                 elif mtype == "done":
                     resp = msg.get("response", "".join(full_text))
                     think = msg.get("thinking", "".join(full_thinking))
+                    usage = msg.get("usage", {})
+                    if on_usage and usage:
+                        try:
+                            on_usage(usage)
+                        except Exception:
+                            pass
                     return resp, think
                 elif mtype == "error":
                     err = msg.get("error", "Generation error")

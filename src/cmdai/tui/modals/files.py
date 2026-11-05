@@ -8,6 +8,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from ...core.file_kinds import color_for
+
 
 class FilePickerModal(ModalScreen[Optional[str]]):
 
@@ -47,13 +49,13 @@ class FilePickerModal(ModalScreen[Optional[str]]):
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Workspace Files (Select to add to context)[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield Input(placeholder="Search files (e.g. app.py, models/)...", id="file-search-input")
             yield OptionList(id="file-picker-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[b #58a6ff]Select[/] enter   [dim]Cancel[/] esc   [dim]↑/↓: navigate[/]", id="modal-footer-left")
+                yield Static("[b #58a6ff]Select[/] enter   [dim]↑/↓: navigate[/]", id="modal-footer-left")
                 cnt = len(self.filtered_files)
                 yield Static(f"[dim]{cnt} file{'s' if cnt != 1 else ''}[/]", id="modal-footer-right")
 
@@ -68,7 +70,15 @@ class FilePickerModal(ModalScreen[Optional[str]]):
             ol.add_option(Option("  [dim](no matching files)[/dim]"))
             return
         for idx, path in enumerate(self.filtered_files[:100]):
-            ol.add_option(Option(f"  [b #58a6ff]•[/]  [white]{path}[/]", id=f"file_{idx}"))
+            color = color_for(path)
+            parent, _sep, name = path.rpartition("/")
+            if parent:
+                ol.add_option(Option(
+                    f"  [{color}]{name}[/]  [dim]{parent}[/]",
+                    id=f"file_{idx}",
+                ))
+            else:
+                ol.add_option(Option(f"  [{color}]{path}[/]", id=f"file_{idx}"))
         if self.filtered_files:
             ol.highlighted = 0
 

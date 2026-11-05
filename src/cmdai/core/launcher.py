@@ -22,24 +22,33 @@ def get_fixed_root() -> str:
 def build_launcher_scripts(project_root: str) -> Dict[str, str]:
     """Build Windows launcher script contents.
 
-    The install-time project_root is only a fallback: at runtime the
-    launcher resolves CMDAI_CODE_ROOT env first, then %USERPROFILE%\\CMDAI-CODE.
+    Which checkout is used, in order: $CMDAI_CODE_ROOT, then the install-time
+    project_root, then %USERPROFILE%\\CMDAI-CODE. The install-time path is
+    deliberately not the first choice: it is a fixed string, and a launcher
+    copied to a second account would otherwise run the first account's
+    checkout along with its config.json and its API keys.
     """
     main_cmd = (
         "@echo off\n"
         "rem CMDAI CODE global launcher (generated). Regen via: cmdai --install-launcher\n"
-        'if not defined CMDAI_CODE_ROOT set "CMDAI_CODE_ROOT=%USERPROFILE%\\CMDAI-CODE"\n'
-        f'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" if exist "{project_root}\\cmdai.py" set "CMDAI_CODE_ROOT={project_root}"\n'
+        f'if not defined CMDAI_CODE_ROOT set "CMDAI_CODE_ROOT={project_root}"\n'
+        'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" set "CMDAI_CODE_ROOT=%USERPROFILE%\\CMDAI-CODE"\n'
         'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" (\n'
         "    echo [ERROR] CMDAI CODE checkout not found. Set CMDAI_CODE_ROOT or reinstall.\n"
         "    exit /b 1\n"
         ")\n"
-        'set "USER_WORKDIR=%CD%"\n'
         'if exist "%CMDAI_CODE_ROOT%\\.venv\\Scripts\\python.exe" (\n'
         '    set "PYTHON_BIN=%CMDAI_CODE_ROOT%\\.venv\\Scripts\\python.exe"\n'
         ") else (\n"
         '    set "PYTHON_BIN=python"\n'
         ")\n"
+        # %CD% carries a trailing backslash on a drive root (D:\), and
+        # "D:\" closes the quote early: cmd hands python `D:"` and swallows the
+        # next argument. `cmdai code` from a drive root then arrived as no
+        # subcommand at all and printed the usage screen. Dropping the final
+        # separator is what CMD's own `pushd` does for the same reason.
+        'set "USER_WORKDIR=%CD%"\n'
+        'if "%USER_WORKDIR:~-1%"=="\\" set "USER_WORKDIR=%USER_WORKDIR:~0,-1%"\n'
         '"%PYTHON_BIN%" "%CMDAI_CODE_ROOT%\\cmdai.py" --workdir "%USER_WORKDIR%" %*\n'
         "exit /b %ERRORLEVEL%\n"
     )

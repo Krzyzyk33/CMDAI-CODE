@@ -15,6 +15,18 @@
     "auto_approve_readonly": true,
     "mode": "auto"
   },
+
+  "permissions": {
+    "read": "allow",
+    "write": "ask",
+    "edit": "ask",
+    "command": {
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "*": "ask"
+    }
+  },
   "server": {
     "enabled": true,
     "port": 8080,

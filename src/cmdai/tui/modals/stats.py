@@ -21,23 +21,25 @@ class StatsModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         tokens_in = self.stats.get("tokens_in", 0)
         tokens_out = self.stats.get("tokens_out", 0)
+        total_tokens = self.stats.get("total_tokens") or (tokens_in + tokens_out)
         tools_run = self.stats.get("tools_run", 0)
         tok_s = self.stats.get("tok_per_sec", 0.0)
 
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("Session Statistics", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield Static(
-                f"[bold white]Total Tokens In:[/]     [#58a6ff]{tokens_in}[/]\n"
-                f"[bold white]Total Tokens Out:[/]    [#58a6ff]{tokens_out}[/]\n"
-                f"[bold white]Avg Speed:[/]           [#58a6ff]{tok_s:.1f} tok/s[/]\n"
-                f"[bold white]Tool Calls Executed:[/] [#58a6ff]{tools_run}[/]\n"
+                f"[bold white]Total Tokens Used:[/]   [bold #58a6ff]{total_tokens}[/]\n"
+                f"[bold white]  • Tokens In (Prompt):[/] [#79c0ff]{tokens_in}[/]\n"
+                f"[bold white]  • Tokens Out (Gen):[/]   [#7ee787]{tokens_out}[/]\n"
+                f"[bold white]Generation Speed:[/]    [#58a6ff]{tok_s:.1f} tok/s[/]\n"
+                f"[bold white]Tool Calls Executed:[/]  [#e6edf3]{tools_run}[/]\n"
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter/esc: Close]")
+                yield Static("enter / esc: Close")
 
     def action_close(self) -> None:
         self.dismiss(None)

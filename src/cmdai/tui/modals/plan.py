@@ -1,5 +1,10 @@
-import os
-from typing import List, Tuple
+"""Clean, minimalist project tasks / TODO checklist modal.
+
+Manages the autonomous agent checklist in-memory and in session state.
+Does NOT create or write CMDAIPLAN.md to disk.
+"""
+
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -10,7 +15,7 @@ from textual.widgets.option_list import Option
 
 
 class PlanModal(ModalScreen[None]):
-    """Clean, minimalist project plan checklist modal (models-style) managing CMDAIPLAN.md."""
+    """Clean, minimalist project tasks / TODO checklist modal."""
 
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),
@@ -20,58 +25,44 @@ class PlanModal(ModalScreen[None]):
         Binding("a", "focus_add", "Add"),
     ]
 
-    def __init__(self, workdir: str = ".", **kwargs):
+    def __init__(
+        self,
+        tasks: Optional[List[Tuple[bool, str]]] = None,
+        on_change: Optional[Callable[[List[Tuple[bool, str]]], None]] = None,
+        workdir: str = ".",
+        **kwargs
+    ):
         super().__init__(**kwargs)
-        self.workdir = os.path.abspath(workdir)
-        self.plan_path = os.path.join(self.workdir, "CMDAIPLAN.md")
-        self.tasks: List[Tuple[bool, str]] = []
-        self._load_plan()
-
-    def _load_plan(self) -> None:
-        self.tasks = []
-        if os.path.exists(self.plan_path):
-            try:
-                with open(self.plan_path, "r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        line_s = line.strip()
-                        if line_s.startswith("- [ ]") or line_s.startswith("* [ ]"):
-                            self.tasks.append((False, line_s[5:].strip()))
-                        elif line_s.startswith("- [x]") or line_s.startswith("- [X]") or line_s.startswith("* [x]"):
-                            self.tasks.append((True, line_s[5:].strip()))
-            except Exception:
-                pass
-
+        self.workdir = workdir
+        self.on_change = on_change
+        self.tasks: List[Tuple[bool, str]] = list(tasks or [])
         if not self.tasks:
             self.tasks = [
                 (False, "Explore project architecture and codebase"),
                 (False, "Implement requested features and enhancements"),
                 (False, "Run automated tests and verify build"),
                 (False, "Review git diff and commit changes"),
-                (False, "Configure terminal code editor in Swift style"),
-                (False, "Test all slash commands and bindings"),
-                (False, "Verify context inspector and memory limits"),
-                (False, "Synchronize updates across E: and D: drives"),
             ]
 
-    def _save_plan(self) -> None:
-        try:
-            lines = ["# CMDAIPLAN\n", "\n## Tasks\n"]
-            for done, title in self.tasks:
-                marker = "x" if done else " "
-                lines.append(f"- [{marker}] {title}\n")
-            with open(self.plan_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-        except Exception:
-            pass
+    def _sync_change(self) -> None:
+        if self.on_change:
+            try:
+                self.on_change(self.tasks)
+            except Exception:
+                pass
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog", classes="plan-modal-dialog"):
             with Horizontal(id="modal-header"):
-                yield Static("[bold white]Project Plan[/]  [dim]CMDAIPLAN.md[/dim]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[bold white]Project Tasks[/]  [dim]TODO[/dim]", id="modal-title")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             yield OptionList(id="plan-list")
-            yield Input(placeholder="Add new task (Enter to save)...", id="plan-new-input")
+            yield Input(
+                placeholder="Add a task manually (Enter to save)...",
+                id="plan-new-input",
+                select_on_focus=False,
+            )
 
             with Horizontal(id="modal-footer"):
                 yield Static("[b #58a6ff]Toggle[/] enter   [b #f85149]Delete[/] del   [dim]Add[/] a", id="modal-footer-left")
@@ -91,7 +82,7 @@ class PlanModal(ModalScreen[None]):
             if done:
                 label = f"  [b #3fb950]●[/]  [dim]{title}[/]"
             else:
-                label = f"  [b #58a6ff]○[/]  [bold white]{title}[/]"
+                label = f"  [#58a6ff]○[/]  [#8b949e]{title}[/]"
             ol.add_option(Option(label, id=f"task_{idx}"))
 
         if prev_highlight is not None and 0 <= prev_highlight < len(self.tasks):
@@ -110,7 +101,7 @@ class PlanModal(ModalScreen[None]):
         val = event.value.strip()
         if val:
             self.tasks.append((False, val))
-            self._save_plan()
+            self._sync_change()
             self._refresh_list()
             event.input.value = ""
             ol = self.query_one("#plan-list", OptionList)
@@ -127,7 +118,7 @@ class PlanModal(ModalScreen[None]):
         if idx is not None and 0 <= idx < len(self.tasks):
             done, title = self.tasks[idx]
             self.tasks[idx] = (not done, title)
-            self._save_plan()
+            self._sync_change()
             self._refresh_list()
 
     def action_delete_task(self) -> None:
@@ -135,13 +126,16 @@ class PlanModal(ModalScreen[None]):
         idx = ol.highlighted
         if idx is not None and 0 <= idx < len(self.tasks):
             self.tasks.pop(idx)
-            self._save_plan()
+            self._sync_change()
             self._refresh_list()
             if self.tasks:
                 ol.highlighted = min(idx, len(self.tasks) - 1)
 
     def action_focus_add(self) -> None:
-        self.query_one("#plan-new-input", Input).focus()
+        try:
+            self.query_one("#plan-new-input", Input).focus()
+        except Exception:
+            pass
 
     def action_dismiss_modal(self) -> None:
-        self.dismiss(None)
+        self.dismiss(self.tasks)

@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -8,22 +9,57 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "models_dir": "models",
     "default_model": "",
     "default_provider": "openrouter",
+    # A subagent may run on a different model than the chat it was spawned
+    # from. Empty means "the same one".
+    #
+    # This exists because inheriting is not always safe. A subagent inherits the
+    # chat's provider, and when that provider is a local bridge the subagent
+    # gets a tool loop instead of a report - the window opens on an empty card
+    # with the task at the bottom and nothing above it, and nothing in the
+    # transcript says why.
+    "subagent_provider": "",
+    "subagent_model": "",
     "generation": {
         "temperature": 0.3,
         "top_p": 0.95,
         "max_tokens": 0,
         "repetition_penalty": 1.1,
-        "reasoning_level": "Medium",
+        # A remembered effort level, not a switch. Whether the model reasons at
+        # all is detected per model, so there is no "off" stored here - an
+        # empty value just means "use whatever the model defaults to".
+        "reasoning_level": "",
     },
     "agent": {
         "enabled": True,
         "max_iterations": 25,
         "auto_approve_readonly": True,
     },
+    "permissions": {
+        "read": "allow",
+        "ls": "allow",
+        "glob": "allow",
+        "search": "allow",
+        "write": "ask",
+        "edit": "ask",
+        "command": {
+            "git status*": "allow",
+            "git diff*": "allow",
+            "git log*": "allow",
+            "*": "ask",
+        },
+    },
     "server": {
         "enabled": True,
         "port": 8080,
         "host": "127.0.0.1",
+    },
+    "updates": {
+        # `auto_update` is a git pull the user did not ask for, so it stays off
+        # until they turn it on. `check_on_start` only reports; it never pulls.
+        "auto_update": False,
+        "check_on_start": True,
+        "interval_hours": 24,
+        "last_check": 0,
     },
     "settings": {
         "confirm_exit": False,
@@ -62,12 +98,17 @@ class SettingsManager:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    merged = dict(DEFAULT_CONFIG)
-                    merged.update(data)
-                    return merged
+                # Deep copy, not dict(): the defaults hold nested blocks
+                # (server, generation, updates), and a shallow copy would hand
+                # every SettingsManager the same dict objects. Saving one
+                # setting would then leak into DEFAULT_CONFIG and into every
+                # other manager built later in the process.
+                merged = copy.deepcopy(DEFAULT_CONFIG)
+                merged.update(data)
+                return merged
             except Exception:
                 pass
-        return dict(DEFAULT_CONFIG)
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     def _load_cmdai_settings(self) -> None:
         if os.path.exists(self.cmdai_settings_path):
@@ -142,6 +183,45 @@ class SettingsManager:
             prov_list.append(clean_id)
             return self.save_config()
         return True
+
+    def get_custom_providers(self) -> Dict[str, Dict[str, Any]]:
+        c_provs = self.config.get("custom_providers", {})
+        if not isinstance(c_provs, dict):
+            return {}
+        return dict(c_provs)
+
+    def add_custom_provider(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str = "",
+        default_model: str = "",
+        provider_id: str = "",
+    ) -> str:
+        if "custom_providers" not in self.config or not isinstance(self.config["custom_providers"], dict):
+            self.config["custom_providers"] = {}
+
+        name_clean = name.strip()
+        if not provider_id:
+            provider_id = re.sub(r'[^a-z0-9_]+', '_', name_clean.lower()).strip('_')
+            if not provider_id:
+                provider_id = f"custom_{int(time.time())}"
+
+        url_clean = base_url.strip().rstrip("/")
+        models = [default_model.strip()] if default_model.strip() else []
+
+        self.config["custom_providers"][provider_id] = {
+            "id": provider_id,
+            "name": name_clean,
+            "base_url": url_clean,
+            "default_models": models,
+        }
+        if api_key.strip():
+            self.set_api_key(provider_id, api_key.strip())
+        if default_model.strip():
+            self.add_custom_model(provider_id, default_model.strip())
+        self.save_config()
+        return provider_id
 
 
 _instance: Optional[SettingsManager] = None

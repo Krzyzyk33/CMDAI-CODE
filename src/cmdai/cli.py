@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import traceback
+from typing import Any, Dict, List
 
 REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
 FIXED_ROOT_NAME = "CMDAI-CODE"
@@ -33,6 +34,16 @@ if os.path.isdir(SRC_PATH) and SRC_PATH not in sys.path:
 
 from cmdai.core.launcher import install_global_launcher
 from cmdai.core.settings import get_settings
+
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
+
+try:
+    import cmdai_opencode.patch
+    cmdai_opencode.patch.install(APP_ROOT)
+except Exception:
+    pass
+
 from cmdai.tui.app import CMDAICodeTUI
 
 
@@ -58,177 +69,296 @@ def setup_crash_logger():
     sys.excepthook = handle_exception
 
 
+_ANIM_MODULE = None
+
+
+def _load_animator():
+    """Load tools/install_anim.py as a module (shared step animation)."""
+    global _ANIM_MODULE
+    if _ANIM_MODULE is not None:
+        return _ANIM_MODULE
+    import importlib.util
+    path = os.path.join(APP_ROOT, "tools", "install_anim.py")
+    spec = importlib.util.spec_from_file_location("install_anim", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _ANIM_MODULE = mod
+    return mod
+
+
+def _animated_step(label, work_fn, min_time=1.0, timeout=300.0, header="", gap=0):
+    """Run work_fn in a background thread while animating the step.
+
+    work_fn returns (status, detail) with status OK/FAIL.
+    Returns (status, detail). Falls back to plain output when the
+    animator module is unavailable.
+    """
+    import tempfile
+    import threading
+    try:
+        anim = _load_animator()
+    except Exception:
+        anim = None
+    fd, flag = tempfile.mkstemp(prefix="cmdai-update-", suffix=".done")
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+    result = {}
+
+    def _work():
+        try:
+            result["status"], result["detail"] = work_fn()
+        except Exception as e:
+            result["status"], result["detail"] = ("FAIL", str(e))
+        try:
+            with open(flag, "w", encoding="utf-8") as f:
+                f.write(result["status"])
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    try:
+        if anim is not None:
+            status = anim.animate(
+                label=label, wait_file=flag,
+                min_time=min_time, timeout=timeout,
+                header=header, gap=gap,
+            )
+        else:
+            print("... " + label + " ...")
+            thread.join(timeout if timeout > 0 else None)
+            status = result.get("status", "TIMEOUT")
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return ("FAIL", "cancelled by user")
+    thread.join(timeout=10)
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+    status = result.get("status", status)
+    return (status, result.get("detail", ""))
+
+
+class _CliReporter:
+    """Draws the update steps in a terminal, the way install.bat does.
+
+    Holds the only animation the update path has ever used. The TUI gets its
+    own reporter over the same `core.updater.run_update`, which is what keeps
+    `cmdai code update` and `/update` behaving identically.
+    """
+
+    def step(self, label, work_fn, min_time=1.0, timeout=300.0, header="", gap=0):
+        return _animated_step(label, work_fn, min_time=min_time, timeout=timeout,
+                              header=header, gap=gap)
+
+    def message(self, text: str) -> None:
+        print(text)
+
+    def finish(self, text: str) -> None:
+        try:
+            _load_animator().print_footer(text)
+        except Exception:
+            print(text)
+
+
 def handle_update():
     """Updates CMDAI CODE from GitHub repository without modifying user's personal config."""
-    import subprocess
+    from cmdai.core.releases import write_pending_notice
+    from cmdai.core.updater import run_update
 
-    def _run(args):
-        return subprocess.run(args, cwd=APP_ROOT, text=True, capture_output=True)
+    result = run_update(APP_ROOT, reporter=_CliReporter(),
+                        on_updated=write_pending_notice)
+    return 0 if result.ok else 1
 
-    print("\n" + "=" * 65)
-    print("  CMDAI CODE - GitHub Repository Update")
-    print("=" * 65 + "\n")
 
-    try:
-        subprocess.check_output(["git", "--version"], stderr=subprocess.DEVNULL)
-    except Exception:
-        print("[!] Error: Git is not installed or not found in system PATH.")
-        print(f"[!] You can re-clone manually: git clone {REPO_URL}")
-        return 1
+def handle_mcp(argv: List[str]):
+    """`cmdai mcp <subcommand>` - manage MCP servers from the command line.
 
-    # Auto-fix: Git "dubious ownership" on Windows (e.g. E:/CMDAI-CODE on a
-    # filesystem that does not record ownership). Add APP_ROOT to global
-    # safe.directory list if missing.
-    try:
-        res = subprocess.run(
-            ["git", "config", "--global", "--get-all", "safe.directory"],
-            text=True, capture_output=True,
-        )
-        existing = (res.stdout or "").splitlines() if res.returncode == 0 else []
-        norm_root = APP_ROOT.replace("\\", "/")
-        norm_existing = [p.strip().replace("\\", "/") for p in existing]
-        if norm_root not in norm_existing and APP_ROOT not in [p.strip() for p in existing]:
-            _add = subprocess.run(
-                ["git", "config", "--global", "--add", "safe.directory", APP_ROOT],
-                text=True, capture_output=True,
-            )
-            if _add.returncode != 0:
-                # Retry with forward-slash form (Git on Windows prefers it).
-                subprocess.run(
-                    ["git", "config", "--global", "--add", "safe.directory", norm_root],
-                    text=True, capture_output=True,
-                )
-    except Exception:
-        pass
+    Servers are added here or by editing mcp_config.json directly. The model
+    has no way to add one: a model that can register its own tool endpoints
+    is a model that can be talked into loading something the user never
+    reviewed. Adding stays a deliberate human action.
+    """
+    from cmdai.mcp.client import MCPClient, sanitize_name
 
-    # Auto-fix: missing upstream tracking (bare `git pull` fails with
-    # "There is no tracking information for the current branch").
-    try:
-        upstream = _run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        if upstream.returncode != 0:
-            branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-            cur = (branch.stdout or "").strip() if branch.returncode == 0 else ""
-            candidates = []
-            if cur and cur != "HEAD":
-                candidates.append(f"origin/{cur}")
-            # Common fallbacks if current branch has no same-name remote.
-            for fallback in ("origin/main", "origin/master"):
-                if fallback not in candidates:
-                    candidates.append(fallback)
-            for cand in candidates:
-                verify = _run(["git", "rev-parse", "--verify", f"refs/remotes/{cand}"])
-                if verify.returncode == 0:
-                    _run(["git", "branch", "--set-upstream-to", cand])
-                    break
-    except Exception:
-        pass
+    client = MCPClient()
+    path = client.config_file(APP_ROOT)
+    sub = (argv[0].lower() if argv else "list")
+    args = argv[1:]
 
-    def _display_version() -> str:
-        try:
-            sys.path.insert(0, os.path.join(APP_ROOT, "src"))
-            from cmdai.core.releases import get_display_version as _gdv
-            ver = (_gdv() or "").strip()
-            if ver and not ver.lower().startswith("v"):
-                ver = f"v{ver}"
-            return ver
-        except Exception:
-            pass
-        try:
-            tag = _run(["git", "describe", "--tags", "--abbrev=0"])
-            ver = (tag.stdout or "").strip() if tag.returncode == 0 else ""
-            if ver and not ver.lower().startswith("v"):
-                ver = f"v{ver}"
-            return ver
-        except Exception:
-            return ""
-
-    ver_before = _display_version()
-
-    print("[*] Pulling latest changes from repository...")
-    try:
-        res = _run(["git", "pull", "--rebase", "--autostash"])
-        pull_text = f"{res.stdout or ''}\n{res.stderr or ''}".strip()
-        # Show only meaningful git lines; hide transport noise.
-        for line in pull_text.splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            low = s.lower()
-            if low.startswith("fetching ") or low.startswith("from http"):
-                continue
-            print(f"    {s}")
-        if res.returncode != 0:
-            combined = f"{res.stdout or ''}\n{res.stderr or ''}"
-            if "dubious ownership" in combined:
-                print(f"[!] Hint: run: git config --global --add safe.directory {APP_ROOT}")
-            elif "no tracking information" in combined:
-                print("[!] Hint: no upstream set. Run: git branch --set-upstream-to=origin/main (or origin/master)")
-            elif "Your local changes" in combined or "would be overwritten" in combined:
-                print("[!] Hint: you have local changes. Run: git stash push -m update-backup, then retry update.")
-            print("[!] Update failed.")
-            return res.returncode
-    except Exception as e:
-        print(f"[!] Error while pulling update: {e}")
-        return 1
-
-    req_path = os.path.join(APP_ROOT, "requirements.txt")
-    if os.path.exists(req_path):
-        print("[*] Synchronizing Python packages...")
-        try:
-            pip = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", req_path,
-                 "--quiet", "--disable-pip-version-check"],
-                cwd=APP_ROOT, text=True, capture_output=True,
-            )
-            pip_text = f"{pip.stdout or ''}\n{pip.stderr or ''}"
-            # Filter pip noise: broken "~" dist warnings and self-version notice.
-            # Real errors (ERROR/Failed) are still shown.
-            interesting = []
-            pip_notice = ""
-            for line in pip_text.splitlines():
-                s = line.strip()
-                if not s:
-                    continue
-                if "Ignoring invalid distribution" in s:
-                    continue
-                if "new release of pip is available" in s:
-                    pip_notice = s
-                    continue
-                if s.startswith("[notice]"):
-                    continue
-                if "to update, run:" in s and "pip install" in s:
-                    continue
-                interesting.append(s)
-            if pip.returncode != 0:
-                for s in interesting[-15:]:
-                    print(f"    {s}")
-                print("[!] Dependency sync failed (see lines above).")
+    if sub in ("list", "ls", "status"):
+        if not os.path.isfile(path):
+            print(f"[i] No MCP config yet at {path}")
+            print("    Add one with:  cmdai mcp add <name> <command> [args...]")
+            print("               or:  cmdai mcp add <name> --url http://127.0.0.1:8765/mcp")
+            return 0
+        print(f"\n[*] {path}\n")
+        cfg = client.load_config(APP_ROOT)
+        if client.load_error:
+            # A file that exists but will not parse must not look the same as
+            # an empty one, or the user goes looking for servers that are
+            # sitting right there in the file.
+            print(f"[!] Could not read the config: {client.load_error}")
+            print("    Common cause: a byte-order mark from PowerShell")
+            print("    `Set-Content -Encoding UTF8`. Rewrite it without:")
+            print('      python -c "import json,io;d=json.load(io.open(r\'')
+            print(f"{path}'" + r''',encoding='utf-8-sig'));io.open(r''')
+            print(f"{path}'" + r''','w',encoding='utf-8').write(json.dumps(d,indent=2))"''')
+            return 1
+        if not cfg:
+            print("[i] Config is empty.")
+            return 0
+        print(f"[*] {len(cfg)} server(s) configured\n")
+        for name in sorted(cfg):
+            entry = cfg[name] or {}
+            kind = "http" if entry.get("url") else "stdio"
+            if entry.get("type"):
+                kind = entry["type"]
+            flag = "" if entry.get("enabled", True) else "  [disabled]"
+            if kind == "stdio":
+                target = " ".join([entry.get("command", "")] + list(entry.get("args") or []))
             else:
-                print("[OK] Dependencies are up to date.")
-                if pip_notice:
-                    print(f"     ({pip_notice})")
-        except Exception:
-            pass
+                target = entry.get("url", "")
+            auto = "" if entry.get("autostart", True) else "  [no autostart]"
+            print(f"  {name}")
+            print(f"      {kind}: {target}{flag}{auto}")
+        print("\n[i] Connect state is reported by the app; run /mcp inside CMDAI CODE.")
+        return 0
 
-    # Refresh release/version cache so hero shows the new tag immediately.
-    ver_after = ver_before
-    try:
-        sys.path.insert(0, os.path.join(APP_ROOT, "src"))
-        from cmdai.core.releases import get_releases as _gr, get_display_version as _gdv2
-        _gr(refresh=True)
-        ver_after = (_gdv2() or "").strip()
-        if ver_after and not ver_after.lower().startswith("v"):
-            ver_after = f"v{ver_after}"
-    except Exception:
-        ver_after = _display_version()
+    if sub == "add":
+        # Split out only the flags this command owns. Stripping every token
+        # starting with "-" would eat the server's own options, so
+        # `cmdai mcp add s python -c "print(1)"` would silently lose "-c".
+        raw = list(args)
+        url = ""
+        env: Dict[str, str] = {}
+        autostart = True
+        enabled = True
+        positional: List[str] = []
 
-    if ver_before and ver_after and ver_before != ver_after:
-        print(f"\n[OK] Updated: {ver_before} -> {ver_after}\n")
-    elif ver_after:
-        print(f"\n[OK] Already up to date ({ver_after}).\n")
-    else:
-        print("\n[OK] CMDAI CODE has been successfully updated!\n")
-    return 0
+        index = 0
+        while index < len(raw):
+            token = raw[index]
+            if token == "--url":
+                if index + 1 >= len(raw):
+                    print("[!] --url needs a value.")
+                    return 2
+                url = raw[index + 1]
+                index += 2
+                continue
+            if token == "--env":
+                if index + 1 >= len(raw) or "=" not in raw[index + 1]:
+                    print("[!] --env needs KEY=value")
+                    return 2
+                key, _, value = raw[index + 1].partition("=")
+                env[key] = value
+                index += 2
+                continue
+            if token == "--no-autostart":
+                autostart = False
+                index += 1
+                continue
+            if token == "--disabled":
+                enabled = False
+                index += 1
+                continue
+            positional.append(token)
+            index += 1
+
+        if not positional:
+            print("[!] Usage: cmdai mcp add <name> <command> [args...]")
+            print("    or:     cmdai mcp add <name> --url <url>")
+            return 2
+
+        name = sanitize_name(positional[0])
+        if name == "server":
+            print(f"[!] '{positional[0]}' is not a usable server name.")
+            return 2
+        cfg = client.load_config(APP_ROOT)
+        if name in cfg:
+            print(f"[!] '{name}' already exists. Remove it first: cmdai mcp remove {name}")
+            return 2
+
+        rest = positional[1:]
+        entry: Dict[str, Any] = {}
+        if url:
+            if rest:
+                print("[!] Give either --url or a command, not both.")
+                return 2
+            entry = {"type": "http", "url": url}
+        elif rest:
+            entry = {"command": rest[0], "args": rest[1:]}
+        else:
+            print("[!] Give either a command to run or --url <url>.")
+            print("    Usage: cmdai mcp add <name> <command> [args...]")
+            print("           cmdai mcp add <name> --url <url>")
+            return 2
+
+        if env:
+            entry["env"] = env
+        if not autostart:
+            entry["autostart"] = False
+        if not enabled:
+            entry["enabled"] = False
+
+        cfg[name] = entry
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] Added '{name}' to {path}")
+        if name != positional[0]:
+            print(f"     stored as '{name}' (tool names use underscores)")
+        if env:
+            print("     Values written as ${VAR} are expanded at launch, so tokens can")
+            print("     stay in your environment instead of this file.")
+        return 0
+
+    if sub in ("remove", "rm", "delete"):
+        if not args:
+            print("[!] Usage: cmdai mcp remove <name>")
+            return 2
+        name = sanitize_name(args[0])
+        cfg = client.load_config(APP_ROOT)
+        if name not in cfg:
+            known = ", ".join(sorted(cfg)) or "(none)"
+            print(f"[!] No server named '{name}'. Configured: {known}")
+            return 2
+        cfg.pop(name)
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] Removed '{name}'")
+        return 0
+
+    if sub in ("enable", "disable"):
+        if not args:
+            print(f"[!] Usage: cmdai mcp {sub} <name>")
+            return 2
+        name = sanitize_name(args[0])
+        cfg = client.load_config(APP_ROOT)
+        if name not in cfg:
+            known = ", ".join(sorted(cfg)) or "(none)"
+            print(f"[!] No server named '{name}'. Configured: {known}")
+            return 2
+        entry = cfg[name] or {}
+        entry["enabled"] = (sub == "enable")
+        cfg[name] = entry
+        if not client.save_config(cfg, APP_ROOT):
+            print(f"[!] Could not write {path}")
+            return 1
+        print(f"[OK] '{name}' is now {sub}d")
+        return 0
+
+    print(f"[!] Unknown: cmdai mcp {sub}")
+    print("    Subcommands: list, add, remove, enable, disable")
+    return 2
 
 
 def handle_add_local_model():
@@ -279,7 +409,11 @@ def handle_add_local_model():
         return 0
 
     model_filename = os.path.basename(selected_file)
-    models_dir = os.path.join(APP_ROOT, "models")
+    from cmdai.core.model_paths import resolve_models_dir
+    # Was hardcoded to APP_ROOT/models, ignoring both CMDAI_MODELS_DIR and
+    # config["models_dir"] - so a user who configured a different directory
+    # had `cmdai addlocal` drop the model somewhere the loader would not look.
+    models_dir = resolve_models_dir("")
     os.makedirs(models_dir, exist_ok=True)
     dest_path = os.path.join(models_dir, model_filename)
 
@@ -326,6 +460,151 @@ def handle_add_local_model():
     return 0
 
 
+CLI_HELP = """
+  [bold]Usage[/]
+    cmdai code [target]            launch the app (default)
+    cmdai code help | -h | --help  show this help
+    cmdai editor [folder]          CMDAI EDITOR: pick/create a project,
+                                   or open <folder> right away
+    cmdai run <prompt>             headless run: autonomous agent execution
+    cmdai code update              update from GitHub
+    cmdai addlocal                 add a local model (.gguf)
+
+  [bold]Options[/]
+    --workdir <path>     working directory (default: current)
+    --provider <id>      model provider, e.g. local_gguf, openrouter
+    --model <id>         model, e.g. gemma-4-E4B-it-Q4_0.gguf
+    --install-launcher   install the cmdai shortcut in PATH
+
+  [bold]In-app commands[/]
+    /help                every slash command with descriptions
+    /mode                auto / plan / code
+    /model               pick a model
+    /git                 git window in a new terminal
+    /diff                review working changes
+    /plan, /tasks        task checklist & autonomous TODO manager
+    /bg                  background tasks & subagents manager (Ctrl+B)
+    /editor              code editor in a new window
+    /update              pull the latest code (same as this command)
+    /updatesettings      automatic updates on / off / check interval
+    /changelog           GitHub releases (>= v3.0-alpha)
+
+  [dim]{repo}[/]
+"""
+
+
+def _cmdaieditor_main() -> str:
+    """Sciezka do `editor/main.py` albo `src/cmdai/editor/main.py`."""
+    korzen = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    main_py = os.path.join(korzen, "editor", "main.py")
+    if os.path.isfile(main_py):
+        return main_py
+    pkg_main = os.path.join(os.path.dirname(os.path.abspath(__file__)), "editor", "main.py")
+    if os.path.isfile(pkg_main):
+        return pkg_main
+    return ""
+
+
+def launch_cmdaieditor(args: list) -> int:
+    """`cmdai editor [folder]` - uruchamia edytor CMDAI.
+
+    Zwraca kod wyjścia procesu albo 1, gdy nie da się uruchomić.
+    """
+    main_py = _cmdaieditor_main()
+    if not main_py:
+        print("CMDAI EDITOR not found: expected editor/main.py next to src/.",
+              file=sys.stderr)
+        return 1
+
+    # Ten sam interpreter, ktory uruchomił `cmdai`. Dzięki temu
+    # edytor dostaje te same pakiety co aplikacja (a jego
+    # `requirements-editor.txt` jest podzbiorem `requirements.txt`).
+    polecenie = [sys.executable, main_py, *[str(a) for a in args if str(a)]]
+    try:
+        import subprocess
+
+        # Bez `shell=True` - argumenty zostaja argumentami, a nazwa
+        # folderu ze spacja albo cudzysłowem nie robi sie komenda.
+        return subprocess.call(polecenie)
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        print(f"Cannot start CMDAI EDITOR: {exc}", file=sys.stderr)
+        return 1
+
+
+def print_cli_help() -> None:
+    from .core.branding import get_hero_logo, get_plain_logo
+
+    logo = get_hero_logo()
+    # The ASCII logo already spells out CMDAI CODE, so only the tagline goes
+    # under it - centred against the logo width instead of hardcoded spaces.
+    plain_lines = get_plain_logo().splitlines()
+    width = max((len(l) for l in plain_lines), default=0)
+    tagline = "Next-gen Terminal Code Agent"
+    pad = " " * max(0, (width - len(tagline)) // 2)
+    header = f"\n{pad}[bold white]{tagline}[/]\n"
+    body = CLI_HELP.format(repo=REPO_URL)
+    try:
+        from rich.console import Console
+
+        console = Console(highlight=False)
+        for line in logo.splitlines():
+            console.print(line)
+        console.print(header, markup=True, highlight=False)
+        console.print(body, markup=True, highlight=False)
+    except Exception:
+        print(get_plain_logo())
+        print("\n" + tagline.center(width))
+        print(body)
+
+
+# Flags that consume the next argument. Everything else starting with "-" is
+# a switch and takes no value.
+_VALUE_FLAGS = {"--workdir", "--provider", "--model"}
+
+_HELP_TOKENS = ("help", "-h", "--help", "-?", "/?")
+
+
+def _bare_words(argv: List[str]) -> List[str]:
+    """The positional words in the arguments, in order.
+
+    A subcommand is never reliably at position 0. The global launcher
+    (`cmdai.cmd`) and the npm wrapper (`bin/cmdai.js`) both inject
+    `--workdir <path>` ahead of whatever the user typed, so `cmdai update`,
+    `cmdai code update` and `npx cmdai-code update` all arrive differently. The
+    old `raw_args[0] == "update"` only ever matched one of those spellings, and
+    the npm path fell through to argparse and tried to launch the TUI instead of
+    updating.
+
+    Flag values are skipped, or a directory called `update` would read as the
+    update command.
+    """
+    words: List[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        low = str(arg).lower()
+        if low.startswith("-"):
+            if "=" not in low and low in _VALUE_FLAGS:
+                skip_next = True
+            continue
+        words.append(low)
+    return words
+
+
+def _editor_target_args(argv: List[str]) -> List[str]:
+    """Words meant for the editor: no flags, no flag values, no subcommand.
+
+    `editor/main.py` is a separate application with its own options, so the
+    launcher's own `--workdir` must not be forwarded to it.
+    """
+    return [a for a in _bare_words(argv) if a not in ("editor", "code", "launch")]
+
+
 def main():
     setup_crash_logger()
     # Windows PL console (cp1250) can't encode box glyphs — force UTF-8 output.
@@ -338,15 +617,33 @@ def main():
         pass
 
     raw_args = [a.lower() for a in sys.argv[1:]]
-    args_joined = " ".join(raw_args)
+    words = _bare_words(sys.argv[1:])
+    first = words[0] if words else ""
 
-    if "code update" in args_joined or (len(raw_args) >= 1 and raw_args[0] == "update"):
+    # `help` / `-h` / `--help` print the CMDAI CODE help. Handled before
+    # argparse so it never falls through to its own "usage: cmdai.py" output.
+    # Both `cmdai editor` and `cmdai code editor` mean the editor, and that
+    # application handles its own `--help`; the app help must not swallow it.
+    # Only the first two words are considered, so a `code`/`launch` prefix in
+    # front of `editor` is skipped without letting a later argument disable the
+    # app help.
+    editor_early = bool(words[:2]) and "editor" in words[:2]
+    if not editor_early and any(a in _HELP_TOKENS for a in raw_args):
+        print_cli_help()
+        return
+
+    if "update" in words:
         sys.exit(handle_update())
 
-    if "code addlocal" in args_joined or "addlocal" in args_joined or "add-model" in args_joined:
+    if "addlocal" in words or "add-model" in words:
         sys.exit(handle_add_local_model())
 
-    parser = argparse.ArgumentParser(description="CMDAI CODE - Next-gen Terminal Code Agent")
+    if "mcp" in words:
+        index = sys.argv[1:].index("mcp")
+        sys.exit(handle_mcp(sys.argv[index + 2:]))
+
+    parser = argparse.ArgumentParser(prog="cmdai code", add_help=False,
+                                     description="CMDAI CODE - Next-gen Terminal Code Agent")
     parser.add_argument("command", nargs="?", default="launch", help="Command (code, launch)")
     parser.add_argument("--workdir", default=os.getcwd(), help="Target project working directory")
     parser.add_argument("--provider", default="", help="LLM Provider ID")
@@ -363,16 +660,56 @@ def main():
     except Exception:
         pass
 
-    if args.command == "editor" or (len(sys.argv) > 1 and sys.argv[1].lower() == "editor"):
-        from cmdai.editor.editor_app import CMDAICodeEditor
-        target_file = "."
-        for a in (sys.argv[2:] if sys.argv[1].lower() == "editor" else sys.argv[1:]):
-            if not a.startswith("-") and a.lower() != "editor":
-                target_file = a
-                break
-        app = CMDAICodeEditor(initial_path=os.path.abspath(target_file))
-        app.run()
-        return
+    # `cmdai editor` -> EDYTOR CMDAI (osobna aplikacja w `editor/`).
+    #
+    # To jest DODATKOWA gałąź, nie zamiana. Gałąź poniżej
+    # (`if "editor" in raw_args`) obsługuje `cmdai code editor` i
+    # celowo zostaje nietknięta - to inna aplikacja, inny kod
+    # (`cmdai.editor.editor_app`), inne zachowanie. Użytkownik
+    # wyraźnie poprosił, żeby CMDAI CODE było niezależne.
+    #
+    # Uruchamiamy `editor/main.py` jako PROCES POTOMNY w tym samym
+    # terminalu, a nie `import` - edytor ma własny `main()`,
+    # własne ustawienia kodowania (SetConsoleOutputCP) i własny
+    # `sys.path`. `import` przeplatałby te trzy rzeczy z CLI.
+    if first == "run" or args.command == "run":
+        run_args = [a for a in sys.argv[1:] if a != "run" and a != "code" and not a.startswith("--")]
+        prompt = " ".join(run_args).strip()
+        if not prompt:
+            print("Usage: cmdai run <prompt>")
+            sys.exit(1)
+        from .core.session_runtime import SessionRuntime
+        workdir = os.path.abspath(args.workdir)
+        print(f"\n[CMDAI HEADLESS RUN] Target workspace: {workdir}")
+        print(f"Task: {prompt}\n")
+        runtime = SessionRuntime(
+            workdir=workdir,
+            provider=args.provider,
+            model=args.model,
+        )
+        def _cli_token(t):
+            sys.stdout.write(t)
+            sys.stdout.flush()
+        def _cli_tool_start(name, t_args):
+            print(f"\n>> Executing tool [{name}]...")
+        def _cli_tool_finish(name, t_args, res):
+            status = "OK" if res.get("success", True) else "FAILED"
+            print(f">> Finished tool [{name}]: {status}\n")
+
+        runtime.run_turn(
+            user_prompt=prompt,
+            on_token=_cli_token,
+            on_tool_start=_cli_tool_start,
+            on_tool_finish=_cli_tool_finish,
+        )
+        print("\n\n[TASK COMPLETED]")
+        sys.exit(0)
+
+    if first == "editor":
+        sys.exit(launch_cmdaieditor(_editor_target_args(sys.argv[1:])))
+
+    if "editor" in words:
+        sys.exit(launch_cmdaieditor(_editor_target_args(sys.argv[1:])))
 
     settings = get_settings()
     if args.provider:

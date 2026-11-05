@@ -11,11 +11,24 @@ from textual.screen import ModalScreen
 from textual.widgets import DirectoryTree, Static
 from textual.widgets.tree import TreeNode
 
-from ...core.capabilities import BUDGET_MAP, get_model_capability
+from ...core.capabilities import (
+    cycle_order,
+    get_model_capability,
+    budget_for,
+    normalize_level,
+)
+from ...core.file_kinds import color_for
 from ...core.settings import get_settings
 
 
 class ContextDirectoryTree(DirectoryTree):
+
+    # Textual's DirectoryTree ships emoji icons (U+1F4C1 / U+1F4C2 / U+1F4C4),
+    # which most terminal fonts render as boxes or ticks. Plain geometric
+    # glyphs keep the tree readable everywhere.
+    ICON_NODE = "▸ "
+    ICON_NODE_EXPANDED = "▾ "
+    ICON_FILE = "· "
 
     BINDINGS = [
         Binding("space", "toggle_pin", "Toggle Pin", priority=True),
@@ -45,6 +58,16 @@ class ContextDirectoryTree(DirectoryTree):
 
     def render_label(self, node: TreeNode, base_style: Style, style: Style) -> Text:
         text = super().render_label(node, base_style, style)
+        # Folder / file names get the same per-type colors as the file picker.
+        try:
+            path = getattr(getattr(node.data, "path", None), "name", None)
+            if path:
+                if node.data.path.is_dir():
+                    text.stylize(Style(color="#58a6ff", bold=True))
+                else:
+                    text.stylize(Style(color=color_for(path)))
+        except Exception:
+            pass
         if node.data and hasattr(node.data, "path") and node.data.path.is_file():
             try:
                 rel = os.path.relpath(str(node.data.path), str(self.workdir_path)).replace("\\", "/")
@@ -108,7 +131,10 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
 
         cap = get_model_capability(self.model_id, provider_id=self.provider)
         gen = self.settings.config.get("generation", {})
-        active_reasoning = gen.get("reasoning_level", "Medium")
+        levels = cycle_order(cap.levels) if (cap and cap.thinking) else []
+        active_reasoning = normalize_level(gen.get("reasoning_level")) or (
+            cap.default_level if cap else ""
+        )
 
         lines = [
             f"[dim]Model:[/]  [bold white]{self.model_id}[/] [dim]({self.provider or 'active'})[/dim]",
@@ -122,16 +148,19 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
             "[bold white]Thinking & Reasoning[/]",
         ]
 
-        if cap and cap.thinking:
-            budget = BUDGET_MAP.get(active_reasoning, 8192)
+        if levels:
+            budget = budget_for(
+                self.provider or "", active_reasoning,
+                cap.context_limit if cap else 0,
+            )
             lines.extend([
-                f"  [b #3fb950]•[/] Status:          [b #3fb950]Supported[/]",
-                f"  [b #58a6ff]•[/] Levels:          {', '.join(cap.levels)}",
+                f"  [b #3fb950]•[/] Status:          [b #3fb950]Detected[/]",
+                f"  [b #58a6ff]•[/] Levels:          {', '.join(levels)}",
                 f"  [b #58a6ff]•[/] Active Level:    [b white]{active_reasoning}[/]",
                 f"  [b #58a6ff]•[/] Thinking Budget: [b #bc8cff]{budget:,} tokens[/]",
             ])
         else:
-            lines.append("  [dim]• Status:          Not supported for this model[/dim]")
+            lines.append("  [dim]• Status:          this model does not reason[/dim]")
 
         lines.append(f"\n[bold white]Pinned Files ({len(self.pinned_files)})[/]")
         if not self.pinned_files:
@@ -148,7 +177,7 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
         with Vertical(id="modal-dialog", classes="context-modal-dialog"):
             with Horizontal(id="modal-header"):
                 yield Static("[bold white]Context Window Inspector & Workspace Picker[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             with Horizontal(id="context-split-container"):
                 with VerticalScroll(id="context-info-sidebar"):

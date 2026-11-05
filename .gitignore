@@ -27,3 +27,5 @@ logs/
 test_*.svg
 sim_*.log
 scratch/
+editor/icons/font/*.ttf
+editor/icons/font/glyph_map.json

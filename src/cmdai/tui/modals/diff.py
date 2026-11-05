@@ -49,72 +49,21 @@ class DiffModal(ModalScreen[None]):
 
     def _load_git_diffs(self) -> None:
         try:
-            res = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self.workdir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-            )
-            if res.returncode == 0:
-                for line in res.stdout.splitlines():
-                    if not line.strip():
-                        continue
-                    status = line[:2]
-                    path = line[2:].strip().strip('"')
-                    self.file_list.append(path)
-                    self.file_status[path] = status
+            from ...core.project_scope import compute_single_file_diff, list_safe_changed_files
 
-            diff_res = subprocess.run(
-                ["git", "diff", "HEAD"],
-                cwd=self.workdir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-            )
-            raw_diff = diff_res.stdout
-            if not raw_diff:
-                diff_res2 = subprocess.run(
-                    ["git", "diff"],
-                    cwd=self.workdir,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=5,
-                )
-                raw_diff = diff_res2.stdout
-
-            current_file = None
-            current_lines = []
-            for line in raw_diff.splitlines():
-                if line.startswith("diff --git"):
-                    if current_file and current_lines:
-                        self.files_data[current_file] = "\n".join(current_lines)
-                    parts = line.split(" b/")
-                    current_file = parts[-1] if len(parts) > 1 else "unknown"
-                    current_lines = [line]
-                else:
-                    if current_file:
-                        current_lines.append(line)
-            if current_file and current_lines:
-                self.files_data[current_file] = "\n".join(current_lines)
-
-            for f in self.file_list:
-                if f not in self.files_data:
-                    full_p = os.path.join(self.workdir, f)
-                    if os.path.isfile(full_p):
-                        try:
-                            with open(full_p, "r", encoding="utf-8", errors="replace") as fp:
-                                content = fp.read()
-                            lines = [f"+{l}" for l in content.splitlines()]
-                            self.files_data[f] = "[Untracked new file]\n" + "\n".join(lines[:300])
-                        except Exception:
-                            self.files_data[f] = "(Unable to read file content)"
+            safe_files = list_safe_changed_files(self.workdir)
+            for rel_p, status in safe_files:
+                self.file_list.append(rel_p)
+                self.file_status[rel_p] = status
+                full_p = os.path.join(self.workdir, rel_p)
+                diff_info = compute_single_file_diff(full_p, workdir=self.workdir)
+                diff_txt = str(diff_info.get("diff_text", ""))
+                if diff_txt:
+                    self.files_data[rel_p] = diff_txt
+                elif os.path.isfile(full_p):
+                    curr = str(diff_info.get("current_text", ""))
+                    lines = [f"+{l}" for l in curr.splitlines()]
+                    self.files_data[rel_p] = "[New / Untracked file]\n" + "\n".join(lines[:300])
         except Exception:
             pass
 
@@ -139,9 +88,12 @@ class DiffModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog", classes="diff-modal-dialog"):
             with Horizontal(id="modal-header"):
-                title = self.single_title or "Working Changes (Git Diff)"
+                if self.is_single_edit:
+                    title = self.single_title or "Git Changes"
+                else:
+                    title = "Git Changes · review only"
                 yield Static(f"[bold white]{title}[/]", id="modal-title")
-                yield Static("[esc]", id="modal-esc")
+                yield Static("[dim]esc[/]", id="modal-esc")
 
             with Horizontal(id="diff-split-container"):
                 with Vertical(id="diff-files-sidebar"):
@@ -159,20 +111,17 @@ class DiffModal(ModalScreen[None]):
                     yield Static("", id="diff-preview-header")
                     yield Static("", id="diff-content-body")
 
-            with Horizontal(id="diff-action-bar"):
-                if self.is_single_edit:
-                    yield Static("[bold #7ee787]●[/] [dim]Allow this edit?[/dim]", id="diff-action-hint")
-                    yield Button("Allow (y)", id="diff-commit-btn", variant="success")
-                    yield Button("Reject (n)", id="diff-reject-btn", variant="error")
-                else:
-                    yield Static("[bold #58a6ff]●[/] [dim]Ready to commit changes?[/dim]", id="diff-action-hint")
-                    yield Button("Commit Changes (c)", id="diff-commit-btn", variant="success")
-
             with Horizontal(id="modal-footer"):
                 if self.is_single_edit:
                     yield Static("[b #3fb950]Allow[/] y/Enter   [b #f85149]Reject[/] n/Esc   [b #58a6ff]Select file[/] ↑/↓", id="modal-footer-left")
                 else:
-                    yield Static("[b #3fb950]Commit[/] c / click button   [b #58a6ff]Select file[/] ↑/↓   [dim]Close[/] esc", id="modal-footer-left")
+                    yield Static("[b #3fb950]Commit[/] c / click button   [b #58a6ff]Select file[/] ↑/↓   [dim]opens the commit window[/dim]", id="modal-footer-left")
+                with Horizontal(id="diff-footer-actions"):
+                    if self.is_single_edit:
+                        yield Button("Allow", id="diff-commit-btn", variant="success")
+                        yield Button("Reject", id="diff-reject-btn", variant="error")
+                    else:
+                        yield Button("Commit Changes", id="diff-commit-btn", variant="success")
                 cnt = len(self.file_list)
                 yield Static(f"[dim]{cnt} changed file{'s' if cnt != 1 else ''}[/]", id="modal-footer-right")
 
