@@ -46,27 +46,32 @@ No Git or Node.js required. Automatically downloads, configures, and launches th
 irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/install.ps1 | iex
 ```
 
-### 2. NPX / NPM (Node.js Developers)
-Run instantly without prior setup:
+### 2. NPX (Run Instantly)
+Execute directly from GitHub without prior installation:
 ```bash
 npx github:Krzyzyk33/CMDAI-CODE
 ```
-Or install globally via npm:
+
+### 3. NPM (Global Installation)
+Install globally on your machine using npm:
 ```bash
 npm install -g github:Krzyzyk33/CMDAI-CODE
 ```
 
-### 3. PIP / PIPX (Python Developers)
-Install directly from GitHub:
+### 4. PIP (Python Package)
+Install directly into your Python environment:
 ```bash
 pip install git+https://github.com/Krzyzyk33/CMDAI-CODE.git
 ```
-Or run in an isolated environment with `pipx`:
+
+### 5. PIPX (Isolated Environment)
+Run in an isolated Python application container:
 ```bash
 pipx run --spec git+https://github.com/Krzyzyk33/CMDAI-CODE.git cmdai code
 ```
 
-### 4. Git Clone (Manual Setup)
+### 6. Git Clone (Manual Setup)
+Clone the repository and run the local launcher:
 ```powershell
 git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
 cd CMDAI-CODE
