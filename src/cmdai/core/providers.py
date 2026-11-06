@@ -6,7 +6,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 from .capabilities import (
     THINKING_OFF,
     budget_for,
@@ -564,6 +567,9 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
         # while the list is sitting there.
         return catalog_models(provider_id)
 
+    if requests is None:
+        return catalog_models(provider_id)
+
     url = f"{info.base_url}{info.models_endpoint}"
     headers = {
         "Content-Type": "application/json",
@@ -787,6 +793,10 @@ def stream_chat_completion(
             note_reasoning_observed(model_id, provider_id)
         except Exception:
             pass
+
+    if requests is None:
+        yield ("Error: Python 'requests' package is not installed. Run: pip install requests", None, None)
+        return
 
     url = f"{info.base_url}/chat/completions"
     headers = {
