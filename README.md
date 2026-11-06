@@ -66,7 +66,7 @@ cd CMDAI-CODE
 | `/models` | Select active local GGUF model or cloud provider |
 | `/sessions` | Browse and manage saved conversation sessions |
 | `/bg` | Monitor background processes and subagents |
-| `/mode` | Switch agent mode (`auto`, `code`, `plan`, `ask`) |
+| `/mode` | Switch agent mode (`auto`, `code`, `plan`) |
 | `/diff` | Review proposed file changes with accept/reject |
 | `/plan` | View and edit interactive execution plans |
 | `/context` | Inspect and pin workspace files to agent context |
