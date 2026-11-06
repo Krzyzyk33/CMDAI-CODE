@@ -15,7 +15,6 @@
 </div>
 
 
-
 ## 🌟 About
 
 **CMDAI CODE** is an autonomous terminal coding agent running directly inside your Windows console (Windows Terminal & PowerShell). Built from the ground up for privacy, speed, and developer autonomy:
@@ -37,30 +36,63 @@
 
 ---
 
-## 📥 Quickstart & Installation
+## 📥 Installation
 
-### Prerequisites:
-- OS: Windows 10 or Windows 11 (Windows Terminal recommended)
-- Python 3.10+ (with `pip`)
-- Git
+Choose your preferred installation method:
 
-### Getting Started:
+### 1. PowerShell One-Liner (Recommended for Windows)
+No Git or Node.js required. Automatically downloads, configures, and launches the application:
 ```powershell
-# 1. Clone the repository
-git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
-cd CMDAI-CODE
-
-# 2. Launch the application (automatically sets up venv & dependencies)
-.\cmdai.bat
+irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/install.ps1 | iex
 ```
 
-*Global shortcut: the application can be installed globally so you can launch `cmdai` from any project directory in your terminal.*
+### 2. NPX / NPM (Node.js Developers)
+Run instantly without prior setup:
+```bash
+npx github:Krzyzyk33/CMDAI-CODE
+```
+Or install globally via npm:
+```bash
+npm install -g github:Krzyzyk33/CMDAI-CODE
+```
+
+### 3. PIP / PIPX (Python Developers)
+Install directly from GitHub:
+```bash
+pip install git+https://github.com/Krzyzyk33/CMDAI-CODE.git
+```
+Or run in an isolated environment with `pipx`:
+```bash
+pipx run --spec git+https://github.com/Krzyzyk33/CMDAI-CODE.git cmdai code
+```
+
+### 4. Git Clone (Manual Setup)
+```powershell
+git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
+cd CMDAI-CODE
+.\install.bat
+```
+
+---
+
+## 💻 CLI Commands
+
+Once installed, use the global `cmdai` command from any directory:
+
+| Command | Description |
+| :--- | :--- |
+| `cmdai code [dir]` | Launch the CMDAI CODE terminal coding agent in the specified workspace |
+| `cmdai editor [file]` | Open the built-in terminal file editor |
+| `cmdai mcp [command]` | Manage Model Context Protocol servers (`list`, `add`, `remove`, `test`) |
+| `cmdai update` | Check for and install the latest updates directly from GitHub |
+| `cmdai addlocal` | Interactive wizard to download or configure local `.gguf` models |
+| `cmdai --install-launcher` | Register the global Windows terminal shortcut |
 
 ---
 
 ## ⌨️ Keybindings & Slash Commands
 
-### Main Slash Commands:
+### Main In-App Slash Commands:
 | Command | Description |
 | :--- | :--- |
 | `/models` | Select active local GGUF model or cloud provider |
@@ -88,6 +120,10 @@ cd CMDAI-CODE
 CMDAI-CODE/
 ├── cmdai.py                  # Main CLI entry point
 ├── cmdai.bat                 # Windows batch launcher
+├── install.ps1               # Automated PowerShell installer with CC progress bar
+├── install.bat               # Local installation batch wrapper
+├── package.json              # NPM package definition (supports npx github:...)
+├── bin/                      # Launcher wrappers (Node.js & Windows)
 ├── assets/                   # Banners and visual assets
 ├── src/cmdai/
 │   ├── agent/                # Agent loop, tool executors, subagents & background tasks
