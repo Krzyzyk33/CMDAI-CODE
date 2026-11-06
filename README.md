@@ -40,7 +40,7 @@
 
 Choose your preferred installation method:
 
-### 1. PowerShell One-Liner (Recommended for Windows)
+### 1. PowerShell
 No Git or Node.js required. Automatically downloads, configures, and launches the application:
 ```powershell
 irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/install.ps1 | iex
