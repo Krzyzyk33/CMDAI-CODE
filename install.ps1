@@ -52,11 +52,17 @@ function Render-Progress {
     $l4 = "${C_LOGO}" + $G_BL + ($G_B * 5) + $G_TR + "   " + $G_BL + ($G_B * 5) + $G_TR + "${C_RESET}"
     $l5 = " ${C_LOGO}" + $G_BL + ($G_H * 4) + $G_BR + "    " + $G_BL + ($G_H * 4) + $G_BR + "${C_RESET}"
 
-    if (-not $script:FirstRender) {
-        [Console]::Write("$ESC[5A")
-    } else {
-        $script:FirstRender = $false
-        [Console]::WriteLine()
+    try {
+        if ($Host.UI.RawUI) {
+            if ($null -eq $script:StartPos) {
+                Clear-Host
+                $script:StartPos = $Host.UI.RawUI.CursorPosition
+            } else {
+                $Host.UI.RawUI.CursorPosition = $script:StartPos
+            }
+        }
+    } catch {
+        try { Clear-Host } catch {}
     }
 
     [Console]::WriteLine($l1)
@@ -182,4 +188,6 @@ Start-Sleep -Milliseconds 350
 
 # 6. Automatic start
 $mainScript = Join-Path $installDir "cmdai.py"
-& $venvPython $mainScript code
+if (-not $env:CMDAI_NO_START) {
+    & $venvPython $mainScript code
+}
