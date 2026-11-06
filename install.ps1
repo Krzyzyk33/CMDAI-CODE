@@ -12,10 +12,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ANSI colors
 $ESC = [char]27
-$C_LOGO  = "$ESC[38;2;88;166;255m"   # Blue (#58a6ff)
-$C_FILL  = "$ESC[38;2;88;166;255m"   # Filled block (#58a6ff)
+$C_LOGO  = "$ESC[38;2;255;255;255m"  # White (#ffffff)
+$C_FILL  = "$ESC[38;2;88;166;255m"   # Filled block Blue (#58a6ff)
 $C_EMPTY = "$ESC[38;2;72;79;88m"     # Empty shade (#484f58)
-$C_PCT   = "$ESC[38;2;139;148;158m"  # Percent (#8b949e)
+$C_PCT   = "$ESC[38;2;255;255;255m"  # Percent White (#ffffff)
 $C_RESET = "$ESC[0m"
 
 # Unicode glyphs
