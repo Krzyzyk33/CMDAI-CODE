@@ -202,38 +202,53 @@ class SessionManager:
             except Exception:
                 pass
 
-        # Preserve created_at from existing session file if present
-        created_at = now_str
-        existing = None
-        if os.path.exists(target_path):
+        # Preserve created_at from existing session across all candidate directories
+        existing = self.load_session(session_id)
+        if existing and existing.get("created_at"):
+            created_at = str(existing.get("created_at"))
+        elif session_id.startswith("session_"):
             try:
-                with open(target_path, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-                    if isinstance(existing, dict) and existing.get("created_at"):
-                        created_at = existing.get("created_at")
+                sid_ts = int(session_id.split("_")[1][:10])
+                created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(sid_ts))
             except Exception:
-                pass
+                created_at = now_str
+        else:
+            created_at = now_str
 
-        # Calculate last_written_ts: timestamp of actual written content (messages or transcript).
-        # Simply entering, opening or switching to a session must NOT count as writing!
+        # Calculate last_written_ts: timestamp of actual written content.
+        # Merely viewing, opening, or switching sessions must NEVER bump the date!
         has_messages = bool(messages and len(messages) > 0)
         existing_msgs = (existing.get("messages") or []) if existing else []
-        existing_written_ts = (existing.get("last_written_ts") or existing.get("updated_ts")) if existing else None
-        existing_written_str = (existing.get("last_written_at") or existing.get("updated_at")) if existing else None
+        existing_user_count = sum(1 for m in existing_msgs if isinstance(m, dict) and m.get("role") == "user")
+        new_user_count = sum(1 for m in (messages or []) if isinstance(m, dict) and m.get("role") == "user")
+        if existing_user_count == 0 and existing:
+            existing_user_count = sum(1 for t in (existing.get("transcript") or []) if isinstance(t, dict) and t.get("kind") == "user")
+        if new_user_count == 0 and transcript:
+            new_user_count = sum(1 for t in transcript if isinstance(t, dict) and t.get("kind") == "user")
 
-        if not has_messages:
+        if not has_messages and not transcript:
             last_written_ts = 0.0
             last_written_str = ""
+        elif existing is None:
+            last_written_ts = now_ts
+            last_written_str = now_str
+        elif new_user_count > existing_user_count:
+            # User actually added a new prompt
+            last_written_ts = now_ts
+            last_written_str = now_str
         else:
-            if existing is None:
-                last_written_ts = now_ts
-                last_written_str = now_str
-            elif len(messages) != len(existing_msgs) or messages != existing_msgs:
-                last_written_ts = now_ts
-                last_written_str = now_str
-            else:
-                last_written_ts = float(existing_written_ts) if existing_written_ts else now_ts
-                last_written_str = existing_written_str or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_written_ts))
+            # Preserving previous timestamps so sessions don't jump to Today!
+            orig_ts = existing.get("last_written_ts")
+            orig_str = existing.get("last_written_at")
+            if not orig_ts or not orig_str:
+                orig_str = existing.get("created_at") or created_at
+                if orig_str:
+                    try:
+                        orig_ts = time.mktime(time.strptime(orig_str[:19], "%Y-%m-%d %H:%M:%S"))
+                    except Exception:
+                        orig_ts = now_ts
+            last_written_ts = float(orig_ts) if orig_ts else now_ts
+            last_written_str = str(orig_str or now_str)
 
         # OpenCode-style prompt titling if title is generic or placeholder
         bad_titles = ("new session", "untitled", "untitled session", "session", "tool", "mock", "tool mock")
@@ -353,8 +368,15 @@ class SessionManager:
                         last_written_at = data.get("last_written_at")
                         if last_written_ts is None:
                             if msg_count > 0:
-                                last_written_ts = data.get("updated_ts") or mtime
-                                last_written_at = data.get("updated_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_written_ts))
+                                c_str = data.get("created_at") or ""
+                                c_ts = None
+                                if c_str:
+                                    try:
+                                        c_ts = time.mktime(time.strptime(c_str[:19], "%Y-%m-%d %H:%M:%S"))
+                                    except Exception:
+                                        c_ts = None
+                                last_written_ts = c_ts or data.get("updated_ts") or mtime
+                                last_written_at = c_str or data.get("updated_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_written_ts))
                             else:
                                 last_written_ts = 0.0
                                 last_written_at = ""

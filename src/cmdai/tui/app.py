@@ -77,6 +77,8 @@ from .widgets import (
     ToolBlock,
     UserMessageCard,
     SessionTabsBar,
+    TimelineRail,
+    TimelineDot,
     copy_text_to_clipboard,
 )
 from ..mcp.client import sanitize_name
@@ -418,6 +420,7 @@ class CMDAICodeTUI(App):
             yield Static("", id="hero-version")
 
         with Vertical(id="chat-view", classes="hidden"):
+            yield TimelineRail(id="chat-timeline-rail")
             yield ChatScroll(id="chat-scroll")
             with Vertical(id="bottom-dock"):
                 # Scrolled up, there is something below you. It used to be
@@ -833,6 +836,88 @@ class CMDAICodeTUI(App):
         elif msg.action == "diff":
             self._open_diff_window()
 
+
+    @on(TimelineRail.TurnSelected)
+    def on_timeline_turn_selected(self, msg: TimelineRail.TurnSelected) -> None:
+        try:
+            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+            target = None
+            user_cards = [c for c in chat_scroll.children if isinstance(c, UserMessageCard) and not getattr(c, "_pruning", False)]
+            if 0 <= msg.turn_idx < len(user_cards):
+                target = user_cards[msg.turn_idx]
+            else:
+                for child in user_cards:
+                    if int(getattr(child, "turn_id", -1)) == int(msg.turn_id):
+                        target = child
+                        break
+            if target is not None:
+                chat_scroll.scroll_to_widget(target, animate=True)
+                self._active_view_turn_idx = msg.turn_idx
+                self._active_view_turn_id = getattr(target, "turn_id", msg.turn_id)
+        except Exception:
+            pass
+
+    @on(TimelineRail.ScrollRequested)
+    def on_timeline_scroll_requested(self, msg: TimelineRail.ScrollRequested) -> None:
+        try:
+            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+            if msg.direction == "up":
+                chat_scroll.scroll_home(animate=True)
+                if hasattr(self, "_active_view_turn_idx"):
+                    self._active_view_turn_idx = 0
+                    try:
+                        self.query_one("#chat-timeline-rail", TimelineRail).set_active_turn_idx(0)
+                    except Exception:
+                        pass
+            else:
+                chat_scroll.scroll_end(animate=True)
+                try:
+                    rail = self.query_one("#chat-timeline-rail", TimelineRail)
+                    if rail._turns:
+                        last_idx = len(rail._turns) - 1
+                        self._active_view_turn_idx = last_idx
+                        rail.set_active_turn_idx(last_idx)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _refresh_timeline_rail(self) -> None:
+        try:
+            rail = self.query_one("#chat-timeline-rail", TimelineRail)
+            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+        except Exception:
+            return
+
+        turns = []
+        if hasattr(self, "_transcript") and self._transcript:
+            for item in self._transcript:
+                if isinstance(item, dict) and item.get("kind") == "user":
+                    tid = int(item.get("turn_id", 0) or 0)
+                    prompt = str(item.get("text", "") or "")
+                    t_str = str(item.get("time") or "")
+                    if not t_str and item.get("timestamp"):
+                        try:
+                            t_str = time.strftime("%H:%M", time.localtime(float(item["timestamp"])))
+                        except Exception:
+                            t_str = ""
+                    if not t_str:
+                        t_str = getattr(self, "_current_session_time_str", "") or ""
+                    turns.append({"turn_id": tid, "text": prompt, "time": t_str})
+
+        if not turns:
+            for child in chat_scroll.children:
+                if isinstance(child, UserMessageCard) and not getattr(child, "_pruning", False):
+                    tid = int(getattr(child, "turn_id", 0) or 0)
+                    prompt = str(getattr(child, "prompt", "") or "")
+                    t_str = str(getattr(child, "time_str", "") or "")
+                    turns.append({"turn_id": tid, "text": prompt, "time": t_str})
+
+        cur_idx = getattr(self, "_active_view_turn_idx", None)
+        if cur_idx is None and turns:
+            cur_idx = len(turns) - 1
+        rail.update_turns(turns, active_turn_idx=cur_idx)
+
     @on(SessionTabsBar.TabSelected)
     def on_session_tab_selected(self, msg: SessionTabsBar.TabSelected) -> None:
         sid = str(msg.session_id or "").strip()
@@ -864,13 +949,25 @@ class CMDAICodeTUI(App):
 
         cur_sid = str(self.current_session_id or "").strip()
         if not hasattr(self, "_open_session_ids"):
-            self._open_session_ids = []
+            self._open_session_ids = [cur_sid] if cur_sid else []
 
         if cur_sid and cur_sid not in self._open_session_ids:
             self._open_session_ids.append(cur_sid)
 
-# Only show sessions explicitly opened or created
-        pass
+        # Clean dead sessions that are no longer valid
+        valid_open = []
+        for sid in self._open_session_ids:
+            if sid == cur_sid or self.session_manager.load_session(sid) is not None:
+                valid_open.append(sid)
+        self._open_session_ids = valid_open or ([cur_sid] if cur_sid else [])
+
+        if len(self._open_session_ids) <= 1:
+            tabs_bar.add_class("hidden")
+            tabs_bar.display = False
+            return
+
+        tabs_bar.remove_class("hidden")
+        tabs_bar.display = True
 
         tabs_data = []
         for sid in list(self._open_session_ids):
@@ -1995,17 +2092,21 @@ class CMDAICodeTUI(App):
         if from_hero or not self.in_chat_mode:
             self._switch_to_chat()
 
+        now_ts = time.time()
+        now_str = time.strftime("%H:%M", time.localtime(now_ts))
         try:
             chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
             self._turn_counter += 1
-            user_msg = UserMessageCard(prompt, turn_id=self._turn_counter)
+            user_msg = UserMessageCard(prompt, turn_id=self._turn_counter, time_str=now_str)
             chat_scroll.mount(user_msg)
             chat_scroll.scroll_end(animate=False)
         except Exception:
             pass
 
         self.messages.append({"role": "user", "content": prompt, "turn_id": self._turn_counter})
-        self._record_user_turn(prompt, self._turn_counter)
+        self._record_user_turn(prompt, self._turn_counter, time_str=now_str, timestamp=now_ts)
+        self._active_view_turn_idx = None
+        self._refresh_timeline_rail()
         bad_titles = ("new session", "untitled", "untitled session", "session", "tool", "mock", "tool mock")
         if not self.session_title.strip() or self.session_title.strip().lower() in bad_titles or self.session_title.startswith("Session session_"):
             from ..core.sessions import clean_title_from_prompt
@@ -2145,6 +2246,16 @@ class CMDAICodeTUI(App):
         self._dispatch_command(cmd)
 
     def _cmd_new(self, arg: str = "") -> None:
+        if not self.messages and not self._transcript and (not self.session_title or self.session_title == "New session"):
+            # Already on an empty new session - don't duplicate
+            try:
+                if not self.in_chat_mode:
+                    self.query_one("#hero-prompt-input", AutoExpandingInput).focus()
+                else:
+                    self.query_one("#prompt-input", AutoExpandingInput).focus()
+            except Exception:
+                pass
+            return
         if self.messages:
             self._save_current_session()
         self.messages = []
@@ -2173,8 +2284,16 @@ class CMDAICodeTUI(App):
     def reset_session(self) -> None:
         self._cmd_new()
 
-    def _record_user_turn(self, text: str, turn_id: int) -> None:
-        self._transcript.append({"kind": "user", "text": text, "turn_id": turn_id})
+    def _record_user_turn(self, text: str, turn_id: int, time_str: str = "", timestamp: Optional[float] = None) -> None:
+        now_ts = timestamp if timestamp is not None else time.time()
+        t_str = time_str or time.strftime("%H:%M", time.localtime(now_ts))
+        self._transcript.append({
+            "kind": "user",
+            "text": text,
+            "turn_id": turn_id,
+            "timestamp": now_ts,
+            "time": t_str
+        })
 
     def _record_assistant_text(self, text: str, target_transcript: Optional[List[Dict[str, Any]]] = None) -> None:
         import re
@@ -2455,6 +2574,8 @@ class CMDAICodeTUI(App):
             target_id = session_id or self.current_session_id
             # Safety guard: never overwrite another session using active screen data
             if session_id and session_id != self.current_session_id:
+                return
+            if not self.messages and not self._transcript:
                 return
             self._sync_transcript_from_ui()
             from ..core.sessions import clean_title_from_prompt, reconcile_transcript
@@ -4237,7 +4358,17 @@ class CMDAICodeTUI(App):
                     turn_id = self._turn_counter
                 else:
                     self._turn_counter = max(self._turn_counter, turn_id)
-                chat_scroll.mount(UserMessageCard(str(item.get("text", "")), turn_id=turn_id))
+                t_str = str(item.get("time") or "")
+                if not t_str and item.get("timestamp"):
+                    try:
+                        t_str = time.strftime("%H:%M", time.localtime(float(item["timestamp"])))
+                    except Exception:
+                        t_str = ""
+                if not t_str:
+                    t_str = getattr(self, "_current_session_time_str", "") or ""
+                if t_str and not item.get("time"):
+                    item["time"] = t_str
+                chat_scroll.mount(UserMessageCard(str(item.get("text", "")), turn_id=turn_id, time_str=t_str))
                 continue
 
             if card is None:
@@ -4472,6 +4603,7 @@ class CMDAICodeTUI(App):
             block.update_header()
 
         chat_scroll.scroll_end(animate=False)
+        self._refresh_timeline_rail()
 
     def _on_session_selected(self, session_id: str) -> None:
         if not session_id:
@@ -4479,6 +4611,18 @@ class CMDAICodeTUI(App):
         if session_id == self.current_session_id and self.in_chat_mode:
             return
         old_sid = str(self.current_session_id or "")
+        old_is_empty = (not self.messages and not self._transcript)
+
+        # If previous session was an empty new session, transform it into the selected session!
+        if hasattr(self, "_open_session_ids"):
+            if old_sid in self._open_session_ids and old_is_empty and old_sid != session_id:
+                idx = self._open_session_ids.index(old_sid)
+                if session_id in self._open_session_ids:
+                    self._open_session_ids.remove(old_sid)
+                else:
+                    self._open_session_ids[idx] = session_id
+            elif session_id not in self._open_session_ids:
+                self._open_session_ids.append(session_id)
         if self.is_generating:
             try:
                 if old_sid and (self.messages or self._transcript):
@@ -4502,8 +4646,17 @@ class CMDAICodeTUI(App):
         except Exception:
             data = None
         if not data:
-            self.notify("That session could not be read.", severity="error", timeout=4.0)
-            return
+            if session_id in getattr(self, "_open_session_ids", []):
+                data = {
+                    "session_id": session_id,
+                    "title": "New session",
+                    "messages": [],
+                    "transcript": [],
+                    "stats": {"tokens_in": 0, "tokens_out": 0, "tok_per_sec": 0.0, "tools_run": 0}
+                }
+            else:
+                self.notify("That session could not be read.", severity="error", timeout=4.0)
+                return
 
         try:
             chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
@@ -4517,6 +4670,20 @@ class CMDAICodeTUI(App):
 
         self.current_session_id = session_id
         self._session_flushed_on_exit = False
+        sess_created = str(data.get("created_at") or data.get("last_written_at") or "")
+        sess_time = ""
+        if sess_created:
+            parts = sess_created.strip().split()
+            for part in parts:
+                if ":" in part:
+                    sess_time = part[:5]
+                    break
+        if not sess_time and data.get("created_ts"):
+            try:
+                sess_time = time.strftime("%H:%M", time.localtime(float(data["created_ts"])))
+            except Exception:
+                sess_time = ""
+        self._current_session_time_str = sess_time
         sess_dir = data.get("directory") or data.get("workdir")
         if sess_dir and os.path.isdir(str(sess_dir)):
             try:
@@ -4576,13 +4743,16 @@ class CMDAICodeTUI(App):
             transcript = data.get("transcript")
             self._transcript = reconcile_transcript(transcript, self.messages)
 
-        # Switch to chat view and render replayed cards
-        self._switch_to_chat()
-        try:
-            self._replay_transcript(self._transcript, is_active_generating=is_active_gen)
-        except Exception as ex:
-            import logging
-            logging.exception("Error replaying transcript: %s", ex)
+        # Switch to chat view or hero view based on whether messages exist
+        if self.messages or self._transcript:
+            self._switch_to_chat()
+            try:
+                self._replay_transcript(self._transcript, is_active_generating=is_active_gen)
+            except Exception as ex:
+                import logging
+                logging.exception("Error replaying transcript: %s", ex)
+        else:
+            self._switch_to_hero()
         if is_active_gen:
             self.update_meta_bars()
         self._update_terminal_title()

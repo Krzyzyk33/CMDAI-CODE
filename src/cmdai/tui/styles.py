@@ -53,8 +53,13 @@ Screen {
 
 .session-tab-item:hover,
 .session-tab-item.hovered {
+    color: #c9d1d9;
+}
+
+.session-tab-item.active:hover,
+.session-tab-item.active.hovered {
     background: #161b22;
-    color: #f0f6fc;
+    color: #ffffff;
 }
 
 .session-tab-item .tab-title {
@@ -78,17 +83,16 @@ Screen {
 }
 
 .session-tab-item .tab-close:hover {
-    color: #f85149;
+    color: #f0f6fc;
     text-style: bold;
 }
 
 .session-new-tab-btn {
-    width: auto;
-    min-width: 3;
+    width: 3;
     height: 1;
     background: #000000;
     color: #8b949e;
-    padding: 0 1;
+    padding: 0;
     margin: 0;
     text-align: center;
     content-align: center middle;
@@ -200,6 +204,86 @@ Screen {
 /* ═════════════════════════════════════════════════════════════
    2. CHAT VIEW (Active Conversation - Symmetric Padding)
    ═════════════════════════════════════════════════════════════ */
+
+/* ═════════════════════════════════════════════════════════════
+   TIMELINE NAVIGATION RAIL (Antigravity-Style Left Margin Track)
+   ═════════════════════════════════════════════════════════════ */
+#chat-timeline-rail {
+    dock: left;
+    width: 2;
+    height: 100%;
+    background: #000000;
+    padding: 0;
+    margin: 0;
+    align: center middle;
+    border: none;
+}
+
+#chat-timeline-rail.hidden {
+    display: none !important;
+}
+
+.timeline-dots-scroll {
+    width: 100%;
+    height: 1fr;
+    background: #000000;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
+    align: center middle;
+    margin: 0;
+    padding: 0;
+}
+
+.timeline-arrow {
+    width: 100%;
+    height: 1;
+    text-align: center;
+    color: #6e7681;
+    display: none;
+}
+
+#chat-timeline-rail:hover .timeline-arrow,
+#chat-timeline-rail.hovered .timeline-arrow {
+    display: block;
+}
+
+.timeline-arrow:hover {
+    color: #ffffff;
+    text-style: bold;
+}
+
+.timeline-dot {
+    width: 100%;
+    height: 1;
+    text-align: center;
+    color: #484f58;
+    margin: 0;
+    padding: 0;
+}
+
+.timeline-dot.active {
+    color: #ffffff;
+    text-style: bold;
+}
+
+.timeline-dot:hover {
+    color: #8b949e;
+}
+
+.timeline-dot.active:hover {
+    color: #ffffff;
+    text-style: bold;
+}
+
+Tooltip {
+    background: #161b22;
+    border: round #30363d;
+    padding: 0 1;
+    color: #e6edf3;
+    max-width: 48;
+    height: auto;
+}
+
 #chat-view {
     width: 100%;
     height: 100%;
