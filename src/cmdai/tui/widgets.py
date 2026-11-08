@@ -3410,3 +3410,263 @@ class ApprovalDiffPreview(VerticalScroll):
     def hide_diff(self) -> None:
         self.styles.display = "none"
         self.diff_widget.update("")
+
+
+class SessionTabCloseBtn(Static):
+    class Clicked(Message):
+        def __init__(self, session_id: str):
+            super().__init__()
+            self.session_id = session_id
+
+    def __init__(self, session_id: str, **kwargs):
+        super().__init__("✕", classes="tab-close", **kwargs)
+        self.session_id = session_id
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Clicked(self.session_id))
+
+
+class SessionTabItem(Horizontal):
+    class Selected(Message):
+        def __init__(self, session_id: str):
+            super().__init__()
+            self.session_id = session_id
+
+    class Closed(Message):
+        def __init__(self, session_id: str):
+            super().__init__()
+            self.session_id = session_id
+
+    def __init__(self, session_id: str, title: str, is_active: bool = False, **kwargs):
+        active_cls = "active" if is_active else "inactive"
+        super().__init__(classes=f"session-tab-item {active_cls}", **kwargs)
+        self.session_id = session_id
+        self.title_text = title or "New session"
+        self.is_active = is_active
+        self.is_hovered = False
+        self._scroll_offset = 0
+        self._pause_ticks = 0
+        self._scroll_timer = None
+
+    @property
+    def visible_width(self) -> int:
+        if self.size.width > 4:
+            return max(6, self.size.width - 4)
+        return 18
+
+    def compose(self) -> ComposeResult:
+        w = self.visible_width
+        display_title = self.title_text
+        if len(display_title) > w:
+            display_title = display_title[: max(4, w - 1)] + "…"
+        yield Static(display_title, classes="tab-title")
+        yield SessionTabCloseBtn(self.session_id)
+
+    def on_mount(self) -> None:
+        self._update_static_title()
+
+    def on_resize(self, event: events.Resize) -> None:
+        if not self.is_hovered:
+            self._update_static_title()
+
+    def on_enter(self, event: events.Enter) -> None:
+        self.is_hovered = True
+        self.add_class("hovered")
+        w = self.visible_width
+        if len(self.title_text) > w:
+            self._scroll_offset = 0
+            self._pause_ticks = 2
+            if self._scroll_timer is not None:
+                self._scroll_timer.stop()
+            self._scroll_timer = self.set_interval(0.12, self._tick_marquee)
+
+    def on_leave(self, event: events.Leave) -> None:
+        self.is_hovered = False
+        self.remove_class("hovered")
+        if self._scroll_timer is not None:
+            self._scroll_timer.stop()
+            self._scroll_timer = None
+        self._scroll_offset = 0
+        self._update_static_title()
+
+    def _tick_marquee(self) -> None:
+        if not self.is_hovered:
+            return
+        w = self.visible_width
+        max_offset = len(self.title_text) - w
+        if max_offset <= 0:
+            return
+        if self._pause_ticks > 0:
+            self._pause_ticks -= 1
+            return
+        self._scroll_offset += 1
+        if self._scroll_offset > max_offset + 3:
+            self._scroll_offset = 0
+            self._pause_ticks = 3
+        offset = min(self._scroll_offset, max_offset)
+        slice_text = self.title_text[offset : offset + w]
+        try:
+            self.query_one(".tab-title", Static).update(slice_text)
+        except Exception:
+            pass
+
+    def _update_static_title(self) -> None:
+        w = self.visible_width
+        t = self.title_text or "New session"
+        if len(t) > w:
+            display = t[: max(4, w - 1)] + "…"
+        else:
+            display = t
+        try:
+            self.query_one(".tab-title", Static).update(display)
+        except Exception:
+            pass
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Selected(self.session_id))
+
+    @on(SessionTabCloseBtn.Clicked)
+    def on_close_clicked(self, msg: SessionTabCloseBtn.Clicked) -> None:
+        msg.stop()
+        self.post_message(self.Closed(self.session_id))
+
+
+class SessionNewTabBtn(Static):
+    class Requested(Message):
+        pass
+
+    def __init__(self, compact: bool = False, **kwargs):
+        label = "+" if compact else "+ New session"
+        super().__init__(label, classes="session-new-tab-btn", **kwargs)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Requested())
+
+
+class SessionTabsBar(Horizontal):
+    DEFAULT_CSS = """
+    SessionTabsBar {
+        dock: top;
+        height: 1;
+        width: 100%;
+        background: #000000;
+        padding: 0;
+        margin: 0;
+        overflow-x: auto;
+        scrollbar-size-horizontal: 0;
+    }
+    .session-tab-item {
+        width: 1fr;
+        max-width: 32;
+        min-width: 10;
+        height: 1;
+        background: #000000;
+        color: #8b949e;
+        margin: 0;
+        padding: 0 1;
+        border: none;
+    }
+    .session-tab-item.active {
+        background: #161b22;
+        color: #ffffff;
+        text-style: bold;
+        border: none;
+    }
+    .session-tab-item:hover,
+    .session-tab-item.hovered {
+        background: #161b22;
+        color: #f0f6fc;
+    }
+    .session-tab-item .tab-title {
+        width: 1fr;
+        height: 1;
+        padding: 0;
+    }
+    .session-tab-item .tab-close {
+        width: 1;
+        height: 1;
+        margin: 0 0 0 1;
+        color: #6e7681;
+        display: none;
+    }
+    .session-tab-item.active .tab-close,
+    .session-tab-item:hover .tab-close,
+    .session-tab-item.hovered .tab-close {
+        display: block;
+    }
+    .session-tab-item .tab-close:hover {
+        color: #f85149;
+        text-style: bold;
+    }
+    .session-new-tab-btn {
+        width: auto;
+        min-width: 3;
+        height: 1;
+        background: #000000;
+        color: #8b949e;
+        padding: 0 1;
+        margin: 0;
+        text-align: center;
+        content-align: center middle;
+    }
+    .session-new-tab-btn:hover {
+        background: #161b22;
+        color: #f0f6fc;
+    }
+    """
+
+    class TabSelected(Message):
+        def __init__(self, session_id: str):
+            super().__init__()
+            self.session_id = session_id
+
+    class TabClosed(Message):
+        def __init__(self, session_id: str):
+            super().__init__()
+            self.session_id = session_id
+
+    class NewTabRequested(Message):
+        pass
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._sessions: List[Dict[str, Any]] = []
+        self._active_id: str = ""
+
+    def on_mount(self) -> None:
+        self.rebuild_tabs()
+
+    def update_tabs(self, sessions: List[Dict[str, Any]], active_id: str) -> None:
+        self._sessions = list(sessions)
+        self._active_id = str(active_id)
+        if self.is_mounted:
+            self.rebuild_tabs()
+
+    def rebuild_tabs(self) -> None:
+        self.remove_children()
+        for s in self._sessions:
+            sid = str(s.get("session_id", ""))
+            title = str(s.get("title", "") or "New session")
+            is_active = (sid == self._active_id)
+            self.mount(SessionTabItem(session_id=sid, title=title, is_active=is_active))
+        compact = len(self._sessions) >= 3
+        self.mount(SessionNewTabBtn(compact=compact))
+
+    @on(SessionTabItem.Selected)
+    def _on_tab_selected(self, msg: SessionTabItem.Selected) -> None:
+        msg.stop()
+        self.post_message(self.TabSelected(msg.session_id))
+
+    @on(SessionTabItem.Closed)
+    def _on_tab_closed(self, msg: SessionTabItem.Closed) -> None:
+        msg.stop()
+        self.post_message(self.TabClosed(msg.session_id))
+
+    @on(SessionNewTabBtn.Requested)
+    def _on_new_requested(self, msg: SessionNewTabBtn.Requested) -> None:
+        msg.stop()
+        self.post_message(self.NewTabRequested())
+

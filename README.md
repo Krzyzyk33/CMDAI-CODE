@@ -2,7 +2,7 @@
   <img src="assets/banner.png" alt="CMDAI CODE" width="100%" />
 
   <p align="center">
-    <a href="https://github.com/Krzyzyk33/CMDAI-CODE/releases"><img src="https://img.shields.io/badge/Release-v3.0.6--alpha-blue.svg?style=flat-square" alt="Release v3.0.6-alpha"></a>
+    <a href="https://github.com/Krzyzyk33/CMDAI-CODE/releases"><img src="https://img.shields.io/badge/Release-v1.0.0-blue.svg?style=flat-square" alt="Release v1.0.0"></a>
     <a href="#"><img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg?style=flat-square&logo=windows" alt="Platform: Windows"></a>
     <a href="#"><img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python" alt="Python 3.10+"></a>
     <a href="#"><img src="https://img.shields.io/badge/Local%20Inference-GGUF%20%2F%20llama.cpp-brightgreen.svg?style=flat-square" alt="llama.cpp"></a>

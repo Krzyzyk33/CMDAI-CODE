@@ -1,6 +1,6 @@
 {
   "name": "cmdai-code",
-  "version": "3.0.6",
+  "version": "1.0.0",
   "description": "Autonomous Terminal Coding Agent for Windows",
   "bin": {
     "cmdai": "bin/cmdai.js"

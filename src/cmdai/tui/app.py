@@ -76,6 +76,7 @@ from .widgets import (
     TodoPreviewBar,
     ToolBlock,
     UserMessageCard,
+    SessionTabsBar,
     copy_text_to_clipboard,
 )
 from ..mcp.client import sanitize_name
@@ -262,6 +263,7 @@ class CMDAICodeTUI(App):
         self.current_session_id: str = f"session_{int(time.time())}"
         self.session_title: str = ""
         self._session_named_by_model: bool = False
+        self._open_session_ids: List[str] = [self.current_session_id]
         # What the chat showed, in order. `messages` alone cannot rebuild a
         # session: it is the model's view, holding raw tool feedback and no
         # record of the tool cards, so a replay from it loses every tool and
@@ -399,6 +401,7 @@ class CMDAICodeTUI(App):
             pass
 
     def compose(self) -> ComposeResult:
+        yield SessionTabsBar(id="session-tabs-bar")
         with Vertical(id="hero-view"):
             with Vertical(id="hero-card"):
                 yield Static(LOGO_HERO, id="hero-logo")
@@ -484,6 +487,7 @@ class CMDAICodeTUI(App):
         self.set_timer(3.0, self._maybe_auto_update_check)
         self._refresh_hero_version()
         self._refresh_hero_version_live()
+        self._refresh_session_tabs()
 
     def _refresh_hero_version(self) -> None:
         try:
@@ -828,6 +832,59 @@ class CMDAICodeTUI(App):
                 self.notify("Changes rejected and reverted.", severity="warning", timeout=2.5)
         elif msg.action == "diff":
             self._open_diff_window()
+
+    @on(SessionTabsBar.TabSelected)
+    def on_session_tab_selected(self, msg: SessionTabsBar.TabSelected) -> None:
+        sid = str(msg.session_id or "").strip()
+        if sid and sid != self.current_session_id:
+            self._on_session_selected(sid)
+
+    @on(SessionTabsBar.TabClosed)
+    def on_session_tab_closed(self, msg: SessionTabsBar.TabClosed) -> None:
+        sid = str(msg.session_id or "").strip()
+        if sid in getattr(self, "_open_session_ids", []):
+            self._open_session_ids.remove(sid)
+        if sid == self.current_session_id:
+            if getattr(self, "_open_session_ids", []):
+                self._on_session_selected(self._open_session_ids[-1])
+            else:
+                self._cmd_new()
+        else:
+            self._refresh_session_tabs()
+
+    @on(SessionTabsBar.NewTabRequested)
+    def on_session_new_tab_requested(self, msg: SessionTabsBar.NewTabRequested) -> None:
+        self._cmd_new()
+
+    def _refresh_session_tabs(self) -> None:
+        try:
+            tabs_bar = self.query_one("#session-tabs-bar", SessionTabsBar)
+        except Exception:
+            return
+
+        cur_sid = str(self.current_session_id or "").strip()
+        if not hasattr(self, "_open_session_ids"):
+            self._open_session_ids = []
+
+        if cur_sid and cur_sid not in self._open_session_ids:
+            self._open_session_ids.append(cur_sid)
+
+# Only show sessions explicitly opened or created
+        pass
+
+        tabs_data = []
+        for sid in list(self._open_session_ids):
+            if sid == cur_sid:
+                t = self.session_title or "New session"
+            else:
+                try:
+                    s_data = self.session_manager.load_session(sid) or {}
+                    t = s_data.get("title") or "New session"
+                except Exception:
+                    t = "New session"
+            tabs_data.append({"session_id": sid, "title": t})
+
+        tabs_bar.update_tabs(tabs_data, active_id=cur_sid)
 
     def on_key(self, event: events.Key) -> None:
         key_name = (event.key or "").lower()
@@ -1958,6 +2015,7 @@ class CMDAICodeTUI(App):
             if self.current_provider != "local_gguf":
                 self._maybe_auto_name_session()
         self._save_current_session()
+        self._refresh_session_tabs()
         self.start_generation(prompt)
 
     def handle_submit(self, text: str) -> None:
@@ -2107,6 +2165,10 @@ class CMDAICodeTUI(App):
             pass
         self._switch_to_hero()
         self._update_terminal_title()
+        if hasattr(self, "_open_session_ids"):
+            if self.current_session_id not in self._open_session_ids:
+                self._open_session_ids.append(self.current_session_id)
+        self._refresh_session_tabs()
 
     def reset_session(self) -> None:
         self._cmd_new()
@@ -2561,6 +2623,7 @@ class CMDAICodeTUI(App):
             self.session_title = title
             self._save_current_session()
             self._update_terminal_title()
+            self._refresh_session_tabs()
         except Exception:
             pass
 
@@ -4523,6 +4586,10 @@ class CMDAICodeTUI(App):
         if is_active_gen:
             self.update_meta_bars()
         self._update_terminal_title()
+        if hasattr(self, "_open_session_ids"):
+            if session_id not in self._open_session_ids:
+                self._open_session_ids.append(session_id)
+        self._refresh_session_tabs()
         try:
             self.call_after_refresh(lambda: self.query_one("#prompt-input", AutoExpandingInput).focus())
         except Exception:

@@ -15,6 +15,91 @@ Screen {
 }
 
 /* ═════════════════════════════════════════════════════════════
+   0. SESSION TABS BAR (Top Layer on Pitch Black)
+   ═════════════════════════════════════════════════════════════ */
+#session-tabs-bar {
+    dock: top;
+    height: 1;
+    width: 100%;
+    background: #000000;
+    padding: 0;
+    margin: 0;
+    overflow-x: auto;
+    scrollbar-size-horizontal: 0;
+}
+
+#session-tabs-bar.hidden {
+    display: none !important;
+}
+
+.session-tab-item {
+    width: 1fr;
+    max-width: 32;
+    min-width: 10;
+    height: 1;
+    background: #000000;
+    color: #8b949e;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+}
+
+.session-tab-item.active {
+    background: #161b22;
+    color: #ffffff;
+    text-style: bold;
+    border: none;
+}
+
+.session-tab-item:hover,
+.session-tab-item.hovered {
+    background: #161b22;
+    color: #f0f6fc;
+}
+
+.session-tab-item .tab-title {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+}
+
+.session-tab-item .tab-close {
+    width: 1;
+    height: 1;
+    margin: 0 0 0 1;
+    color: #6e7681;
+    display: none;
+}
+
+.session-tab-item.active .tab-close,
+.session-tab-item:hover .tab-close,
+.session-tab-item.hovered .tab-close {
+    display: block;
+}
+
+.session-tab-item .tab-close:hover {
+    color: #f85149;
+    text-style: bold;
+}
+
+.session-new-tab-btn {
+    width: auto;
+    min-width: 3;
+    height: 1;
+    background: #000000;
+    color: #8b949e;
+    padding: 0 1;
+    margin: 0;
+    text-align: center;
+    content-align: center middle;
+}
+
+.session-new-tab-btn:hover {
+    background: #161b22;
+    color: #f0f6fc;
+}
+
+/* ═════════════════════════════════════════════════════════════
    1. HERO WELCOME VIEW (Full Size Logo Above Centered Input)
    ═════════════════════════════════════════════════════════════ */
 #hero-view {
@@ -942,6 +1027,14 @@ Input .input--cursor {
     width: 76;
     height: auto;
     max-height: 80%;
+}
+
+#update-banner {
+    width: 100%;
+    height: 5;
+    margin: 1 0 0 0;
+    content-align: center middle;
+    text-align: center;
 }
 
 #modal-dialog.update-dialog #update-step {

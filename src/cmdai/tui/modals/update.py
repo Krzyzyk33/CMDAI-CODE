@@ -46,6 +46,7 @@ class UpdateProgressModal(ModalScreen[bool]):
             with Horizontal(id="modal-header"):
                 yield Static("Update CMDAI CODE", id="modal-title")
                 yield Static("[dim]esc[/]", id="modal-esc")
+            yield Static(render_installer_banner(10), id="update-banner")
             yield Static("Preparing...", id="update-step")
             with VerticalScroll(id="update-log"):
                 yield Static("", id="update-log-body")
@@ -96,6 +97,25 @@ class UpdateProgressModal(ModalScreen[bool]):
         elapsed = time.monotonic() - self._started
         glyph = GLYPHS[int(elapsed / FLIP) % 2] if current else "⌬"
         step_text = f"{glyph}  {current}" if current else "..."
+        percent = 15
+        if self.done:
+            percent = 100
+        else:
+            labels = [r["label"].lower() for r in self._rows]
+            if any("refresh" in l or "version" in l for l in labels):
+                percent = 90
+            elif any("package" in l or "synchroniz" in l or "pip" in l for l in labels):
+                percent = 75
+            elif any("pull" in l or "download" in l for l in labels):
+                percent = 45
+            elif len(self._rows) > 0:
+                percent = 30
+
+        try:
+            self.query_one("#update-banner", Static).update(render_installer_banner(percent))
+        except Exception:
+            pass
+
         try:
             self.query_one("#update-step", Static).update(step_text)
         except Exception:

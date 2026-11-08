@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 REPO = "Krzyzyk33/CMDAI-CODE"
 API_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=50"
-MIN_TAG = (3, 0, 0, "alpha")
+MIN_TAG = (1, 0, 0, "")
 
 # The newest release is baked into the source so the app can always say what
 # changed, with no network. Managed by tools/gen_bundled_release.py: at every
@@ -13,10 +13,10 @@ MIN_TAG = (3, 0, 0, "alpha")
 # from GitHub at runtime, so this holds exactly one release, not a changelog.
 # --- BUNDLED_RELEASE_BEGIN (managed by tools/gen_bundled_release.py) ---
 BUNDLED_RELEASE = {
-    "tag": "v3.0.4-alpha",
-    "name": "CMDAI CODE v3.0.4-alpha",
-    "published_at": "2026-09-28",
-    "url": "https://github.com/Krzyzyk33/CMDAI-CODE/releases/tag/v3.0.4-alpha",
+    "tag": "v1.0.0",
+    "name": "CMDAI CODE v1.0.0",
+    "published_at": "2026-11-08",
+    "url": "https://github.com/Krzyzyk33/CMDAI-CODE/releases/tag/v1.0.0",
     "body": """### Highlights & Core Fixes
 
 #### 1. Subagents Unlocked
@@ -423,7 +423,11 @@ def get_display_version(root: str = "") -> str:
     except Exception:
         pass
     if not candidates:
-        return ""
+        try:
+            from .. import __version__
+            return f"v{__version__}" if not __version__.startswith("v") else __version__
+        except Exception:
+            return "v1.0.0" 
     return sorted(candidates, key=_tag_sort_key)[-1].strip()
 
 

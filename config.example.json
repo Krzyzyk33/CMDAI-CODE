@@ -15,7 +15,6 @@
     "auto_approve_readonly": true,
     "mode": "auto"
   },
-
   "permissions": {
     "read": "allow",
     "write": "ask",
@@ -41,12 +40,15 @@
   },
   "api_keys": {},
   "custom_models": {},
-  "installed_loaders": ["cpu"],
+  "installed_loaders": [
+    "cpu"
+  ],
   "active_loader": "cpu",
   "system_prompts": [
     {
       "name": "Code Agent (Standard)",
       "text": "You are CMDAI CODE, an autonomous terminal AI programming agent running on Windows. Help the user analyze, write, debug, and test code accurately."
     }
-  ]
+  ],
+  "version": "1.0.0"
 }
