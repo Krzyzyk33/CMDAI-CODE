@@ -466,6 +466,7 @@ CLI_HELP = """
     cmdai code help | -h | --help  show this help
     cmdai editor [folder]          CMDAI EDITOR: pick/create a project,
                                    or open <folder> right away
+    cmdai run <prompt>             headless run: autonomous agent execution
     cmdai code update              update from GitHub
     cmdai addlocal                 add a local model (.gguf)
 
@@ -481,7 +482,8 @@ CLI_HELP = """
     /model               pick a model
     /git                 git window in a new terminal
     /diff                review working changes
-    /plan                task checklist (CMDAIPLAN.md)
+    /plan, /tasks        task checklist & autonomous TODO manager
+    /bg                  background tasks & subagents manager (Ctrl+B)
     /editor              code editor in a new window
     /update              pull the latest code (same as this command)
     /updatesettings      automatic updates on / off / check interval
@@ -492,14 +494,16 @@ CLI_HELP = """
 
 
 def _cmdaieditor_main() -> str:
-    """Sciezka do `editor/main.py` albo pusty napis, gdy go nie ma."""
-    # `src/cmdai/cli.py` -> `src/cmdai` -> `src` -> korzen repo.
-    # Liczymy od `__file__`, nie od `cwd`: `cmdai` jest instalowany
-    # globalnie i bywa wywolywany z kazdego katalogu.
+    """Sciezka do `editor/main.py` albo `src/cmdai/editor/main.py`."""
     korzen = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))))
     main_py = os.path.join(korzen, "editor", "main.py")
-    return main_py if os.path.isfile(main_py) else ""
+    if os.path.isfile(main_py):
+        return main_py
+    pkg_main = os.path.join(os.path.dirname(os.path.abspath(__file__)), "editor", "main.py")
+    if os.path.isfile(pkg_main):
+        return pkg_main
+    return ""
 
 
 def launch_cmdaieditor(args: list) -> int:
@@ -668,16 +672,44 @@ def main():
     # terminalu, a nie `import` - edytor ma własny `main()`,
     # własne ustawienia kodowania (SetConsoleOutputCP) i własny
     # `sys.path`. `import` przeplatałby te trzy rzeczy z CLI.
+    if first == "run" or args.command == "run":
+        run_args = [a for a in sys.argv[1:] if a != "run" and a != "code" and not a.startswith("--")]
+        prompt = " ".join(run_args).strip()
+        if not prompt:
+            print("Usage: cmdai run <prompt>")
+            sys.exit(1)
+        from .core.session_runtime import SessionRuntime
+        workdir = os.path.abspath(args.workdir)
+        print(f"\n[CMDAI HEADLESS RUN] Target workspace: {workdir}")
+        print(f"Task: {prompt}\n")
+        runtime = SessionRuntime(
+            workdir=workdir,
+            provider=args.provider,
+            model=args.model,
+        )
+        def _cli_token(t):
+            sys.stdout.write(t)
+            sys.stdout.flush()
+        def _cli_tool_start(name, t_args):
+            print(f"\n>> Executing tool [{name}]...")
+        def _cli_tool_finish(name, t_args, res):
+            status = "OK" if res.get("success", True) else "FAILED"
+            print(f">> Finished tool [{name}]: {status}\n")
+
+        runtime.run_turn(
+            user_prompt=prompt,
+            on_token=_cli_token,
+            on_tool_start=_cli_tool_start,
+            on_tool_finish=_cli_tool_finish,
+        )
+        print("\n\n[TASK COMPLETED]")
+        sys.exit(0)
+
     if first == "editor":
         sys.exit(launch_cmdaieditor(_editor_target_args(sys.argv[1:])))
 
     if "editor" in words:
-        from cmdai.editor.editor_app import CMDAICodeEditor
-        target_words = _editor_target_args(sys.argv[1:])
-        target_file = target_words[0] if target_words else "."
-        app = CMDAICodeEditor(initial_path=os.path.abspath(target_file))
-        app.run()
-        return
+        sys.exit(launch_cmdaieditor(_editor_target_args(sys.argv[1:])))
 
     settings = get_settings()
     if args.provider:

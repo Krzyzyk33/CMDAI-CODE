@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Callable, Optional
 from .models import SubagentTask, SubagentProgress, SubagentResult
@@ -109,17 +110,29 @@ class SubagentOrchestrator:
         task: SubagentTask,
         model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
-        max_turns: int = 8,
+        max_turns: int = 25,
         on_progress: Optional[Callable[[SubagentProgress], None]] = None
     ) -> SubagentResult:
         allowed = set(t.lower() for t in (task.tools or SUBAGENT_AVAILABLE_TOOLS))
         allowed.discard("subagent")
-        workdir = task.context.get("workdir", ".") if isinstance(task.context, dict) else "."
+        allowed.discard("spawn_subagent")
+        allowed.discard("task")
+        allowed.discard("tasks")
+        allowed.discard("bg_task")
+        allowed.discard("background_task")
+        raw_workdir = task.context.get("workdir", ".") if isinstance(task.context, dict) else "."
+        if not raw_workdir or raw_workdir == ".":
+            raw_workdir = os.getcwd()
+        workdir = os.path.abspath(raw_workdir)
 
         system_content = (
             f"You are {task.role}, a specialized autonomous subagent.\n"
             f"{task.system_prompt}\n\n"
             f"Workspace directory: {workdir}\n"
+            "CRITICAL WORKSPACE CONSTRAINT:\n"
+            f"- You MUST work exclusively within this workspace directory: {workdir}\n"
+            "- All file paths (reads, edits, writes, globs, searches) are strictly relative to this workspace directory.\n"
+            "- NEVER read, inspect, or reference files outside this workspace directory.\n\n"
             "You have full direct access to inspect the project and local filesystem using XML tags:\n"
             "- List Directory: <tool:ls path=\".\" />\n"
             "- Find Files: <tool:glob pattern=\"*.*\" dir=\".\" />\n"
@@ -131,13 +144,14 @@ class SubagentOrchestrator:
             "- Scratchpad: <tool:scratch action=\"add\" note=\"...\" />\n"
             "- Note To Lead Agent: <tool:agent_note text=\"...\" />\n\n"
             "CRITICAL INSTRUCTIONS:\n"
-            "1. You MUST use the tools above to inspect files, search code, and investigate the workspace.\n"
-            "2. Never claim you do not have access to files, filesystem, or tools — use <tool:ls path=\".\"/> or <tool:glob pattern=\"*.*\"/> to inspect the files.\n"
-            "3. First invoke tools to gather the necessary data. Once you have enough findings, write a final report that IS handed back to the lead agent. That report is the only thing it gets from you, so treat it as the answer, not as a diary of your work.\n"
-            "4. The lead agent does NOT see your transcript, your tool calls, or their raw output. It sees only your final report plus any notes you sent with <tool:agent_note text=\"...\" />.\n"
-            "5. So make the report carry the data: concrete file paths, line numbers, symbol names, values, and your conclusion for each. Write it for someone who has not seen the workspace and will not re-read every file - spell out what you found, not how you looked for it. Skip the narration (\"I searched for X, then looked at Y\") and keep the findings.\n"
-            "6. Send <tool:agent_note> as soon as you find something the lead agent should know about, so it is not waiting for your report at the end.\n"
-            "7. You can do anything the lead agent can do, but you cannot spawn other subagents and you cannot ask the user anything.\n"
+            "1. WORK LIKE A REAL AUTONOMOUS AGENT IN A CHAT: Converse and explain your actions just like in a normal chat. Always write explanations, thoughts, and commentary before your tool calls (e.g. what you are going to check, what you just discovered from the previous tool, and what you plan to do next).\n"
+            "2. EXECUTE REAL TOOLS FOR EVERY ACTION: Whenever you state that you are going to check, list, read, or search something, you MUST IMMEDIATELY EMIT the corresponding <tool:...> XML tag in that exact turn! NEVER write about checking a file or directory without actually executing the tool. NEVER imagine, assume, or fabricate tool results — wait for the real result.\n"
+            "3. DIRECT INSPECTION: You MUST use <tool:read> and <tool:glob> to inspect files directly. Never search disk paths or write PowerShell probe scripts when <tool:read> can read the file.\n"
+            "4. NO GUI APPS OR BROWSERS: NEVER attempt to launch, search for, or automate external GUI applications, web browsers (such as msedge, chrome, firefox), or web servers. You cannot interact with graphical windows.\n"
+            "5. NEVER SPAWN SUBAGENTS OR BACKGROUND TASKS: You CANNOT spawn other subagents or background tasks. NEVER emit <tool:subagent> tags or background commands. Execute your assignment yourself directly.\n"
+            "6. Never claim you do not have access to files, filesystem, or tools — use <tool:ls path=\".\"/> or <tool:glob pattern=\"*.*\"/> to inspect the files.\n"
+            "7. FINAL REPORT: Once you have gathered sufficient findings, conclude with a thorough, well-structured final report answering the task with concrete recommendations, line numbers, and conclusions.\n"
+            "8. Send <tool:agent_note text=\"...\" /> as soon as you find something the lead agent should know about, so it is not waiting for your report at the end.\n"
         )
         history: List[Dict[str, Any]] = [
             {"role": "system", "content": system_content},
@@ -163,7 +177,7 @@ class SubagentOrchestrator:
                         history=list(history),
                         findings=list(findings),
                         note=note,
-                        events=list(events),
+                        events=list(events) + list(getattr(task, "events", []) or []),
                     ))
                 except Exception:
                     pass
@@ -173,7 +187,7 @@ class SubagentOrchestrator:
         _t0 = _time.monotonic()
         if model_call is None:
             _emit("failed", thought="No model backend wired.")
-            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False)
+            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False, status="failed")
 
         # One argument or two. The protocol carries the task so a backend with
         # server-side tools can attribute what ran; a backend from before that
@@ -188,8 +202,15 @@ class SubagentOrchestrator:
             except (TypeError, ValueError):
                 _takes_task = False
 
-        import re as _re
-        for _ in range(max(1, max_turns)):
+        was_aborted = False
+        failed_tool_counts = {}
+
+        for _turn_idx in range(max(1, max_turns)):
+            if getattr(task, "abort_requested", False):
+                was_aborted = True
+                last_text = "Subagent was cancelled."
+                break
+
             sub_history = list(history)
             if len(sub_history) > 20:
                 # Keep the system prompt, the task, and a longer tail of tool
@@ -208,6 +229,12 @@ class SubagentOrchestrator:
             except Exception as e:
                 last_text = f"Subagent {task.role} model error: {e}"
                 break
+
+            if getattr(task, "abort_requested", False):
+                was_aborted = True
+                last_text = "Subagent was cancelled."
+                break
+
             if not text.strip() or any(text.startswith(p) for p in ("⚠", "Connection error:", "API key required")):
                 last_text = f"Subagent {task.role} model error: {text or 'empty response'}"
                 break
@@ -215,13 +242,64 @@ class SubagentOrchestrator:
             calls = self._extract_calls(text)
             history.append({"role": "assistant", "content": last_text})
             if not calls:
+                if (
+                    _turn_idx == 0
+                    and max_turns > 1
+                    and not events
+                    and not any(
+                        isinstance(ev, dict)
+                        and bool(str(ev.get("tool", "") or "").strip())
+                        and ev.get("type") not in ("text", "thinking")
+                        for ev in (getattr(task, "events", None) or [])
+                    )
+                ):
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "Start by inspecting the workspace files immediately. Emit <tool:ls path=\".\" /> now."
+                        ),
+                    })
+                    continue
                 break
             done = False
             for cname, cargs in calls:
+                if getattr(task, "abort_requested", False):
+                    was_aborted = True
+                    last_text = "Subagent was cancelled."
+                    done = True
+                    break
+
+                if cname in ("subagent", "spawn_subagent", "task", "tasks", "bg_task", "background_task"):
+                    history.append({"role": "user", "content": f"[ERROR: Tool '{cname}' is forbidden for subagents. You cannot spawn subagents or background tasks. Execute your task directly using read/edit/write/search.]"})
+                    continue
+                tl = cname.lower().strip()
+                if tl in ("shell", "terminal", "bash", "cmd", "sh", "run_command", "exec"):
+                    cname = "command"
+                elif tl in ("file_read", "read_file"):
+                    cname = "read"
+                elif tl in ("file_write", "write_file"):
+                    cname = "write"
+                elif tl in ("file_edit", "edit_file"):
+                    cname = "edit"
                 if cname not in allowed:
                     history.append({"role": "user", "content": f"[tool {cname} not allowed for subagents]"})
                     continue
-                arg_summary = str(cargs.get("path") or cargs.get("query") or cargs.get("cmd") or cargs.get("pattern") or cargs.get("text") or cargs.get("note") or "")[:80]
+                arg_summary = str(
+                    cargs.get("path")
+                    or cargs.get("file")
+                    or cargs.get("filePath")
+                    or cargs.get("target")
+                    or cargs.get("command")
+                    or cargs.get("cmd")
+                    or cargs.get("CommandLine")
+                    or cargs.get("query")
+                    or cargs.get("pattern")
+                    or cargs.get("glob")
+                    or cargs.get("text")
+                    or cargs.get("note")
+                    or (list(cargs.values())[0] if cargs and isinstance(list(cargs.values())[0], str) else "")
+                    or ""
+                )[:80]
                 _emit("running", cname, arg_summary)
                 try:
                     res = tool_executor(cname, cargs) if tool_executor else {"success": False, "error": "no executor"}
@@ -242,9 +320,16 @@ class SubagentOrchestrator:
                     _emit("running", "agent_note", str(res.get("note", ""))[:80], note=str(res.get("note", "")))
                 snippet = _format_tool_snippet(cname, res)[:2000]
                 history.append({"role": "user", "content": f"[tool:{cname} result]\n{snippet}"})
-                if not ok and cname in ("write", "edit"):
-                    done = True
-                    break
+                if not ok:
+                    call_sig = f"{cname}:{arg_summary}"
+                    failed_tool_counts[call_sig] = failed_tool_counts.get(call_sig, 0) + 1
+                    if failed_tool_counts[call_sig] >= 2:
+                        history.append({"role": "user", "content": f"[tool:{cname} repeated error: '{arg_summary}' failed repeatedly. Do not retry this command. Provide your evaluation based on the available files.]"})
+                        done = True
+                        break
+                    if cname in ("write", "edit"):
+                        done = True
+                        break
             _emit("running", "thinking", "processing…")
             if done:
                 break
@@ -260,13 +345,23 @@ class SubagentOrchestrator:
             not last_text.strip()
             or any(last_text.startswith(p) for p in (f"Subagent {task.role} model error:", "Failed:", "Error:", "⚠", "Connection error:"))
         )
-        if is_model_err:
+
+        if was_aborted or getattr(task, "abort_requested", False):
+            _emit("cancelled", thought="Subagent was cancelled by user.")
+            res_status = "cancelled"
+            is_success = False
+        elif is_model_err:
             _emit("failed", thought=last_text or f"Subagent {task.role} failed.")
+            res_status = "failed"
+            is_success = False
         else:
             _emit("completed", "", "", f"Subagent {task.role} finished.")
+            res_status = "completed"
+            is_success = True
+
         return SubagentResult(
             role=task.role,
-            summary=last_text[:2000] if last_text else f"{task.role} produced no output.",
+            summary=last_text[:8000] if last_text else f"{task.role} produced no output.",
             findings=findings,
             history=history,
             system_prompt=task.system_prompt,
@@ -279,7 +374,8 @@ class SubagentOrchestrator:
             # on the task trail behind, and render as their own blocks.
             events=list(events) + list(task.events),
             elapsed=max(0.0, _time.monotonic() - _t0),
-            success=not is_model_err,
+            success=is_success,
+            status=res_status,
         )
 
     def _extract_calls(self, text: str) -> List[Any]:
@@ -307,7 +403,7 @@ class SubagentOrchestrator:
         is_local: Optional[bool] = None,
         model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
-        max_turns: int = 8,
+        max_turns: int = 25,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,
     ) -> List[SubagentResult]:
         if is_local is None:
@@ -324,7 +420,7 @@ class SubagentOrchestrator:
         on_progress: Optional[Callable[[SubagentProgress], None]] = None,
         model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
-        max_turns: int = 8,
+        max_turns: int = 25,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,
     ) -> List[SubagentResult]:
         if on_progress:
@@ -352,7 +448,7 @@ class SubagentOrchestrator:
         on_progress: Optional[Callable[[SubagentProgress], None]] = None,
         model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
         tool_executor: Optional[Callable[[str, Dict[str, str]], Dict[str, Any]]] = None,
-        max_turns: int = 8,
+        max_turns: int = 25,
         tool_executor_factory: Optional[Callable[[str], Callable[[str, Dict[str, str]], Dict[str, Any]]]] = None,
     ) -> List[SubagentResult]:
         results: List[SubagentResult] = []
@@ -369,17 +465,13 @@ class SubagentOrchestrator:
                     results.append(res)
                 except Exception as e:
                     task = futures[fut]
-                    if on_progress:
-                        try:
-                            on_progress(SubagentProgress(role=task.role, status="failed", thought=f"Failed: {e}", goal=task.goal, system_prompt=task.system_prompt, error=str(e), success=False))
-                        except Exception:
-                            pass
                     results.append(SubagentResult(
                         role=task.role,
                         summary=f"Failed: {e}",
-                        findings=[f"Error: {e}"],
+                        findings=[f"Failed: {e}"],
                         history=[],
                         system_prompt=task.system_prompt,
                         success=False,
+                        status="failed",
                     ))
         return results

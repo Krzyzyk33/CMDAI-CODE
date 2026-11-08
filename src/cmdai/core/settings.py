@@ -34,6 +34,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_iterations": 25,
         "auto_approve_readonly": True,
     },
+    "permissions": {
+        "read": "allow",
+        "ls": "allow",
+        "glob": "allow",
+        "search": "allow",
+        "write": "ask",
+        "edit": "ask",
+        "command": {
+            "git status*": "allow",
+            "git diff*": "allow",
+            "git log*": "allow",
+            "*": "ask",
+        },
+    },
     "server": {
         "enabled": True,
         "port": 8080,
@@ -169,6 +183,45 @@ class SettingsManager:
             prov_list.append(clean_id)
             return self.save_config()
         return True
+
+    def get_custom_providers(self) -> Dict[str, Dict[str, Any]]:
+        c_provs = self.config.get("custom_providers", {})
+        if not isinstance(c_provs, dict):
+            return {}
+        return dict(c_provs)
+
+    def add_custom_provider(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str = "",
+        default_model: str = "",
+        provider_id: str = "",
+    ) -> str:
+        if "custom_providers" not in self.config or not isinstance(self.config["custom_providers"], dict):
+            self.config["custom_providers"] = {}
+
+        name_clean = name.strip()
+        if not provider_id:
+            provider_id = re.sub(r'[^a-z0-9_]+', '_', name_clean.lower()).strip('_')
+            if not provider_id:
+                provider_id = f"custom_{int(time.time())}"
+
+        url_clean = base_url.strip().rstrip("/")
+        models = [default_model.strip()] if default_model.strip() else []
+
+        self.config["custom_providers"][provider_id] = {
+            "id": provider_id,
+            "name": name_clean,
+            "base_url": url_clean,
+            "default_models": models,
+        }
+        if api_key.strip():
+            self.set_api_key(provider_id, api_key.strip())
+        if default_model.strip():
+            self.add_custom_model(provider_id, default_model.strip())
+        self.save_config()
+        return provider_id
 
 
 _instance: Optional[SettingsManager] = None

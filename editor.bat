@@ -8,8 +8,8 @@ set PYTHONIOENCODING=utf-8
 chcp 65001 >nul 2>&1
 
 if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
-    "%SCRIPT_DIR%.venv\Scripts\python.exe" -m editor.main %*
+    "%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%src\cmdai\editor\main.py" %*
 ) else (
-    python -m editor.main %*
+    python "%SCRIPT_DIR%src\cmdai\editor\main.py" %*
 )
 endlocal

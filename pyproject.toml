@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmdai-code"
-version = "3.0.4-alpha"
+version = "3.0.6a0"
 description = "CMDAI CODE - autonomous terminal coding agent for Windows"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Custom Proprietary License - All Rights Reserved" }
+license = { text = "Custom Non-Commercial / Personal Use License" }
 authors = [{ name = "Krzyzyk33" }]
 dependencies = [
   "textual>=0.70.0",

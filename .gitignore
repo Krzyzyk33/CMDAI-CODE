@@ -46,20 +46,5 @@ logs/
 test_*.svg
 sim_*.log
 scratch/
-
-node_modules/
-*.tgz
-
-# src/**/__pycache__/ lapie juz regula __pycache__/ na gorze
-
-# lokalne zrzuty ekranu (generator: tools/tui_screenshots.py)
-zrzuty/
-zrzuty2/
-
-# edytor jest CZĘŚCIĄ repo - osobną aplikacją, ale w tym samym drzewie.
-# Śmieci edytora łapie `editor/.gitignore` (celowo zdublowane, żeby
-# edytor działał nawet po wyjściu z tego katalogu).
-#
-# Historia: wpis `editor/` był tu do 2026-09-28 i trzymał 104 pliki
-# poza gitem. Wyprostowane.
-/
+editor/icons/font/*.ttf
+editor/icons/font/glyph_map.json

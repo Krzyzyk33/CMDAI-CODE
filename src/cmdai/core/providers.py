@@ -6,7 +6,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 from .capabilities import (
     THINKING_OFF,
     budget_for,
@@ -21,7 +24,8 @@ TOOL_COMPLETE_PATTERNS = re.compile(
     r'(?:'
     r'<tool:(?!write\b|edit\b|command\b)\w+[^>]*?/>'
     r'|<tool:(?:write|edit|command)\b[^>]*?\b(?:content|code|new|cmd|command)=[^>]*?/>'
-    r'|</(?:tool:)?\w+>'
+    r'|</tool:\w+>'
+    r'|</(?:subagent|task)>'
     r'|<tool_call>[^>]*?/>'
     r'|</tool_call>'
     r'|<\|tool_call>[^>]*?/>'
@@ -53,7 +57,7 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         key_url="",
         provider_type="local",
         default_models=[],
-        supports_remote_fetch=False,
+        supports_remote_fetch=True,
     ),
     "opencode": ProviderInfo(
         id="opencode",
@@ -535,8 +539,6 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
 
     if provider_id == "local_gguf":
         from .model_paths import list_gguf_files, resolve_models_dir
-        # Was six candidates, four of them hardcoded D:/E: paths under a
-        # "CMDAI CODE" name that no longer exists.
         models_dir = resolve_models_dir("")
         if not os.path.isdir(models_dir):
             return []
@@ -547,20 +549,24 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                 path = os.path.join(models_dir, f)
                 size_mb = os.path.getsize(path) / (1024 * 1024)
                 size_str = f"{size_mb / 1024:.1f}GB" if size_mb > 1024 else f"{size_mb:.0f}MB"
+                f_low = f.lower()
+                has_think = any(k in f_low for k in ["r1", "qwq", "reason", "think", "deepseek"])
                 found.append({
                     "id": f,
                     "name": f,
                     "badge": size_str,
+                    "thinking": has_think,
+                    "levels": ["low", "medium", "high"] if has_think else [],
                 })
-        # `thinking` was three substrings against the filename. It is now read
-        # out of the file's own chat template, which is the only thing that knows
-        # - and which was unreachable behind a hard-coded `gemma` refusal.
-        return _merge_catalog_facts(provider_id, found)
+        return found
 
     if not api_key and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
         # No key, so the provider will not tell us anything. The catalogue still
         # can, and a card with a real list beats a card that says "key required"
         # while the list is sitting there.
+        return catalog_models(provider_id)
+
+    if requests is None:
         return catalog_models(provider_id)
 
     url = f"{info.base_url}{info.models_endpoint}"
@@ -608,7 +614,10 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         continue
                     name = item.get("name", mid)
 
-                    ctx_len = item.get("context_length", 0)
+                    from .resource_limits import extract_model_context_length
+                    ctx_len = extract_model_context_length(item)
+                    if ctx_len <= 0 and getattr(cap, "context_limit", 0) > 0:
+                        ctx_len = int(cap.context_limit)
 
                     # The provider's own answer first. `supported_parameters`
                     # naming `reasoning` is better than anything we could look
@@ -699,6 +708,7 @@ def stream_chat_completion(
     is_aborted: Optional[Callable[[], bool]] = None,
     on_tool: Optional[Callable[[str, str, str], None]] = None,
     on_usage: Optional[Callable[[Dict[str, Any]], None]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, str]:
     """One turn against one provider.
 
@@ -771,6 +781,7 @@ def stream_chat_completion(
     full_text = []
     full_thinking = []
     is_in_thinking = False
+    accumulated_tool_calls: Dict[int, Dict[str, str]] = {}
     # Detection by doing, not by guessing from the name. A model that streams
     # a reasoning channel has just proved it reasons, which is the one fact no
     # heuristic can supply - and it repairs a cached "no reasoning" verdict.
@@ -784,6 +795,10 @@ def stream_chat_completion(
             note_reasoning_observed(model_id, provider_id)
         except Exception:
             pass
+
+    if requests is None:
+        yield ("Error: Python 'requests' package is not installed. Run: pip install requests", None, None)
+        return
 
     url = f"{info.base_url}/chat/completions"
     headers = {
@@ -817,6 +832,9 @@ def stream_chat_completion(
         "temperature": params.get("temperature", 0.3),
         "stream": True,
     }
+    if tools and provider_id not in ("local_gguf",):
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto" 
     # Request token usage statistics in stream chunks (supported by OpenAI, OpenRouter, Groq, Ollama, DeepSeek, etc.)
     if provider_id not in ("anthropic",):
         payload["stream_options"] = {"include_usage": True}
@@ -889,31 +907,7 @@ def stream_chat_completion(
             except Exception:
                 clean_err = err_text
 
-            if provider_id in ("opencode", "opencode_zen"):
-                if not api_key:
-                    err_msg = (
-                        f"⚠ OpenCode Zen Error [{resp.status_code}]: {clean_err or 'Access restricted'}\n\n"
-                        f"The OpenCode Zen gateway requires an API key for third-party access.\n"
-                        f"• Get your API key at: https://opencode.ai/zen\n"
-                        f"• Configure it in /models (Ctrl+D) or in config.json\n"
-                        f"• Or use local offline models (local_gguf) or free models on OpenRouter."
-                    )
-                else:
-                    err_msg = (
-                        f"⚠ OpenCode Zen Error [{resp.status_code}]: {clean_err or err_text}\n\n"
-                        f"Model '{model_id}' is temporarily down upstream or your key cannot access it. "
-                        f"Try selecting another model in /models or verify your key at https://opencode.ai/zen."
-                    )
-            elif provider_id == "openrouter" and resp.status_code == 401:
-                err_msg = (
-                    f"⚠ OpenRouter Error [{resp.status_code}]: {clean_err or 'Authentication required'}\n\n"
-                    f"Free models on OpenRouter require an OpenRouter account API key:\n"
-                    f"• Create a free key at: https://openrouter.ai/keys\n"
-                    f"• Configure it in /models (Ctrl+D) or config.json\n"
-                    f"• Or use local offline models from local_gguf."
-                )
-            else:
-                err_msg = f"⚠ Provider Error [{resp.status_code}]: {clean_err or err_text}"
+            err_msg = f"⚠ API Error [{resp.status_code}]: {clean_err or err_text}"
 
             if on_token:
                 on_token(err_msg)
@@ -1038,7 +1032,7 @@ def stream_chat_completion(
                 full_text.append(content_delta)
                 if on_token:
                     on_token(content_delta)
-                if TOOL_COMPLETE_PATTERNS.search("".join(full_text)):
+                if not tools and TOOL_COMPLETE_PATTERNS.search("".join(full_text)):
                     break
 
             except Exception:
@@ -1068,3 +1062,31 @@ def stream_chat_completion(
         return StreamResult(err_msg, "".join(full_thinking), captured_usage)
 
     return StreamResult("".join(full_text), "".join(full_thinking), captured_usage)
+
+
+def load_custom_providers() -> None:
+    try:
+        from .settings import get_settings
+        settings = get_settings()
+        custom_provs = settings.get_custom_providers()
+        for pid, pdata in custom_provs.items():
+            if not isinstance(pdata, dict):
+                continue
+            name = pdata.get("name") or pid
+            base_url = pdata.get("base_url") or ""
+            models = pdata.get("default_models") or []
+            PROVIDERS_CATALOG[pid] = ProviderInfo(
+                id=pid,
+                name=name,
+                base_url=base_url,
+                key_url="",
+                provider_type="cloud",
+                default_models=list(models),
+                supports_remote_fetch=True,
+                models_endpoint="/models",
+            )
+    except Exception:
+        pass
+
+
+load_custom_providers()

@@ -1,15 +1,12 @@
 {
   "name": "cmdai-code",
-  "version": "3.0.4-alpha",
-  "description": "CMDAI CODE - autonomous terminal coding agent for Windows (npm bootstrap wrapper; needs Python 3.10+)",
+  "version": "3.0.6",
+  "description": "Autonomous Terminal Coding Agent for Windows",
   "bin": {
     "cmdai": "bin/cmdai.js"
   },
-  "files": [
-    "bin/"
-  ],
-  "engines": {
-    "node": ">=18"
+  "scripts": {
+    "start": "node bin/cmdai.js"
   },
   "scripts": {
     "prepublishOnly": "python tools/sync_versions.py && python tools/gen_bundled_release.py --check && python -m pytest -q"
@@ -26,9 +23,13 @@
     "type": "git",
     "url": "git+https://github.com/Krzyzyk33/CMDAI-CODE.git"
   },
-  "homepage": "https://github.com/Krzyzyk33/CMDAI-CODE",
-  "bugs": {
-    "url": "https://github.com/Krzyzyk33/CMDAI-CODE/issues"
-  },
-  "license": "SEE LICENSE IN LICENSE"
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "terminal",
+    "tui",
+    "windows"
+  ],
+  "author": "Krzyzyk33",
+  "license": "Custom"
 }

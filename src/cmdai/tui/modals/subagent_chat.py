@@ -1,14 +1,14 @@
 import os
 from typing import Dict, Any, List, Optional
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from ..widgets import AssistantTurnCard
+from ..widgets import AssistantTurnCard, UserMessageCard
 
 # The model-name spinner, so the task label animates the same way rather than
 # inventing a second set of glyphs. It lives in app.py, which cannot be
@@ -78,8 +78,6 @@ SubagentChatModal {
     padding: 0;
 }
 
-/* No bottom panel: the window is the normal chat, so the card fills it. The
-   sibling position lives in the header instead, next to the subagent name. */
 .subagent-sibling-hint {
     color: #484f58;
 }
@@ -97,7 +95,7 @@ SubagentChatModal {
 /* Task card: looks like #input-card, expanding naturally with task height. */
 #subagent-task-card {
     height: auto;
-    max-height: 14;
+    max-height: 10;
     width: 100%;
     background: #161b22;
     border: none;
@@ -131,7 +129,7 @@ SubagentChatModal {
     width: 100%;
     height: auto;
     min-height: 1;
-    max-height: 10;
+    max-height: 8;
     overflow-y: auto;
     scrollbar-size-vertical: 0;
     scrollbar-size-horizontal: 0;
@@ -150,6 +148,8 @@ class SubagentChatModal(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),
         Binding("ctrl+q", "dismiss_modal", "Close"),
+        Binding("k", "kill_agent", "Stop subagent"),
+        Binding("ctrl+b", "send_to_background", "Tło", show=False),
         Binding("left", "prev_agent", "Prev", show=False),
         Binding("right", "next_agent", "Next", show=False),
     ]
@@ -165,13 +165,20 @@ class SubagentChatModal(ModalScreen[None]):
         agent_total: int = 1,
         agents: Optional[List[Dict[str, Any]]] = None,
         live_agent: Optional[Any] = None,
+        thinking: str = "",
+        name: Optional[str] = None,
+        id: Optional[str] = None,
+        classes: Optional[str] = None,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        kwargs.pop("thinking", None)
+        super().__init__(name=name, id=id, classes=classes)
+        self.thinking = str(thinking or "")
         self.agents: List[Dict[str, Any]] = list(agents) if agents else [{
             "role": role, "goal": goal, "system_prompt": system_prompt,
             "history": history or [], "findings": findings or [],
             "status": "completed",
+            "thinking": thinking,
         }]
         self.agent_index = max(1, min(agent_index, len(self.agents)))
         self.agent_total = len(self.agents)
@@ -201,25 +208,29 @@ class SubagentChatModal(ModalScreen[None]):
                 "findings": list(getattr(b, "subagent_findings", []) or getattr(b, "findings", []) or []),
                 "notes": list(getattr(b, "subagent_notes", []) or []),
                 "events": list(getattr(b, "subagent_events", []) or []),
+                "thinking": str(getattr(b, "thinking", "") or getattr(b, "_live_thinking", "") or ""),
                 "elapsed": float(getattr(b, "subagent_elapsed", 0.0) or 0.0),
                 "tokens": int(getattr(b, "subagent_tokens", 0) or 0),
                 "error": getattr(b, "error_msg", "") if getattr(b, "has_error", False) else "",
                 "status": getattr(b, "subagent_status", "") or getattr(b, "status", "running"),
+                "summary": str((getattr(b, "result_data", {}) or {}).get("summary", "") or ""),
             }
         return self.agents[self.agent_index - 1]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="subagent-modal-dialog"):
             with VerticalScroll(id="subagent-chat-scroll"):
-                # The real assistant card, not a lookalike: same widgets, same
-                # ToolBlock click-to-expand, same footer as the lead agent chat.
-                yield AssistantTurnCard("Subagent", has_thinking=False, classes="subagent-card")
-            # The task the lead agent wrote, in an input-like card that expands with content height.
+                # Real assistant card: tool blocks, text commentary, thinking, and formatted responses
+                yield AssistantTurnCard("Subagent", has_thinking=True, classes="subagent-card", id="subagent-assistant-card")
+            # The task dock at the bottom, matching #bottom-dock layout
             with Vertical(id="subagent-task-dock"):
+                with Horizontal(id="subagent-jump-bar"):
+                    yield Static("", id="subagent-jump-spacer")
+                    yield Static("", id="subagent-jump-to-new")
                 with Vertical(id="subagent-task-card"):
                     with Horizontal(id="subagent-task-header-row"):
                         yield Static("TASK", id="subagent-task-header")
-                        yield Static("[dim]esc[/dim]", id="subagent-task-meta")
+                        yield Static("[dim]k: Stop  ·  esc: Close[/dim]", id="subagent-task-meta")
                     yield Static("", id="subagent-task-body")
 
     def on_mount(self) -> None:
@@ -229,15 +240,10 @@ class SubagentChatModal(ModalScreen[None]):
         # in call order instead of queueing up unordered.
         self.call_after_refresh(self._render_agent)
         if self.live_agent is not None:
-            self._refresh_timer = self.set_interval(0.2, self._refresh_live)
+            self._refresh_timer = self.set_interval(0.35, self._refresh_live)
 
     def _advance_spinner(self) -> None:
-        """Animate the TASK label while the shown subagent is working.
-
-        The same marker the model name uses, for the same reason: a static
-        label next to work that is happening reads as finished. Two spaces after
-        the glyph, because a single one let the bright glyph's cell overwrite it.
-        """
+        """Animate the TASK header label while the shown subagent is working."""
         cur = self._current()
         if not cur:
             return
@@ -247,8 +253,16 @@ class SubagentChatModal(ModalScreen[None]):
         try:
             marker = META_MARKERS[self._spin_idx % len(META_MARKERS)]
             self._spin_idx += 1
+            is_bg = bool(getattr(self.live_agent, "is_backgrounded", False))
+            if not is_bg:
+                try:
+                    from ...agent.tasks import BackgroundTaskManager
+                    is_bg = BackgroundTaskManager.get_instance().has_active_background()
+                except Exception:
+                    is_bg = False
+            color = "#f59e0b" if is_bg else "#58a6ff"
             self.query_one("#subagent-task-header", Static).update(
-                f"[b #58a6ff]{marker}[/][b]  TASK[/]"
+                f"[b {color}]{marker}[/][b]  TASK[/]"
             )
         except Exception:
             pass
@@ -257,77 +271,153 @@ class SubagentChatModal(ModalScreen[None]):
 
     @staticmethod
     def _items(cur: Dict[str, Any]) -> List[Any]:
-        """Flatten a subagent session into the order it produced: prose and
-        tools interleaved.
-
-        Uses the one parser the lead agent and the orchestrator use, so the
-        window understands exactly the syntax the model was scored on. Its own
-        regexes here only matched <tool:...>: a Gemma turn came through as
-        `call:tool:ls path="." />` with the <|tool_call> prefix half stripped
-        and a dangling "/>", i.e. raw protocol on screen as if it were prose.
-
-        Walk the history so a sentence stays above the tools it introduced.
-        Each assistant message carries its own tool calls, so the number of
-        calls in it says how many events to attach after the prose. Events the
-        history has not caught up with yet are appended at the end, because a
-        live run records an event once the tool returned, which is after the
-        model already asked for it.
-
-        Only appends happen as a run proceeds, so the prefix of this list is
-        stable - which is what lets the live path emit only the tail.
+        """Flatten a subagent session into chronological order: prose commentary and
+        tools interleaved, preserving ALL tools and ALL text generated by the subagent.
         """
         from ...agent.runner import _parse_only
 
+        raw_events = list(cur.get("events") or [])
+        events: List[Dict[str, Any]] = []
+        has_typed_events = False
+        for ev in raw_events:
+            if not isinstance(ev, dict):
+                continue
+            if "sub_event" in ev:
+                sev = ev.get("sub_event")
+                if sev in ("tool_called", "tool_done"):
+                    t_n = str(ev.get("tool") or "").strip()
+                    t_t = str(ev.get("target") or "").strip()
+                    t_o = ev.get("output", "")
+                    events.append({
+                        "tool": t_n,
+                        "target": t_t,
+                        "result": {"success": bool(ev.get("ok", True)), "content": t_o},
+                        "ok": bool(ev.get("ok", True)),
+                    })
+                elif sev == "text_delta":
+                    t_txt = str(ev.get("text") or "").strip()
+                    if t_txt and not t_txt.startswith("{"):
+                        has_typed_events = True
+                        events.append({"type": "text", "content": t_txt})
+                continue
+            if ev.get("type") == "text":
+                t_txt = str(ev.get("content", "") or "").strip()
+                if t_txt and not t_txt.startswith("{") and not t_txt.startswith("sub_event"):
+                    has_typed_events = True
+                    events.append(ev)
+                continue
+            if ev.get("type") == "thinking":
+                t_think = str(ev.get("content", "") or "").strip()
+                if t_think:
+                    has_typed_events = True
+                    events.append(ev)
+                continue
+            t_name = str(ev.get("tool", "") or ev.get("name") or "").strip().lower()
+            if not t_name or t_name in ("subagent", "spawn_subagent"):
+                continue
+            t_tgt = str(ev.get("target", "") or "").splitlines()[0].strip() if ev.get("target") else ""
+            if t_name == "tool" and not t_tgt:
+                continue
+            events.append(ev)
+
+        # If events contain interleaved typed events (from _sub_model_call / server-side stream),
+        # respect that exact chronological order!
+        if has_typed_events:
+            items: List[Any] = []
+            for ev in events:
+                if ev.get("type") == "text":
+                    t_str = str(ev.get("content", "") or "").strip()
+                    if t_str:
+                        items.append(("text", t_str))
+                elif ev.get("type") == "thinking":
+                    t_think = str(ev.get("content", "") or "").strip()
+                    if t_think:
+                        items.append(("thinking", t_think))
+                else:
+                    items.append(("tool", ev))
+            return items
+
         items: List[Any] = []
-        events = list(cur.get("events") or [])
+        history = cur.get("history") or []
         cursor = 0
-        for msg in cur.get("history") or []:
-            # "user" turns are "[tool:x result]" feedback and the goal; both are
-            # already carried by the structured events and the task dock.
+        for i, msg in enumerate(history):
             if msg.get("role") != "assistant":
                 continue
-            for kind, payload in _parse_only(str(msg.get("content", "") or "")):
+            content = str(msg.get("content", "") or "")
+            parsed_segs = _parse_only(content)
+            has_tool = any(kind == "tool" for kind, _ in parsed_segs)
+            for kind, payload in parsed_segs:
                 if kind == "text":
-                    if payload:
-                        items.append(("text", payload))
+                    txt = str(payload or "").strip()
+                    if txt:
+                        items.append(("text", txt))
                     continue
-                if cursor >= len(events):
-                    break
-                items.append(("tool", events[cursor]))
-                cursor += 1
+                if kind == "tool":
+                    if cursor < len(events):
+                        items.append(("tool", events[cursor]))
+                        cursor += 1
+                    else:
+                        t_name, t_attrs = payload if isinstance(payload, tuple) else (str(payload), {})
+                        arg_sum = str(t_attrs.get("path") or t_attrs.get("query") or t_attrs.get("cmd") or t_attrs.get("pattern") or t_attrs.get("text") or t_attrs.get("note") or "")[:80]
+                        items.append(("tool", {
+                            "tool": t_name,
+                            "target": arg_sum,
+                            "args": dict(t_attrs or {}),
+                            "ok": True,
+                        }))
+
+            if not has_tool and cursor < len(events):
+                if i + 1 < len(history) and history[i + 1].get("role") == "user":
+                    user_msg = str(history[i + 1].get("content", "") or "")
+                    if "[tool:" in user_msg:
+                        count_in_user = user_msg.count("[tool:")
+                        for _ in range(count_in_user):
+                            if cursor < len(events):
+                                items.append(("tool", events[cursor]))
+                                cursor += 1
+
+        # Append any remaining executed tools that were run without XML tags
         for ev in events[cursor:]:
             items.append(("tool", ev))
         return items
 
     def _emit_items(self, card: Any, items: List[Any], start: int) -> None:
-        """Append items[start:] to the card, finishing every tool as it lands.
-
-        A block is finished the moment it is created, so it is born with a
-        static marker and never spins. Only the separate live-tool line at the
-        bottom of the card animates, exactly like the lead agent's.
-        """
-        # A subagent that keeps its checklist up to date calls <tool:todo> over
-        # and over. Showing one marker per call filled the window with duplicate
-        # "Todo" lines, so only the first of a run survives.
-        todo_open = self._live_todo_open
+        """Append items[start:] to the card, mounting text blocks and tool blocks."""
         for kind, payload in items[start:]:
+            if kind == "thinking":
+                think_text = str(payload or "").strip()
+                if think_text:
+                    tb = card.start_thinking()
+                    if tb is not None:
+                        tb.thinking_text = think_text
+                        tb.finish()
+                continue
             if kind == "text":
-                card.append_text_block(payload)
+                txt_clean = str(payload or "").strip()
+                if not txt_clean:
+                    continue
+                card.append_text_block(txt_clean)
                 continue
             ev = payload
-            tool = str(ev.get("tool", "") or "tool")
-            if tool in ("todo", "tasks", "scratch"):
-                if todo_open:
-                    continue
-                todo_open = True
-            else:
-                todo_open = False
-            block = card.add_tool(tool, str(ev.get("target", "") or ""))
+            tool = str(ev.get("tool", "") or ev.get("name") or "").strip()
+            raw_tgt = str(ev.get("target", "") or "")
+            first_tgt = raw_tgt.splitlines()[0].strip() if raw_tgt else ""
+            if not tool or (tool.lower() == "tool" and not first_tgt):
+                continue
+            if tool in ("subagent", "spawn_subagent"):
+                continue
+
             res = ev.get("result")
             if not isinstance(res, dict):
                 res = {"success": bool(ev.get("ok", True)), "content": str(res or "")}
-            block.finish(res)
-        self._live_todo_open = todo_open
+            else:
+                res = dict(res)
+            if "\n" in raw_tgt and not res.get("content"):
+                res["content"] = raw_tgt.split("\n", 1)[1].lstrip("\r\n")
+
+            block = card.add_tool(tool, first_tgt)
+            if block is not None:
+                block.finish(res)
 
     def _build_card(self, cur: Dict[str, Any], live: bool = False) -> Any:
         """Replay a finished subagent session into a real AssistantTurnCard.
@@ -336,7 +426,7 @@ class SubagentChatModal(ModalScreen[None]):
         A running one goes through _advance_live instead, which appends rather
         than rebuilding.
         """
-        card = self.query_one(AssistantTurnCard)
+        card = self.query_one("#subagent-assistant-card", AssistantTurnCard)
         card.model_name = str(cur.get("role", "Subagent"))
         # Wipe whatever the previously shown subagent left behind.
         try:
@@ -356,6 +446,29 @@ class SubagentChatModal(ModalScreen[None]):
         except Exception:
             pass
 
+        # Mount thinking block if subagent has thinking
+        think_val = str(cur.get("thinking") or getattr(self.live_agent, "thinking", "") or "").strip()
+        is_thinking = "thinking" in str(getattr(self.live_agent, "subagent_live_tool", "")).lower() or bool(think_val)
+        if is_thinking or think_val:
+            tb = card.start_thinking()
+            if tb is not None:
+                if think_val:
+                    tb.thinking_text = think_val
+                    if tb.is_expanded:
+                        tb._update_body()
+                elapsed_so_far = float(cur.get("elapsed", 0.0) or 0.0)
+                if self.live_agent and getattr(self.live_agent, "start_time", None):
+                    elapsed_so_far = max(elapsed_so_far, time.time() - self.live_agent.start_time)
+                elif self.live_agent and getattr(self.live_agent, "subagent_started", None):
+                    import time as _t
+                    elapsed_so_far = max(elapsed_so_far, _t.monotonic() - self.live_agent.subagent_started)
+                if elapsed_so_far > 0:
+                    tb.start_time = time.time() - elapsed_so_far
+                    tb.elapsed = elapsed_so_far
+                tb.update_header(live=live)
+                if not live:
+                    tb.finish()
+
         # The full replay uses the same item list the live path appends from,
         # so a finished subagent and a running one read identically.
         self._live_done = 0
@@ -363,22 +476,43 @@ class SubagentChatModal(ModalScreen[None]):
         self._live_todo_open = False
         self._live_summary = ""
         self._live_footed = False
+        self._emitted_keys = set()
+        self._last_emitted_tool_sig = None
         items = self._items(cur)
         self._emit_items(card, items, 0)
         self._live_done = len(items)
 
-        # Progress notes, oldest first. The live path appends only the tail;
-        # a rebuild replays all of them. Without this the window of a running
-        # subagent showed the live line and nothing else.
+        # Progress notes: only append note if it wasn't already emitted as an agent_note tool
+        emitted_notes = set()
+        for k, p in items:
+            if k == "tool" and isinstance(p, dict):
+                t_name = str(p.get("tool", "")).lower()
+                if t_name == "agent_note":
+                    note_val = str((p.get("args") or {}).get("text") or p.get("target") or "").strip()
+                    if note_val:
+                        emitted_notes.add(note_val)
+
         notes = [str(n or "").strip() for n in (cur.get("notes") or [])]
-        notes = [n for n in notes if n]
+        notes = [n for n in notes if n and n not in emitted_notes]
+        tool_kw = ("read", "edit", "write", "glob", "search", "shell", "command", "terminal", "bash", "ls", "scratch", "todo")
         for note in notes:
-            card.append_text_block(note)
+            words = note.split(None, 1)
+            t_cand = words[0].lower() if words else ""
+            if t_cand in tool_kw:
+                if t_cand in ("shell", "terminal", "bash"):
+                    t_cand = "command"
+                t_arg = words[1].strip() if len(words) > 1 else ""
+                tb = card.add_tool(t_cand, t_arg)
+                if tb is not None:
+                    tb.finish({"result": "completed"})
+            else:
+                card.append_text_block(note)
         self._live_notes_done = len(notes)
 
         # The report the lead agent reads, as plain closing text.
         summary = str(cur.get("summary", "")).strip()
-        if summary:
+        last_text_item = next((p.strip() for k, p in reversed(items) if k == "text" and isinstance(p, str)), "")
+        if summary and summary != last_text_item:
             card.append_text_block(summary)
 
         status = str(cur.get("status", "completed")).lower()
@@ -390,10 +524,16 @@ class SubagentChatModal(ModalScreen[None]):
             # Still working: keep the card generating so the footer reads
             # "Running" with the tool it is on, exactly like the lead agent.
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
-            if tool_and_target and tool_and_target.lower() not in ("starting", "working"):
+            if tool_and_target and tool_and_target.lower() not in ("starting", "working", "thinking", "processing…", "processing..."):
                 tool = tool_and_target.split(" ", 1)[0]
+                if tool.lower() in ("shell", "terminal", "bash", "sh", "cmd", "run_command", "exec"):
+                    tool = "command"
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
-                card.set_generating_tool(tool, target)
+                first_tgt = target.splitlines()[0].strip() if target else ""
+                if tool.lower() in ("thinking", "processing") or getattr(self, "_last_emitted_tool_sig", None) == (tool.lower(), first_tgt):
+                    card.clear_generating_tool()
+                else:
+                    card.set_generating_tool(tool, target)
             else:
                 card.clear_generating_tool()
         else:
@@ -409,13 +549,19 @@ class SubagentChatModal(ModalScreen[None]):
                 meta_lbl = "[dim]esc[/dim]"
             self.query_one("#subagent-task-meta", Static).update(meta_lbl)
         except Exception:
-
             pass
-        # The task is the text the lead agent wrote for this subagent, shown
-        # raw. The generated system prompt stays out of the way.
+        task_b = str(cur.get("goal", "") or "").strip()
+        if task_b.startswith("{") and any(k in task_b for k in ("sub_event", "goal", "task", "target")):
+            try:
+                import json as _json
+                p = _json.loads(task_b)
+                if isinstance(p, dict):
+                    task_b = str(p.get("goal") or p.get("task") or p.get("target") or "").strip()
+            except Exception:
+                pass
         try:
             self.query_one("#subagent-task-body", Static).update(
-                str(cur.get("goal", "") or "").strip() or "No task description.")
+                task_b or "No task description.")
         except Exception:
             pass
         return card
@@ -428,13 +574,16 @@ class SubagentChatModal(ModalScreen[None]):
             pass
 
     def _show_task(self, cur: Dict[str, Any]) -> None:
-        """The task the lead agent wrote, raw, in the dock.
-
-        Refreshed on every tick while the subagent runs: the goal reaches the
-        marker before the model has even answered, but a window opened during
-        the very first turn can still get a first, empty version of it.
-        """
+        """The task the lead agent wrote, in the TASK dock."""
         task = str(cur.get("goal", "") or "").strip()
+        if task.startswith("{") and any(k in task for k in ("sub_event", "goal", "task", "target")):
+            try:
+                import json as _json
+                p = _json.loads(task)
+                if isinstance(p, dict):
+                    task = str(p.get("goal") or p.get("task") or p.get("target") or "").strip()
+            except Exception:
+                pass
         if not task or task == self._task_shown:
             return
         self._task_shown = task
@@ -444,32 +593,71 @@ class SubagentChatModal(ModalScreen[None]):
             pass
 
     def _advance_live(self, cur: Dict[str, Any], running: bool) -> None:
-        """Append whatever the subagent produced since the last tick.
-
-        This is the whole point: nothing already on screen is touched. The
-        lead agent's card grows the same way - add_tool appends, finish_tool
-        closes a block, set_generating_tool repaints one line at the bottom.
-        Rebuilding here is what made the window flicker.
-        """
-        card = self.query_one(AssistantTurnCard)
+        """Append whatever the subagent produced since the last tick."""
+        card = self.query_one("#subagent-assistant-card", AssistantTurnCard)
         card.model_name = str(cur.get("role", "Subagent"))
         self._show_task(cur)
+
+        # Update live thinking
+        live_think = str(getattr(self.live_agent, "thinking", "") or cur.get("thinking") or "").strip()
+        is_thinking = "thinking" in str(getattr(self.live_agent, "subagent_live_tool", "")).lower() or bool(live_think)
+        if running and is_thinking:
+            tb = card.start_thinking()
+            if tb is not None:
+                if live_think and tb.thinking_text != live_think:
+                    tb.thinking_text = live_think
+                    if tb.is_expanded:
+                        tb._update_body()
+                elapsed_so_far = float(cur.get("elapsed", 0.0) or 0.0)
+                if self.live_agent and getattr(self.live_agent, "start_time", None):
+                    elapsed_so_far = max(elapsed_so_far, time.time() - self.live_agent.start_time)
+                elif self.live_agent and getattr(self.live_agent, "subagent_started", None):
+                    import time as _t
+                    elapsed_so_far = max(elapsed_so_far, _t.monotonic() - self.live_agent.subagent_started)
+                if elapsed_so_far > 0:
+                    tb.start_time = time.time() - elapsed_so_far
+                    tb.elapsed = elapsed_so_far
+                tb.update_header(live=True)
+        elif not running and card.thinking_block is not None and not card.thinking_block.is_finished:
+            card.finish_thinking()
 
         items = self._items(cur)
         if len(items) > self._live_done:
             self._emit_items(card, items, self._live_done)
             self._live_done = len(items)
 
+        # Update results on any currently running tool blocks as results arrive
+        raw_events = list(cur.get("events") or [])
+        tool_blocks = list(getattr(card, "tool_blocks", []) or [])
+        for i, ev in enumerate(raw_events):
+            if i < len(tool_blocks):
+                tb = tool_blocks[i]
+                if getattr(tb, "tool_running", False):
+                    res = ev.get("result")
+                    if res is not None:
+                        tb.finish(res if isinstance(res, dict) else {"content": str(res)})
+
         notes = [str(n or "").strip() for n in (cur.get("notes") or [])]
-        notes = [n for n in notes if n]
-        for note in notes[self._live_notes_done:]:
-            card.append_text_block(note)
-        self._live_notes_done = len(notes)
+        notes = [n for n in notes if n and not n.startswith("{") and not n.startswith("sub_event")]
+        if len(notes) > self._live_notes_done:
+            tool_kw = ("read", "edit", "write", "glob", "search", "shell", "command", "terminal", "bash", "ls", "scratch", "todo")
+            for note in notes[self._live_notes_done:]:
+                words = note.split(None, 1)
+                t_cand = words[0].lower() if words else ""
+                if t_cand in tool_kw:
+                    t_arg = words[1].strip() if len(words) > 1 else ""
+                    tb = card.add_tool(t_cand, t_arg)
+                    if tb is not None:
+                        tb.finish({"result": "completed"})
+                else:
+                    card.append_text_block(note)
+            self._live_notes_done = len(notes)
 
         # The report, once, when there is one. A live run has none until the
         # subagent wraps up.
         summary = str(cur.get("summary", "") or "").strip()
-        if summary and summary != self._live_summary:
+        last_text_item = next((p.strip() for k, p in reversed(items) if k == "text" and isinstance(p, str)), "")
+        if summary and summary != self._live_summary and summary != last_text_item:
             self._live_summary = summary
             card.append_text_block(summary)
 
@@ -479,17 +667,36 @@ class SubagentChatModal(ModalScreen[None]):
             # subagent has nothing to show, and an empty pulsing row there read
             # as a tool that did not work.
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
-            if tool_and_target and tool_and_target.lower() not in ("starting", "working"):
+            if tool_and_target and tool_and_target.lower() not in ("starting", "working", "thinking", "processing…", "processing..."):
                 tool = tool_and_target.split(" ", 1)[0]
+                if tool.lower() in ("shell", "terminal", "bash", "sh", "cmd", "run_command", "exec"):
+                    tool = "command"
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
-                card.set_generating_tool(tool, target)
+                first_tgt = target.splitlines()[0].strip() if target else ""
+                # If this tool was already emitted and finished, do not show it as generating!
+                last_block = card.tool_blocks[-1] if getattr(card, "tool_blocks", None) else None
+                if last_block and not getattr(last_block, "tool_running", False):
+                    last_name = (getattr(last_block, "tool_name", "") or "").lower()
+                    last_tgt = str(getattr(last_block, "target", "") or "").strip()
+                    first_norm = first_tgt.lower().replace("'", '"').strip()
+                    last_norm = last_tgt.lower().replace("'", '"').strip()
+                    if (last_name in (tool.lower(), "terminal", "shell", "bash", "command")
+                            and (not first_tgt or first_norm in last_norm or last_norm in first_norm)):
+                        card.clear_generating_tool()
+                        return
+                if tool.lower() in ("thinking", "processing") or getattr(self, "_last_emitted_tool_sig", None) == (tool.lower(), first_tgt):
+                    card.clear_generating_tool()
+                else:
+                    card.set_generating_tool(tool, target)
             else:
                 card.clear_generating_tool()
             return
 
+        card.clear_generating_tool()
         if not self._live_footed:
             self._live_footed = True
             status = str(cur.get("status", "completed")).lower()
+            summary = str(cur.get("summary", "")).strip()
             if status == "failed" or cur.get("error"):
                 card.append_text_block(str(cur.get("error") or summary or "Subagent failed."))
             elapsed = float(cur.get("elapsed", 0.0) or 0.0)
@@ -512,6 +719,15 @@ class SubagentChatModal(ModalScreen[None]):
             self._refresh_timer = None
         try:
             self._advance_live(self._current(), running)
+            if self._is_scroll_at_bottom():
+                try:
+                    cs = self.query_one("#subagent-chat-scroll", VerticalScroll)
+                    cs.scroll_end(animate=False)
+                except Exception:
+                    pass
+                self._set_subagent_follow_hint(False)
+            else:
+                self._set_subagent_follow_hint(True)
         except Exception:
             pass
 
@@ -524,6 +740,73 @@ class SubagentChatModal(ModalScreen[None]):
         if len(self.agents) > 1:
             self.agent_index = self.agent_index % len(self.agents) + 1
             self._render_agent()
+
+    def action_kill_agent(self) -> None:
+        sid = ""
+        if self.live_agent is not None:
+            sid = str(getattr(self.live_agent, "subagent_id", "") or "")
+        if not sid:
+            cur = self._current()
+            sid = str(cur.get("subagent_id", "") or "")
+        if sid:
+            from ...agent.tasks import BackgroundTaskManager
+            BackgroundTaskManager.get_instance().cancel_subagent(sid)
+            if self.live_agent is not None:
+                self.live_agent.tool_running = False
+                self.live_agent._stop_spinner()
+                self.live_agent.subagent_status = "cancelled"
+                self.live_agent.subagent_live_tool = "Cancelled"
+                self.live_agent.update_header()
+            if hasattr(self.app, "notify"):
+                self.app.notify("Subagent stopped.", timeout=2.0)
+            self._refresh_live()
+
+    def action_send_to_background(self) -> None:
+        if self.live_agent is not None:
+            try:
+                self.live_agent.mark_backgrounded()
+            except Exception:
+                pass
+        try:
+            self.app.action_send_to_background()
+        except Exception:
+            pass
+        self._advance_spinner()
+        self.dismiss(None)
+
+    def _is_scroll_at_bottom(self) -> bool:
+        try:
+            cs = self.query_one("#subagent-chat-scroll", VerticalScroll)
+            return (cs.scroll_y + cs.size.height) >= (cs.max_scroll_y - 1)
+        except Exception:
+            return True
+
+    def _set_subagent_follow_hint(self, visible: bool) -> None:
+        try:
+            bar = self.query_one("#subagent-jump-bar")
+            bar.styles.display = "block" if visible else "none"
+            self.query_one("#subagent-jump-to-new", Static).update(
+                "[b #58a6ff]more below[/] [b #58a6ff]↓[/]" if visible else ""
+            )
+        except Exception:
+            pass
+
+    @on(events.Click, "#subagent-jump-to-new")
+    def on_subagent_jump_click(self) -> None:
+        try:
+            cs = self.query_one("#subagent-chat-scroll", VerticalScroll)
+            cs.scroll_end(animate=False)
+            self._set_subagent_follow_hint(False)
+        except Exception:
+            pass
+
+    @on(events.MouseScrollUp, "#subagent-chat-scroll")
+    def on_subagent_scroll_up(self) -> None:
+        self.call_after_refresh(lambda: self._set_subagent_follow_hint(not self._is_scroll_at_bottom()))
+
+    @on(events.MouseScrollDown, "#subagent-chat-scroll")
+    def on_subagent_scroll_down(self) -> None:
+        self.call_after_refresh(lambda: self._set_subagent_follow_hint(not self._is_scroll_at_bottom()))
 
     def action_dismiss_modal(self) -> None:
         if self._refresh_timer:

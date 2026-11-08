@@ -37,6 +37,7 @@ class SimpleGGUFLoader:
         self._is_loaded = False
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._stream_lock = threading.Lock()
 
     @property
     def llm(self) -> Optional[Any]:
@@ -46,6 +47,7 @@ class SimpleGGUFLoader:
         if self._proc is not None and self._proc.poll() is None:
             return True
 
+        self._is_loaded = False
         worker_script = os.path.join(os.path.dirname(__file__), "model_worker.py")
         if not os.path.exists(worker_script):
             return False
@@ -55,15 +57,19 @@ class SimpleGGUFLoader:
             if sys.platform == "win32":
                 flags = subprocess.CREATE_NO_WINDOW | 0x00004000
 
+            env = os.environ.copy()
+            src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            existing_pp = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_pp}" if existing_pp else src_dir
+
             self._proc = subprocess.Popen(
                 [sys.executable, worker_script],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
-                encoding="utf-8",
-                bufsize=1,
                 creationflags=flags,
+                env=env,
             )
             return True
         except Exception:
@@ -122,6 +128,8 @@ class SimpleGGUFLoader:
                 self._is_loaded
                 and self.current_model_path
                 and os.path.basename(self.current_model_path) == os.path.basename(model_filename)
+                and self._proc is not None
+                and self._proc.poll() is None
             ):
                 return True
 
@@ -130,6 +138,13 @@ class SimpleGGUFLoader:
 
             from .settings import get_settings
             loader = loader_type or get_settings().config.get("active_loader", "cpu")
+
+            if not n_ctx or n_ctx <= 0:
+                try:
+                    from .resource_limits import get_dynamic_context_limit
+                    n_ctx = min(32768, get_dynamic_context_limit(model_filename, "local_gguf", models_dir=self.models_dir))
+                except Exception:
+                    n_ctx = 8192
 
             req = {
                 "action": "load",
@@ -148,6 +163,7 @@ class SimpleGGUFLoader:
                     self._is_loaded = True
                     self.current_model_path = model_filename
                     self.current_loader = loader
+                    self.current_n_ctx = int(res.get("n_ctx") or req["n_ctx"])
                     return True
                 return False
             except Exception:
@@ -164,97 +180,98 @@ class SimpleGGUFLoader:
         is_aborted: Optional[Callable[[], bool]] = None,
         on_usage: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str]:
-        if not self._is_loaded:
-            target = model_filename or "gemma-4-E4B-it-Q4_0.gguf"
-            ok = self.load_model(target)
-            if not ok:
-                err = f"Failed to load model: {target}"
+        with self._stream_lock:
+            if not self._is_loaded:
+                target = model_filename or "gemma-4-E4B-it-Q4_0.gguf"
+                ok = self.load_model(target)
+                if not ok:
+                    err = f"Failed to load model: {target}"
+                    if on_token:
+                        on_token(err)
+                    return err, ""
+
+            if not self._ensure_worker():
+                err = "Model worker process unavailable."
                 if on_token:
                     on_token(err)
                 return err, ""
 
-        if not self._ensure_worker():
-            err = "Model worker process unavailable."
-            if on_token:
-                on_token(err)
-            return err, ""
+            req = {
+                "action": "chat",
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
 
-        req = {
-            "action": "chat",
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+            try:
+                self._proc.stdin.write(json.dumps(req) + "\n")
+                self._proc.stdin.flush()
+            except Exception as e:
+                err = f"Worker communication error: {e}"
+                if on_token:
+                    on_token(err)
+                return err, ""
 
-        try:
-            self._proc.stdin.write(json.dumps(req) + "\n")
-            self._proc.stdin.flush()
-        except Exception as e:
-            err = f"Worker communication error: {e}"
-            if on_token:
-                on_token(err)
-            return err, ""
+            abort_stopped = threading.Event()
 
-        abort_stopped = threading.Event()
-
-        def _monitor_abort():
-            while not abort_stopped.is_set():
-                if is_aborted and is_aborted():
-                    try:
-                        self._proc.stdin.write(json.dumps({"action": "abort"}) + "\n")
-                        self._proc.stdin.flush()
-                    except Exception:
-                        pass
-                    break
-                time.sleep(0.04)
-
-        abort_thread = threading.Thread(target=_monitor_abort, daemon=True)
-        abort_thread.start()
-
-        full_text: List[str] = []
-        full_thinking: List[str] = []
-
-        try:
-            while True:
-                line = self._proc.stdout.readline()
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except Exception:
-                    continue
-
-                mtype = msg.get("type")
-                if mtype == "token":
-                    content = msg.get("content", "")
-                    full_text.append(content)
-                    if on_token:
-                        on_token(content)
-                elif mtype == "thinking":
-                    content = msg.get("content", "")
-                    full_thinking.append(content)
-                    if on_thinking:
-                        on_thinking(content)
-                elif mtype == "done":
-                    resp = msg.get("response", "".join(full_text))
-                    think = msg.get("thinking", "".join(full_thinking))
-                    usage = msg.get("usage", {})
-                    if on_usage and usage:
+            def _monitor_abort():
+                while not abort_stopped.is_set():
+                    if is_aborted and is_aborted():
                         try:
-                            on_usage(usage)
+                            self._proc.stdin.write(json.dumps({"action": "abort"}) + "\n")
+                            self._proc.stdin.flush()
                         except Exception:
                             pass
-                    return resp, think
-                elif mtype == "error":
-                    err = msg.get("error", "Generation error")
-                    if on_token:
-                        on_token(f"\n[Error: {err}]")
-                    return err, ""
-        finally:
-            abort_stopped.set()
+                        break
+                    time.sleep(0.04)
 
-        return "".join(full_text), "".join(full_thinking)
+            abort_thread = threading.Thread(target=_monitor_abort, daemon=True)
+            abort_thread.start()
+
+            full_text: List[str] = []
+            full_thinking: List[str] = []
+
+            try:
+                while True:
+                    line = self._proc.stdout.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except Exception:
+                        continue
+
+                    mtype = msg.get("type")
+                    if mtype == "token":
+                        content = msg.get("content", "")
+                        full_text.append(content)
+                        if on_token:
+                            on_token(content)
+                    elif mtype == "thinking":
+                        content = msg.get("content", "")
+                        full_thinking.append(content)
+                        if on_thinking:
+                            on_thinking(content)
+                    elif mtype == "done":
+                        resp = msg.get("response", "".join(full_text))
+                        think = msg.get("thinking", "".join(full_thinking))
+                        usage = msg.get("usage", {})
+                        if on_usage and usage:
+                            try:
+                                on_usage(usage)
+                            except Exception:
+                                pass
+                        return resp, think
+                    elif mtype == "error":
+                        err = msg.get("error", "Generation error")
+                        if on_token:
+                            on_token(f"\n[Error: {err}]")
+                        return err, ""
+            finally:
+                abort_stopped.set()
+
+            return "".join(full_text), "".join(full_thinking)
 

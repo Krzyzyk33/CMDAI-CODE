@@ -15,6 +15,8 @@ def render_tool_header(
     display_name: str = "",
     elapsed_str: str = "",
     elapsed_s: Optional[float] = None,
+    is_background: bool = False,
+    bg_task_id: str = "",
 ) -> Text:
     if elapsed_s is not None and not elapsed_str:
         elapsed_str = f"{elapsed_s:.1f}s"
@@ -82,12 +84,14 @@ def render_tool_header(
             summary = target_summary
         else:
             summary = ""
-    elif tl in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command", "exec"):
+    elif tl in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command"):
+        import re as _re
         s_raw = str(target_summary or "").strip()
-        is_bg = "background" in s_raw.lower()
-        t_name = "Terminal background" if is_bg else "Terminal"
+        s_raw = _re.sub(r"\s*\[tło:[^\]]*\]", "", s_raw).strip()
+        is_bg = is_background or ("background" in s_raw.lower())
+        t_name = "Command"
         summary = s_raw
-        if is_bg:
+        if "background" in summary.lower():
             summary = summary.replace("(background)", "").replace("background", "").strip()
         if summary:
             s_stripped = summary.strip()
@@ -122,7 +126,7 @@ def render_tool_header(
             t_name = "Webfetch"
             summary = url_m.group(0)
         elif any(k in raw_s.lower() for k in ("child_process", "exec(", "spawn(", "execsync", "bash", "cmd")):
-            t_name = "Terminal"
+            t_name = "Command"
             cmd_m = _re.search(r"(?:exec|spawn|execSync)\(\s*['\"]([^'\"]+)['\"]", raw_s)
             summary = cmd_m.group(1) if cmd_m else "command"
         else:
@@ -158,54 +162,115 @@ def render_tool_header(
     TIMED_TOOLS = {
         "write", "file_write", "edit", "file_edit",
         "terminal", "command", "shell", "bash", "sh", "cmd", "run_command", "exec",
+        "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command",
         "subagent", "task",
+        "summarizing", "summarize", "compact", "context_compact",
     }
     # Only show time if elapsed_str is non-empty, and for finished tools avoid showing a misleading "0.0s"
     is_zero_sec = (elapsed_str.strip() == "0.0s" or (elapsed_s is not None and elapsed_s < 0.05))
     should_show_time = bool(elapsed_str) and (tl in TIMED_TOOLS or bool(display_name)) and (is_running or not is_zero_sec)
 
+    summary_line = str(summary).splitlines()[0].strip() if summary else ""
+
+    if not is_running and "cancelled" in summary_line.lower():
+        glyph = "○  " if is_expanded else "●  "
+        text.append(glyph, style="dim #8b949e")
+        text.append(f"{t_name}", style="dim #8b949e")
+        if is_background:
+            text.append(" · ", style="dim #6e7681")
+            text.append(" background ", style="bold #21262d on #8b949e")
+        if should_show_time:
+            text.append(f"  {elapsed_str}", style="dim #8b949e")
+        text.append(" [cancelled]", style="dim #8b949e")
+        return text
+
     if is_error:
         glyph = "○  " if is_expanded else "●  "
         text.append(glyph, style="bold #f85149")
         text.append(f"{t_name}", style="bold #f85149")
-        if summary and str(summary).strip().lower() not in ("failed", "execution failed"):
-            text.append(f" {summary}", style="#ff7b72")
+        if is_background:
+            text.append(" · ", style="dim #6e7681")
+            text.append(" background ", style="bold #21262d on #8b949e")
+            if should_show_time:
+                text.append(f" {elapsed_str}", style="dim #f85149")
+        elif should_show_time:
+            text.append(f"  {elapsed_str}", style="dim #f85149")
+        if summary_line and summary_line.lower() not in ("failed", "execution failed"):
+            text.append(f" {summary_line}", style="#ff7b72")
         text.append(" [failed]", style="dim #f85149")
         if should_show_time:
             text.append(f"  {elapsed_str}", style="dim #f85149")
         return text
 
     is_sum = tl in ("summarizing", "summarize", "compact", "context_compact")
+    if is_sum:
+        if is_running:
+            glyph = spinner_frame if spinner_frame in ("⌬", "✻") else ("⌬" if int((elapsed_s or 0.0) / 0.35) % 2 == 0 else "✻")
+            text.append(f"{glyph}  ", style="#58a6ff")
+            text.append("Summarizing", style="#8b949e")
+            if elapsed_str:
+                text.append(f"  {elapsed_str}", style="dim #6e7681")
+        else:
+            glyph = "✻" if is_expanded else "⌬"
+            text.append(f"{glyph}  ", style="#8b949e")
+            text.append("Summarizing", style="#8b949e")
+            if should_show_time:
+                text.append(f"  {elapsed_str}", style="dim #6e7681")
+        return text
+
     if is_running:
-        glyph = spinner_frame or ("⌬" if is_sum else "●")
-        # Full and empty circle animation: '●' and '○' in bright active #58a6ff
-        g_style = "bold #58a6ff"
-        text.append(f"{glyph}  ", style=g_style)
+        glyph = spinner_frame or "●"
+        dot_style = "bold #f59e0b" if is_background else "bold #58a6ff"
+        time_style = "#f59e0b" if is_background else "#58a6ff"
+        text.append(f"{glyph}  ", style=dot_style)
         text.append(f"{t_name}", style="bold #e6edf3")
-        if summary:
-            text.append(f" {summary}", style="#c9d1d9")
-        if should_show_time:
-            text.append(f"  {elapsed_str}", style="#58a6ff")
+        if is_background:
+            text.append(" · ", style="dim #8b949e")
+            text.append(" background ", style="bold #21262d on #f59e0b")
+            if should_show_time:
+                text.append(f" {elapsed_str}", style=time_style)
+        elif should_show_time:
+            text.append(f"  {elapsed_str}", style=time_style)
+        if summary_line:
+            if is_background:
+                text.append(" · ", style="dim #8b949e")
+                text.append(f"{summary_line}", style="#c9d1d9")
+            else:
+                text.append(f" {summary_line}", style="#c9d1d9")
     elif is_expanded:
-        glyph = "⌬  " if is_sum else "○  "
-        text.append(glyph, style="bold #58a6ff" if is_sum else "#8b949e")
-        if summary:
-            text.append(f"{t_name} ", style="bold #8b949e")
-            text.append(summary, style="#8b949e")
-        else:
-            text.append(f"{t_name}", style="bold #8b949e")
-        if should_show_time:
+        glyph = "○  "
+        text.append(glyph, style="#8b949e")
+        text.append(f"{t_name}", style="bold #8b949e")
+        if is_background:
+            text.append(" · ", style="dim #6e7681")
+            text.append(" background ", style="bold #21262d on #8b949e")
+            if should_show_time:
+                text.append(f" {elapsed_str}", style="dim #8b949e")
+        elif should_show_time:
             text.append(f"  {elapsed_str}", style="dim #8b949e")
+        if summary_line:
+            if is_background:
+                text.append(" · ", style="dim #6e7681")
+                text.append(f"{summary_line}", style="#8b949e")
+            else:
+                text.append(f" {summary_line}", style="#8b949e")
     else:
-        glyph = "⌬  " if is_sum else "●  "
-        text.append(glyph, style="bold #58a6ff" if is_sum else "#8b949e")
-        if summary:
-            text.append(f"{t_name} ", style="bold #8b949e")
-            text.append(summary, style="#8b949e")
-        else:
-            text.append(f"{t_name}", style="bold #8b949e")
-        if should_show_time:
+        glyph = "●  "
+        text.append(glyph, style="#8b949e")
+        text.append(f"{t_name}", style="bold #8b949e")
+        if is_background:
+            text.append(" · ", style="dim #6e7681")
+            text.append(" background ", style="bold #21262d on #8b949e")
+            if should_show_time:
+                text.append(f" {elapsed_str}", style="dim #8b949e")
+        elif should_show_time:
             text.append(f"  {elapsed_str}", style="dim #8b949e")
+        if summary_line:
+            if is_background:
+                text.append(" · ", style="dim #6e7681")
+                text.append(f"{summary_line}", style="#8b949e")
+            else:
+                text.append(f" {summary_line}", style="#8b949e")
 
     return text
 

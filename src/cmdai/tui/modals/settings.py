@@ -33,7 +33,7 @@ class SettingsModal(ModalScreen[bool]):
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Toggle / Run]")
+                yield Static("enter: Toggle / Run  ·  esc: Close")
 
     def on_mount(self) -> None:
         self.rebuild_options()
@@ -126,7 +126,7 @@ class LoaderModal(ModalScreen[Optional[str]]):
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Select Loader]")
+                yield Static("enter: Select Loader  ·  esc: Close")
 
     def on_mount(self) -> None:
         curr = get_settings().config.get("active_loader", "cpu").lower()

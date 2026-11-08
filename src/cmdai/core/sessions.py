@@ -11,8 +11,26 @@ def clean_title_from_prompt(prompt: str) -> str:
     if not prompt:
         return ""
     text = prompt.strip()
+    # Strip tool response / call XML tags and markdown code blocks
+    text = re.sub(r'</?(?:tool_response|tool_call|function_call|\w+)[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'^```[a-zA-Z0-9_-]*\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
+    # Strip @mentions cleanly so "@index.html inspect" -> "inspect"
+    mention_clean = re.sub(r'@\S+', '', text).strip()
+    if mention_clean:
+        text = mention_clean
+    else:
+        text = re.sub(r'[@]', '', text).strip()
+
+    # If the user prompt is a command prefix like "wywołaj subagenta aby/do/żeby <task>",
+    # extract the actual task description rather than the prefix!
+    sub_prefix = re.search(r"^(?:wywo[\u0142l]aj|uruchom|odpal|w[\u0142l][a\u0105]cz)\s+su?a?b\w*\s+(?:aby|\u017ceby|do|by)\s+(.+)", text, re.IGNORECASE)
+    if sub_prefix:
+        text = sub_prefix.group(1).strip()
+    else:
+        text = re.sub(r'^(?:prosz[eę]|m[oó]g[lł]by[sś]|we[zź]|wez|prosz[eę]\s+ci[eę]|hej|cze[sś][cć]|chc[eę]|potrzebuj[eę])\s+[,:]?\s*', '', text, flags=re.IGNORECASE).strip()
+
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     first_line = ""
     for line in lines:
@@ -138,12 +156,23 @@ class SessionManager:
     def _get_candidate_dirs(self) -> List[str]:
         dirs = [
             self.repo_sessions_dir,
+            os.path.join(self.project_dir, "app", "sessions") if getattr(self, "project_dir", "") else "",
+            r"E:\CMDAI-CODE\app\sessions",
+            r"D:\CMDAI CODE\app\sessions",
             os.path.join(os.path.expanduser("~"), ".cmdai", "sessions"),
             os.path.join(os.path.expanduser("~"), ".cmdai_code", "sessions"),
             os.path.join(os.path.expanduser("~"), ".cmdai_code"),
             os.path.join(os.path.expanduser("~"), ".cmdai"),
         ]
-        return [d for d in dirs if d and os.path.exists(d)]
+        out: List[str] = []
+        seen_d = set()
+        for d in dirs:
+            if d and os.path.exists(d):
+                ad = os.path.normcase(os.path.abspath(d))
+                if ad not in seen_d:
+                    seen_d.add(ad)
+                    out.append(d)
+        return out
 
     def save_session(
         self,
@@ -155,6 +184,7 @@ class SessionManager:
         transcript: Optional[List[Dict[str, Any]]] = None,
         workdir: Optional[str] = None,
         agent_mode: Optional[str] = None,
+        named_by_model: Optional[bool] = None,
     ) -> bool:
         if not session_id:
             session_id = f"session_{int(time.time())}"
@@ -165,6 +195,12 @@ class SessionManager:
 
         now_ts = time.time()
         now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts))
+
+        if messages:
+            try:
+                transcript = reconcile_transcript(transcript, messages)
+            except Exception:
+                pass
 
         # Preserve created_at from existing session file if present
         created_at = now_str
@@ -178,8 +214,30 @@ class SessionManager:
             except Exception:
                 pass
 
-        # OpenCode-style prompt titling if title is generic
-        if not title or title.startswith("Session session_") or title == "new session":
+        # Calculate last_written_ts: timestamp of actual written content (messages or transcript).
+        # Simply entering, opening or switching to a session must NOT count as writing!
+        has_messages = bool(messages and len(messages) > 0)
+        existing_msgs = (existing.get("messages") or []) if existing else []
+        existing_written_ts = (existing.get("last_written_ts") or existing.get("updated_ts")) if existing else None
+        existing_written_str = (existing.get("last_written_at") or existing.get("updated_at")) if existing else None
+
+        if not has_messages:
+            last_written_ts = 0.0
+            last_written_str = ""
+        else:
+            if existing is None:
+                last_written_ts = now_ts
+                last_written_str = now_str
+            elif len(messages) != len(existing_msgs) or messages != existing_msgs:
+                last_written_ts = now_ts
+                last_written_str = now_str
+            else:
+                last_written_ts = float(existing_written_ts) if existing_written_ts else now_ts
+                last_written_str = existing_written_str or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_written_ts))
+
+        # OpenCode-style prompt titling if title is generic or placeholder
+        bad_titles = ("new session", "untitled", "untitled session", "session", "tool", "mock", "tool mock")
+        if not title or title.strip().lower() in bad_titles or title.startswith("Session session_"):
             first_u = next((str(m.get("content", "")) for m in (messages or [])
                             if isinstance(m, dict) and m.get("role") == "user"), "")
             if not first_u and transcript:
@@ -195,8 +253,11 @@ class SessionManager:
             "id": session_id,
             "title": title,
             "created_at": created_at,
-            "updated_at": now_str,
-            "updated_ts": now_ts,
+            "updated_at": last_written_str or created_at,
+            "updated_ts": last_written_ts if last_written_ts > 0 else (existing.get("updated_ts") if existing else now_ts),
+            "last_written_ts": last_written_ts,
+            "last_written_at": last_written_str,
+            "named_by_model": bool(named_by_model if named_by_model is not None else (existing.get("named_by_model", False) if existing else False)),
             "directory": os.path.abspath(workdir or self.project_dir),
             "model_id": model_id,
             "mode": agent_mode or "code",
@@ -222,6 +283,14 @@ class SessionManager:
                 except Exception:
                     pass
             os.replace(temp_path, target_path)
+            try:
+                user_sdir = os.path.join(os.path.expanduser("~"), ".cmdai", "sessions")
+                os.makedirs(user_sdir, exist_ok=True)
+                mirror_path = os.path.join(user_sdir, f"{session_id}.json")
+                if os.path.normcase(os.path.abspath(mirror_path)) != os.path.normcase(os.path.abspath(target_path)):
+                    shutil.copy2(target_path, mirror_path)
+            except Exception:
+                pass
             return True
         except Exception:
             try:
@@ -260,28 +329,41 @@ class SessionManager:
                     
                     mtime = os.path.getmtime(fpath)
                     if isinstance(data, list):
+                        msg_count = len(data)
                         first_u = next((str(m.get("content", "")) for m in data if isinstance(m, dict) and m.get("role") == "user"), "")
                         title = clean_title_from_prompt(first_u) or sid.replace("_", " ").title()
                         created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+                        last_written_ts = mtime if msg_count > 0 else 0.0
+                        last_written_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)) if msg_count > 0 else ""
                         updated_ts = mtime
                         directory = ""
                         model_id = ""
                         total_toks = 0
-                        msg_count = len(data)
                     elif isinstance(data, dict):
+                        msg_count = len(data.get("messages") or [])
                         title = data.get("title", "")
-                        if not title or title.startswith("Session session_") or "API key required" in str(title):
+                        bad_titles = ("new session", "untitled", "untitled session", "session", "tool", "mock", "tool mock")
+                        if not title or title.strip().lower() in bad_titles or title.startswith("Session session_") or "API key required" in str(title):
                             first_u = next((str(m.get("content", "")) for m in (data.get("messages") or [])
                                             if isinstance(m, dict) and m.get("role") == "user"), "")
-                            title = clean_title_from_prompt(first_u) or sid
+                            derived = clean_title_from_prompt(first_u)
+                            title = derived if derived else (title or sid)
                         created_at = data.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
-                        updated_ts = data.get("updated_ts") or mtime
+                        last_written_ts = data.get("last_written_ts")
+                        last_written_at = data.get("last_written_at")
+                        if last_written_ts is None:
+                            if msg_count > 0:
+                                last_written_ts = data.get("updated_ts") or mtime
+                                last_written_at = data.get("updated_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_written_ts))
+                            else:
+                                last_written_ts = 0.0
+                                last_written_at = ""
+                        updated_ts = float(last_written_ts) if last_written_ts else (data.get("updated_ts") or mtime)
                         directory = data.get("directory", "")
                         model_id = data.get("model_id", "")
                         tokens_dict = data.get("tokens") or {}
                         stats_dict = data.get("stats") or {}
                         total_toks = tokens_dict.get("total") or ((stats_dict.get("tokens_in", 0) or 0) + (stats_dict.get("tokens_out", 0) or 0))
-                        msg_count = len(data.get("messages") or [])
                     else:
                         continue
 
@@ -300,12 +382,22 @@ class SessionManager:
                     is_current = bool(active_dir and dir_abs and active_dir.lower() == dir_abs.lower())
                     dir_name = os.path.basename(directory) if directory else ""
 
+                    if last_written_at and len(last_written_at) >= 16:
+                        display_date = last_written_at[:16]
+                    elif last_written_ts and float(last_written_ts) > 0:
+                        display_date = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(last_written_ts)))
+                    else:
+                        display_date = "—"
+
                     sessions.append({
                         "id": sid,
                         "title": title,
                         "created_at": created_at,
                         "updated_ts": updated_ts,
-                        "relative_time": format_relative_time(updated_ts),
+                        "last_written_ts": float(last_written_ts or 0),
+                        "last_written_at": last_written_at or "",
+                        "display_date": display_date,
+                        "relative_time": format_relative_time(last_written_ts if float(last_written_ts or 0) > 0 else updated_ts),
                         "directory": directory,
                         "dir_name": dir_name,
                         "is_current_dir": is_current,
@@ -317,8 +409,11 @@ class SessionManager:
                 except Exception:
                     pass
 
-        # OpenCode-style ordering: sessions in current project first, then most recently updated
-        sessions.sort(key=lambda s: (not s.get("is_current_dir", False), -float(s.get("updated_ts", 0))))
+        # Sorted chronologically by when something was actually written (newest content first)
+        sessions.sort(key=lambda s: (
+            -float(s.get("last_written_ts", 0) or 0),
+            -float(s.get("updated_ts", 0) or 0),
+        ))
         return sessions
 
     def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -354,6 +449,10 @@ class SessionManager:
                                     "stats": {},
                                 }
                             elif isinstance(raw, dict):
+                                try:
+                                    raw["transcript"] = reconcile_transcript(raw.get("transcript"), raw.get("messages"))
+                                except Exception:
+                                    pass
                                 return raw
                     except Exception:
                         pass
@@ -669,24 +768,98 @@ def _subagent_event(call: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, A
     """
     args = call.get("args") or {}
     role = str(args.get("name") or args.get("role") or "Subagent").strip()[:60] or "Subagent"
+    goal = str(args.get("goal") or args.get("task") or args.get("description") or "").strip()
+    sum_txt = str(result.get("content") or "").strip()
     return {
         "kind": "subagent",
         "role": role,
-        "goal": str(args.get("goal") or args.get("task")
-                    or args.get("description") or "").strip(),
+        "goal": goal,
         "system": str(args.get("system") or args.get("system_prompt")
                       or args.get("prompt") or "").strip(),
         "agent": {
             "role": role,
             "status": "completed",
-            "summary": str(result.get("content") or "").strip(),
+            "goal": goal,
+            "summary": sum_txt,
             "findings": [],
             "notes": [],
             "tool_count": 0,
-            "history": [],
+            "history": [{"role": "assistant", "content": sum_txt}] if sum_txt else [],
             "events": [],
-            "elapsed": 0.0,
-            "tokens": 0,
+            "elapsed": float(result.get("elapsed", 0.0) or 0.0),
+            "tokens": int(result.get("tokens", 0) or 0),
             "system_prompt": str(args.get("system") or ""),
         },
     }
+
+
+def is_user_prompt_message(m: Dict[str, Any]) -> bool:
+    if not isinstance(m, dict) or m.get("role") != "user":
+        return False
+    c = str(m.get("content", "") or "")
+    return not bool(_TOOL_RESPONSE_RE.match(c))
+
+
+def reconcile_transcript(transcript: Optional[List[Dict[str, Any]]], messages: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Ensure the transcript contains all conversation turns present in messages.
+    
+    If transcript is missing later turns, or if an assistant response was never recorded
+    for an earlier turn, reconstructs the missing parts from messages while preserving
+    existing thinking blocks, detailed tool events, and timing.
+    """
+    messages = list(messages or [])
+    if not isinstance(transcript, list) or not transcript:
+        return transcript_from_messages(messages)
+    if not messages:
+        return list(transcript)
+
+    t_asst = sum(1 for t in transcript if isinstance(t, dict) and t.get("kind") in ("assistant", "tool", "subagent"))
+    m_asst = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "assistant" and str(m.get("content", "")).strip())
+    if t_asst == 0 and m_asst > 0:
+        return transcript_from_messages(messages)
+
+    m_user_indices = [i for i, m in enumerate(messages) if is_user_prompt_message(m)]
+    if not m_user_indices:
+        return list(transcript)
+
+    t_user_indices = [i for i, item in enumerate(transcript) if isinstance(item, dict) and item.get("kind") == "user"]
+
+    repaired = list(transcript)
+    if len(t_user_indices) < len(m_user_indices):
+        first_missing_user_idx = m_user_indices[len(t_user_indices)]
+        last_t_u_idx = t_user_indices[-1] if t_user_indices else 0
+        last_turn_items = transcript[last_t_u_idx:]
+        has_resp = any(isinstance(x, dict) and x.get("kind") in ("assistant", "tool", "subagent") for x in last_turn_items)
+        if not has_resp:
+            prev_m_idx = m_user_indices[len(t_user_indices) - 1]
+            missing_messages = messages[prev_m_idx:]
+            repaired = repaired[:last_t_u_idx]
+            repaired.extend(transcript_from_messages(missing_messages))
+        else:
+            missing_messages = messages[first_missing_user_idx:]
+            repaired.extend(transcript_from_messages(missing_messages))
+    elif t_user_indices:
+        last_t_u_idx = t_user_indices[-1]
+        last_turn_items = transcript[last_t_u_idx:]
+        has_resp = any(isinstance(x, dict) and x.get("kind") in ("assistant", "tool", "subagent") for x in last_turn_items)
+        if not has_resp and m_user_indices:
+            last_m_idx = m_user_indices[-1]
+            m_after = messages[last_m_idx:]
+            m_has_resp = any(m.get("role") == "assistant" and str(m.get("content", "")).strip() for m in m_after)
+            if m_has_resp:
+                repaired = repaired[:last_t_u_idx]
+                repaired.extend(transcript_from_messages(m_after))
+
+    # Ensure chronological order: if an assistant text announcing a background subagent
+    # was placed before the subagent block, swap them so the subagent sits above the commentary.
+    for i in range(len(repaired) - 1):
+        item_a = repaired[i]
+        item_b = repaired[i + 1]
+        if isinstance(item_a, dict) and isinstance(item_b, dict):
+            if item_a.get("kind") == "assistant" and item_b.get("kind") in ("subagent", "tool"):
+                text_low = str(item_a.get("text", "")).lower()
+                is_announcement = any(k in text_low for k in ("subagent", "subagenta", "uruchomiłem w tle", "uruchomilem w tle", "w tle"))
+                if is_announcement or item_b.get("is_backgrounded"):
+                    repaired[i], repaired[i + 1] = item_b, item_a
+
+    return repaired

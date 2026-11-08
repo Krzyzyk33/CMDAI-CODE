@@ -43,10 +43,16 @@ class ModelWorker:
         self._listener_thread = None
 
     def find_model_path(self, model_filename: str) -> Optional[str]:
-        from .model_paths import resolve_model_file
-        # Was eight candidates including D:\\, E:\\ and C:\\ paths under a
-        # "CMDAI CODE" name that no longer exists. The worker used to be
-        # able to find a model the rest of the app could not.
+        try:
+            from .model_paths import resolve_model_file
+        except (ImportError, ValueError):
+            try:
+                from cmdai.core.model_paths import resolve_model_file
+            except ImportError:
+                _cur = os.path.dirname(os.path.abspath(__file__))
+                if _cur not in sys.path:
+                    sys.path.insert(0, _cur)
+                from model_paths import resolve_model_file
         return resolve_model_file(model_filename) or None
 
     def load(self, model_filename: str, loader_type: str = "cpu", n_ctx: int = 2048) -> Dict[str, Any]:
@@ -66,23 +72,38 @@ class ModelWorker:
                 del self.llm
                 self.llm = None
 
-            self.llm = Llama(
-                model_path=path,
-                n_ctx=n_ctx or 8192,
-                n_gpu_layers=n_gpu,
-                flash_attn=True,
-                verbose=False,
-            )
+            target_ctx = int(n_ctx or 8192)
+            try:
+                self.llm = Llama(
+                    model_path=path,
+                    n_ctx=target_ctx,
+                    n_gpu_layers=n_gpu,
+                    flash_attn=True,
+                    verbose=False,
+                )
+            except Exception:
+                if target_ctx > 8192:
+                    target_ctx = 8192
+                    self.llm = Llama(
+                        model_path=path,
+                        n_ctx=target_ctx,
+                        n_gpu_layers=n_gpu,
+                        flash_attn=True,
+                        verbose=False,
+                    )
+                else:
+                    raise
             self.current_model_path = path
             self.current_model_id = model_filename
             elapsed = time.time() - t0
-            return {"status": "ok", "elapsed": elapsed}
+            return {"status": "ok", "elapsed": elapsed, "n_ctx": target_ctx}
         except Exception as e:
             if n_gpu != 0:
                 try:
+                    target_ctx = 8192 if int(n_ctx or 8192) > 8192 else int(n_ctx or 8192)
                     self.llm = Llama(
                         model_path=path,
-                        n_ctx=n_ctx or 8192,
+                        n_ctx=target_ctx,
                         n_gpu_layers=0,
                         flash_attn=True,
                         verbose=False,
@@ -90,7 +111,7 @@ class ModelWorker:
                     self.current_model_path = path
                     self.current_model_id = model_filename
                     elapsed = time.time() - t0
-                    return {"status": "ok", "elapsed": elapsed}
+                    return {"status": "ok", "elapsed": elapsed, "n_ctx": target_ctx}
                 except Exception as e2:
                     return {"status": "error", "error": str(e2)}
             return {"status": "error", "error": str(e)}

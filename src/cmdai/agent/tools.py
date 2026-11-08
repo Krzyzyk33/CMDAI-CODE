@@ -14,8 +14,19 @@ from .test_runner import run_project_tests
 
 class AgentContext:
     def __init__(self, workdir: str = "."):
-        self.workdir = os.path.abspath(workdir)
-        self.current_cwd = self.workdir
+        self._workdir = os.path.abspath(workdir)
+        self.current_cwd = self._workdir
+
+    @property
+    def workdir(self) -> str:
+        return self._workdir
+
+    @workdir.setter
+    def workdir(self, value: str) -> None:
+        new_w = os.path.abspath(value or ".")
+        self._workdir = new_w
+        self.current_cwd = new_w
+        self.session_id: str = ""
         self.todo_list: List[str] = []
         self.mode: str = "auto"
         self.pending_images: List[Dict[str, str]] = []
@@ -122,15 +133,28 @@ def _smart_replace(content: str, old: str, new: str) -> Optional[Tuple[str, int,
 def tool_read(ctx: AgentContext, path: str, lines: Optional[str] = None) -> Dict[str, Any]:
     full_path = ctx.resolve_path(path)
     if not os.path.exists(full_path):
-        return {"success": False, "error": f"File not found: {path}"}
+        parent_dir = os.path.dirname(full_path)
+        if not parent_dir or not os.path.isdir(parent_dir):
+            parent_dir = ctx.workdir
+        hint = ""
+        try:
+            avail = [e for e in sorted(os.listdir(parent_dir)) if not e.startswith(".")][:15]
+            if avail:
+                rel_parent = ctx.rel_path(parent_dir)
+                hint = f" (Available in '{rel_parent}': {', '.join(avail)}. Do NOT retry '{path}'; read one of the existing files instead.)"
+        except Exception:
+            pass
+        return {"success": False, "error": f"File not found: {path}{hint}"}
 
     if os.path.isdir(full_path):
         try:
-            entries = os.listdir(full_path)[:30]
-            entries_str = ", ".join(entries) if entries else "(empty directory)"
+            entries = sorted(os.listdir(full_path))[:60]
+            listing = "\n".join(entries) if entries else "(empty directory)"
             return {
-                "success": False,
-                "error": f"'{path}' is a directory, not a file. Files in directory: {entries_str}",
+                "success": True,
+                "path": ctx.rel_path(full_path),
+                "content": f"[Directory listing for {path}]\n{listing}",
+                "total_lines": len(entries),
             }
         except Exception as e:
             return {"success": False, "error": f"'{path}' is a directory, not a file ({e})."}
@@ -250,6 +274,14 @@ def tool_edit(
             "verification_error": "",
             "test_result": test_res,
         }
+        try:
+            from .lsp_client import run_file_diagnostics, format_diagnostics_summary
+            diags = run_file_diagnostics(full_path, ctx.workdir)
+            if diags:
+                res_dict["diagnostics"] = format_diagnostics_summary(diags)
+        except Exception:
+            pass
+
         if test_status:
             res_dict["test_status"] = test_status
         return res_dict
@@ -302,6 +334,14 @@ def tool_write(ctx: AgentContext, path: str, content: str) -> Dict[str, Any]:
             "verification_error": "",
             "test_result": test_res,
         }
+        try:
+            from .lsp_client import run_file_diagnostics, format_diagnostics_summary
+            diags = run_file_diagnostics(full_path, ctx.workdir)
+            if diags:
+                res_dict["diagnostics"] = format_diagnostics_summary(diags)
+        except Exception:
+            pass
+
         if test_status:
             res_dict["test_status"] = test_status
         return res_dict
@@ -422,8 +462,25 @@ def tool_command(
     if not os.path.isdir(active_cwd):
         active_cwd = ctx.workdir
 
+    # Autonomous detection: persistent servers, watchers and daemons auto-detach to background
+    cmd_lower = cmd.lower()
+    if getattr(ctx, "is_subagent", False):
+        timeout = min(timeout, 15)
+        background = False
+        blocked = ["msedge", "chrome", "firefox", "brave", "opera", "start-process", "explorer"]
+        if any(b in cmd_lower for b in blocked):
+            return {
+                "success": False,
+                "cmd": cmd,
+                "error": "Launching GUI applications or browsers is prohibited for subagents. Please inspect files directly using <tool:read>.",
+            }
+    auto_bg_triggers = ["run dev", "npm start", "yarn start", "pnpm dev", "vite", "next dev", "uvicorn", "http.server", "flask run", "nodemon", "cargo watch"]
+    if not background and any(t in cmd_lower for t in auto_bg_triggers):
+        background = True
+
+    s_id = str(getattr(ctx, "session_id", "") or "")
     if background:
-        return BackgroundTaskManager.get_instance().spawn(cmd, active_cwd)
+        return BackgroundTaskManager.get_instance().spawn(cmd, active_cwd, session_id=s_id)
 
     temp_dir = tempfile.gettempdir()
     import uuid as _uuid
@@ -450,7 +507,7 @@ def tool_command(
     start = time.time()
     while proc.poll() is None:
         if detach_check and detach_check():
-            adopted = BackgroundTaskManager.get_instance().adopt(cmd, proc, log_path)
+            adopted = BackgroundTaskManager.get_instance().adopt(cmd, proc, log_path, session_id=s_id)
             return {
                 "success": True,
                 "background": True,
@@ -487,6 +544,9 @@ def tool_command(
                 if os.path.isdir(new_cwd):
                     active_cwd = new_cwd
                     ctx.current_cwd = new_cwd
+
+    if proc.returncode != 0 and "not a git repository" in (out or "").lower():
+        out = (out or "") + "\n[Workspace is not a git repository. Do not use git; inspect files directly with ls, read, or glob]"
 
     return {
         "success": proc.returncode == 0,

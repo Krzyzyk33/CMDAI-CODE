@@ -13,36 +13,32 @@ COMMANDS_DOC: Dict[str, str] = {
     "/new": "Start a fresh conversation — previous stays saved in /sessions",
     "/models": "Open model picker and switch engines (Local + 33 API providers)",
     "/modelinfo": "Details of the currently loaded model: arch, context, thinking support",
-    "/summarize": "Summarize conversation history into compact context handoff",
-    "/params": "View or set generation parameters: temp, top_p, max_tokens, reasoning level",
+    "/mode": "Toggle/cycle agent execution mode (auto / plan / code)",
+    "/thinking": "Show or set thinking level (/thinking low/medium/high/off)",
     "/sessions": "Browse, reopen or delete auto-saved conversations",
-    "/system": "Pick, create or switch system prompt",
-    "/settings": "Configure server port, auto-copy, exit confirmation, launcher",
-    "/loader": "Select GGUF backend loader (CPU / CUDA / Vulkan)",
-    "/stats": "Session statistics: tokens, response speeds, tool counts",
-    "/git": "Open the git window in a new terminal (changed files, diff, commit)",
-    "/branches": "Open the branch list in a new terminal (checkout / fork)",
+    "/bg": "Background tasks & running subagents manager (Ctrl+B)",
+    "/plan": "Minimalist task checklist and autonomous plan manager",
     "/diff": "Review working changes in a modal (read-only, opens commit)",
-    "/editor": "Open terminal code editor (VS Code style) in a new window",
-    "/test": "Auto-detect and run test suite with live output",
-    "/commit": "Write a commit message and commit the staged changes in a modal",
-    "/review": "Run AI code review on current uncommitted changes",
-    "/plan": "Minimalist task checklist and plan manager (CMDAIPLAN.md)",
-    "/implement": "Switch to code mode and execute the plan checklist (alias: /wdroz)",
-    "/debug": "Fast project-wide AST scan for Python/JSON syntax errors (alias: /bugs)",
-    "/index": "Scan and index project symbols into SQLite FTS5 database",
-    "/context": "Token budget, context breakdown and interactive workspace file picker",
-    "/export": "Export current session with thinking & tools to interactive HTML file",
-    "/add": "Open Windows Explorer or pin files to conversation context",
+    "/editor": "Open terminal code editor in a new window",
+    "/revert": "Revert file modifications from current turn",
+    "/branch": "Create or checkout git branch",
+    "/git": "Open the git window in a new terminal",
+    "/commit": "Write a commit message and commit staged changes in a modal",
+    "/summarize": "Summarize conversation history into compact context handoff",
+    "/ctx": "Inspect context token usage and manage pinned files",
+    "/stats": "Session statistics: tokens, response speeds, tool counts",
+    "/params": "View or set generation parameters: temp, top_p, max_tokens",
+    "/loader": "Select GGUF backend loader (CPU / CUDA / Vulkan)",
+    "/add": "Pin files to conversation context",
     "/drop": "Remove pinned files from conversation context",
+    "/mcp": "MCP servers status and configuration",
+    "/system": "Pick, create or switch system prompt",
+    "/settings": "Configure application settings",
+    "/changelog": "Show GitHub releases changelog",
+    "/update": "Pull the latest code",
+    "/updatesettings": "Automatic updates: on/off, check interval",
     "/cd": "Change current working directory (/cd <path>)",
-    "/mode": "Toggle/cycle agent execution mode (auto / plan / ask)",
-    "/thinking": "Show or set the thinking level. No argument cycles it, or name one: /thinking max",
-    "/changelog": "Show GitHub releases changelog (>= v3.0-alpha)",
-    "/update": "Pull the latest code - same as `cmdai code update`",
-    "/updatesettings": "Automatic updates: on/off, check interval, check or update now",
-    "/mcp": "MCP servers status (/mcp restart|logs <name>)",
-    "/quit": "Quit CMDAI CODE",
+    "/exit": "Exit CMDAI CODE",
 }
 
 SHORTCUTS_DOC: Dict[str, Dict[str, str]] = {
@@ -58,12 +54,12 @@ SHORTCUTS_DOC: Dict[str, Dict[str, str]] = {
     },
     "Escape": {
         "title": "Cancel / Abort / Close",
-        "desc": "Abort generation (press twice), dismiss modal dialog, or unfocus",
+        "desc": "Abort generation, dismiss modal dialog, or unfocus",
         "detail": (
-            "[bold white]Shortcut:[/] [b #58a6ff]Escape[/] (or [b #58a6ff]Esc Esc[/])\n\n"
+            "[bold white]Shortcut:[/] [b #58a6ff]Escape[/] \n\n"
             "[bold white]Action:[/] [bold #e6edf3]Abort Generation / Dismiss Modal[/]\n\n"
             "[bold white]Description:[/] Press Escape to dismiss the current modal dialog or cancel autocomplete suggestions. "
-            "Pressing Escape twice during generation stops the current turn safely without losing history."
+            "Pressing Escape during generation stops the current turn safely without losing history."
         ),
     },
     "Shift+Tab": {
@@ -157,7 +153,7 @@ SHORTCUTS_DOC: Dict[str, Dict[str, str]] = {
 
 HELP_CATEGORIES: List[Tuple[str, List[str]]] = [
     ("Chat & Sessions", ["/new", "/help", "/export", "/summarize", "/sessions", "/stats"]),
-    ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/test", "/review", "/plan", "/implement", "/debug", "/index", "/mode"]),
+    ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/test", "/review", "/plan", "/tasks", "/bg", "/implement", "/debug", "/index", "/mode"]),
     ("Context & Files", ["/cd", "/add", "/drop", "/context"]),
     ("Model & Reasoning", ["/models", "/modelinfo", "/params", "/system", "/thinking"]),
     ("Configuration & Engine", ["/settings", "/loader", "/update", "/updatesettings", "/changelog", "/mcp", "/quit"]),

@@ -13,6 +13,7 @@ class SubagentTask:
     # closure can append to them without another channel.
     notes: List[str] = field(default_factory=list)
     events: List[Dict[str, Any]] = field(default_factory=list)
+    abort_requested: bool = False
 
 @dataclass
 class SubagentProgress:
@@ -54,3 +55,4 @@ class SubagentResult:
     # Explicit outcome flag. The lead agent used to infer failure by sniffing
     # the summary text, which reported "no model backend" as a success.
     success: bool = True
+    status: str = "completed"

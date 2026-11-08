@@ -1,148 +1,147 @@
-# ⌬ CMDAI CODE: Autonomous Terminal Coding Agent
-
 <div align="center">
+  <img src="assets/banner.png" alt="CMDAI CODE" width="100%" />
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg?logo=windows&logoColor=white)](https://microsoft.com)
-[![UI](https://img.shields.io/badge/UI-Modern%20TUI-58a6ff.svg)](https://textual.textualize.io/)
-[![Local Engine](https://img.shields.io/badge/Local%20Engine-llama.cpp%20(GGUF)-7ee787.svg)](https://github.com/ggerganov/llama.cpp)
-[![License](https://img.shields.io/badge/License-Custom%20License-orange.svg)](LICENSE)
-[![Code of Conduct](https://img.shields.io/badge/Policy-Code%20of%20Conduct-blue.svg)](CODE_OF_CONDUCT.md)
+  <p align="center">
+    <a href="https://github.com/Krzyzyk33/CMDAI-CODE/releases"><img src="https://img.shields.io/badge/Release-v3.0.6--alpha-blue.svg?style=flat-square" alt="Release v3.0.6-alpha"></a>
+    <a href="#"><img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg?style=flat-square&logo=windows" alt="Platform: Windows"></a>
+    <a href="#"><img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python" alt="Python 3.10+"></a>
+    <a href="#"><img src="https://img.shields.io/badge/Local%20Inference-GGUF%20%2F%20llama.cpp-brightgreen.svg?style=flat-square" alt="llama.cpp"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Personal%20%2F%20Non--Commercial-blue.svg?style=flat-square" alt="License"></a>
+  </p>
 
-**CMDAI CODE** is a next-generation autonomous coding agent and programming assistant built specifically for the Windows terminal. It seamlessly combines full reasoning and multi-file code editing autonomy with an elegant Dark Theme terminal UI, offline local GGUF model execution (100% privacy), and integration with major cloud AI providers.
+### Autonomous Terminal Coding Agent
+*Powered by local GGUF models (llama.cpp) and multi-provider cloud AI.*
 
 </div>
 
----
 
-## Installation
+## 🌟 About
 
-### PowerShell
-```bash
-irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/tools/install-remote.ps1 | iex
-```
-
-### npm
-> [!WARNING]
-> **Temporarily Unavailable**
-> This feature is currently not working. We are working to resolve the issue as soon as possible.
-```bash
-npm install -g cmdai-code
-```
-
-### npx
-> [!WARNING]
-> **Temporarily Unavailable**
-> This feature is currently not working. We are working to resolve the issue as soon as possible.
-```bash
-npx -y cmdai-code code
-```
-
-### pip
-> [!WARNING]
-> **Temporarily Unavailable**
-> This feature is currently not working. We are working to resolve the issue as soon as possible.
-```bash
-pip install git+[https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git)
-```
-
-### pipx
-> [!WARNING]
-> **Temporarily Unavailable**
-> This feature is currently not working. We are working to resolve the issue as soon as possible.
-```bash
-git clone [https://github.com/Krzyzyk33/CMDAI-CODE.git](https://github.com/Krzyzyk33/CMDAI-CODE.git) $env:USERPROFILE\CMDAI-CODE
-cd $env:USERPROFILE\CMDAI-CODE
-```
+**CMDAI CODE** is an autonomous terminal coding agent running directly inside your Windows console (Windows Terminal & PowerShell). Built from the ground up for privacy, speed, and developer autonomy:
+- **Local-First**: Native support for quantized `.gguf` models via `llama.cpp` with Vulkan / CPU acceleration — write code completely offline without sending data to external servers.
+- **Multi-Provider Cloud**: Seamless integration with top AI providers (OpenCode Zen, OpenRouter, Anthropic Claude, OpenAI, Google Gemini, Ollama, vLLM, and any custom OpenAI-compatible endpoints).
+- **Autonomous Subagents & Background Workers**: Delegate heavy tasks to specialized subagents (Code Reviewer, Tester, Refactor) running synchronously or in the background (`Ctrl+B` / `/bg`).
+- **Modern Terminal UI (TUI)**: Minimalist, clean GitHub Dark styled interface built on Textual — featuring real-time colored diffs, a session manager, and native Model Context Protocol (MCP) support.
 
 ---
 
-## 🌟 Key Features
+## 🚀 Key Features
 
-### 1. 🎨 Modern Dark Terminal Interface
-- High-contrast developer theme (`#090d13` / `#0d1117`) with distinct user and assistant message blocks.
-- Real-time text and code streaming (~33 FPS).
-- Braille spinner animations and discrete tool execution indicators (`●` completed, `○` pending).
-- Intelligent `ThinkingBlock` with collapsible reasoning trace and automatic hiding for non-reasoning models.
-- Smooth mouse wheel scrolling with zero bottom-bounce.
-
-### 2. 🔍 Zero-Wrap Code Shift (`ToolBlock`)
-- Code viewing and editing widgets (`edit`, `read`, `write`) enforce strict `text-wrap: nowrap` and `text-overflow: clip`.
-- Code lines **never fold or wrap**, preserving syntax indentation and structure.
-- Hovering over an expanded tool block and pressing the `→` or `←` arrow keys shifts the view horizontally to reveal long lines, with a tight 1-space padding margin past the last character.
-- Collapsing a tool block immediately resets horizontal scroll offset back to the beginning.
-
-### 3. 🛡️ Autonomous Test-and-Repair Loop
-- The built-in test runner automatically detects project test suites (`pytest`, `npm test`, `cargo test`, `go test`).
-- Code changes trigger AST syntax validation and background test verification.
-- When an error or failure is detected, the agent autonomously self-corrects the code without halting.
-
-### 4. 🌳 Real Git Integration (`/branch`, `/diff`, `/commit`)
-- Modal `/branch` connects directly to system Git, displaying branches and commit history.
-- Built-in Git repository initialization (`git init`) for new workspaces.
-- Standalone code editor (`/editor`) and split-view diff viewer with protected change approval.
-
-### 5. ⚡ Unbroken Continuity & Context Compaction
-- **Uncapped action loop**: The agent executes multi-step workflows (inspect → plan → edit multiple files → test → verify) until completion.
-- **Safe clipboard**: <kbd>Ctrl</kbd>+<kbd>C</kbd> safely copies expanded code blocks to the clipboard without crashing the application.
-- **Dynamic context compaction**: Intelligent token budgeting ensures prompt and generation never exceed model context windows (`exceed context window` prevention).
+- ⚡ **Local GGUF (Vulkan / CPU)**: Automatic discovery and loading of `.gguf` weights from the `models/` directory. Fast token generation without complex setup.
+- 🌐 **Custom AI Providers**: Built-in provider manager in `/models` (`Ctrl+A`) — easily connect any OpenAI-compatible API (Groq, Together AI, DeepInfra, self-hosted vLLM).
+- 🗂️ **Advanced Session Manager (`/sessions`)**: Persistent conversation history, automatic AI session titles, live filtering, and instant context switching.
+- ⚙️ **Background Jobs (`/bg`)**: Inspect running background tasks, track progress, and read logs in real time without blocking the terminal.
+- 🔍 **Interactive Diff Viewer (`/diff`)**: Clear syntax-highlighted diffs of file modifications with one-click accept/reject controls.
+- 🔌 **Model Context Protocol (MCP)**: Extensibility with external tools and MCP servers.
 
 ---
 
-## 💻 Windows Terminal Commands (CLI)
+## 📥 Installation
 
-CMDAI CODE provides dedicated CLI commands:
+Choose your preferred installation method:
+
+### 1. PowerShell
+No Git or Node.js required. Automatically downloads, configures, and launches the application:
+```powershell
+irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/install.ps1 | iex
+```
+
+### 2. NPX
+Execute directly from GitHub without prior installation:
+```bash
+npx github:Krzyzyk33/CMDAI-CODE
+```
+
+### 3. NPM
+Install globally on your machine using npm:
+```bash
+npm install -g github:Krzyzyk33/CMDAI-CODE
+```
+
+### 4. PIP
+Install directly into your Python environment:
+```bash
+pip install git+https://github.com/Krzyzyk33/CMDAI-CODE.git
+```
+
+### 5. PIPX
+Run in an isolated Python application container:
+```bash
+pipx run --spec git+https://github.com/Krzyzyk33/CMDAI-CODE.git cmdai code
+```
+
+### 6. Git Clone
+Clone the repository and run the local launcher:
+```powershell
+git clone https://github.com/Krzyzyk33/CMDAI-CODE.git
+cd CMDAI-CODE
+.\install.bat
+```
+
+---
+
+## 💻 CLI Commands
+
+Once installed, use the global `cmdai` command from any directory:
 
 | Command | Description |
 | :--- | :--- |
-| `cmdai` / `cmdai.bat` | Launches the terminal UI in the current workspace directory. |
-| `cmdai code update` | Safely updates CMDAI CODE from GitHub and synchronizes dependencies. |
-| `cmdai code addlocal model` | Opens Windows File Explorer to select a local `*.gguf` model and copies it into `models/`. |
-| `cmdai editor [file]` | Opens the built-in code editor in a standalone console window. |
-| `install.bat` | Fast installer for dependencies and initial configuration. |
+| `cmdai code [dir]` | Launch the CMDAI CODE terminal coding agent in the specified workspace |
+| `cmdai editor [file]` | Open the built-in terminal file editor |
+| `cmdai mcp [command]` | Manage Model Context Protocol servers (`list`, `add`, `remove`, `test`) |
+| `cmdai update` | Check for and install the latest updates directly from GitHub |
+| `cmdai addlocal` | Interactive wizard to download or configure local `.gguf` models |
+| `cmdai --install-launcher` | Register the global Windows terminal shortcut |
 
 ---
 
-## ⌨️ In-Chat Slash Commands
+## ⌨️ Keybindings & Slash Commands
 
-Type `/` in the prompt input to open the interactive autocomplete menu:
-
+### Main In-App Slash Commands:
 | Command | Description |
 | :--- | :--- |
-| `/help` | Displays keyboard shortcuts, commands reference, and guide. |
-| `/models` | Model selector for local GGUF models, OpenCode Zen, and 23+ cloud AI providers (see [API.md](API.md)). |
-| `/branch` | Git branch manager with commit history and branch switching/creation. |
-| `/diff` | Opens modified files review and syntax-highlighted diff inspector. |
-| `/commit` | Git commit creator with message input and commit execution. |
-| `/plan` | Interactive task list (TODO tracker) updated live during generation. |
-| `/editor` | Opens the terminal code editor in a separate console window. |
-| `/add` | Opens the project folder in Windows Explorer or attaches files to context. |
-| `/sessions` | Searchable chat session manager with filtering by title and date. |
-| `/context` | RAM/VRAM resource statistics and active token count monitors. |
-| `/thinking` | Toggle thinking/reasoning effort (`Off`, `Low`, `Medium`, `High`). |
-| `/test` | Manually run project test suites with formatted test reports. |
-| `/compact` | Manually trigger natural context summarization and history compaction. |
+| `/models` | Select active local GGUF model or cloud provider |
+| `/sessions` | Browse and manage saved conversation sessions |
+| `/bg` | Monitor background processes and subagents |
+| `/mode` | Switch agent mode (`auto`, `code`, `plan`) |
+| `/diff` | Review proposed file changes with accept/reject |
+| `/plan` | View and edit interactive execution plans |
+| `/context` | Inspect and pin workspace files to agent context |
+| `/help` | Complete cheat sheet and command reference |
+
+### Keyboard Shortcuts:
+- **`Enter`**: Submit prompt / select menu option
+- **`Shift+Enter`**: Insert new line in prompt input
+- **`Esc`**: Close active modal / cancel generation
+- **`Ctrl+A`**: In `/models` – add new custom AI provider; in model list – add model
+- **`Ctrl+D`**: Configure API key for selected provider
+- **`Ctrl+B`**: Send current subagent task to background
 
 ---
 
-## ⌨️ Keyboard Shortcuts
+## 🛠️ Project Structure
 
-| Shortcut | Action |
-| :--- | :--- |
-| <kbd>Ctrl</kbd> + <kbd>T</kbd> | Toggle expand/collapse for all tool blocks (`ToolBlock`). |
-| <kbd>Ctrl</kbd> + <kbd>C</kbd> | Copy selected code to clipboard or interrupt generation. |
-| <kbd>Esc</kbd> / <kbd>Esc</kbd> <kbd>Esc</kbd> | Close active modal / cancel ongoing model turn. |
-| <kbd>↑</kbd> / <kbd>↓</kbd> (in empty input) | Navigate prompt history. |
-| <kbd>←</kbd> / <kbd>→</kbd> (hovering over code) | Horizontally shift long lines of code in narrow terminal windows. |
-| <kbd>Ctrl</kbd> + <kbd>Q</kbd> | Cleanly exit application. |
+```text
+CMDAI-CODE/
+├── cmdai.py                  # Main CLI entry point
+├── cmdai.bat                 # Windows batch launcher
+├── install.ps1               # Automated PowerShell installer with CC progress bar
+├── install.bat               # Local installation batch wrapper
+├── package.json              # NPM package definition (supports npx github:...)
+├── bin/                      # Launcher wrappers (Node.js & Windows)
+├── assets/                   # Banners and visual assets
+├── src/cmdai/
+│   ├── agent/                # Agent loop, tool executors, subagents & background tasks
+│   ├── core/                 # Session management, config, models & provider catalog
+│   ├── editor/               # In-app file editor and diff engine
+│   ├── mcp/                  # Native Model Context Protocol (MCP) client
+│   └── tui/                  # Console UI (Textual): screens, modals, dark theme
+└── models/                   # Folder for local .gguf model weights (optional)
+```
 
 ---
 
-## 📄 License & Terms of Use
+## 📄 License
 
-**Custom Proprietary License — All Rights Reserved.**
-
-- **Permitted**: You are welcome to propose changes, enhancements, and bug fixes directly to this official repository ([Pull Requests](https://github.com/Krzyzyk33/CMDAI-CODE/pulls)).
-- **Prohibited**: Creating derivative works, standalone forks, commercial packaging, or secondary distributions based on this codebase is **strictly prohibited without prior written authorization** from the copyright holder.
-
-For complete legal terms and contribution rules, refer to [LICENSE](LICENSE) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+This software is provided under a custom personal and non-commercial license. See the [LICENSE](LICENSE) file for complete terms and restrictions.  
+Copyright (c) 2026 Krzyzyk33. All Rights Reserved.

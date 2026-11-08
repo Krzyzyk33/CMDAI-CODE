@@ -2,15 +2,16 @@ import os
 import time
 import subprocess
 import tempfile
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 
 
 class BackgroundTask:
-    def __init__(self, task_id: str, cmd: str, proc: subprocess.Popen, log_path: str):
+    def __init__(self, task_id: str, cmd: str, proc: subprocess.Popen, log_path: str, session_id: str = ""):
         self.task_id = task_id
         self.cmd = cmd
         self.proc = proc
         self.log_path = log_path
+        self.session_id = session_id
         self.start_time = time.time()
 
     def is_running(self) -> bool:
@@ -48,6 +49,7 @@ class BackgroundTaskManager:
 
     def __init__(self):
         self.tasks: Dict[str, BackgroundTask] = {}
+        self.subagents: Dict[str, Dict[str, Any]] = {}
         self._notified_tasks: set = set()
         self._counter: int = 0
 
@@ -57,20 +59,55 @@ class BackgroundTaskManager:
             cls._instance = cls()
         return cls._instance
 
-    def get_finished_notifications(self) -> List[str]:
+    def has_finished_notifications(self, session_id: str = "") -> bool:
+        for tid, t in list(self.tasks.items()):
+            if session_id and str(getattr(t, "session_id", "") or "") != session_id:
+                continue
+            if not t.is_running() and tid not in self._notified_tasks:
+                return True
+        for sid, s in list(self.subagents.items()):
+            if session_id and str(s.get("session_id") or "") != session_id:
+                continue
+            if s.get("background") and s.get("status") != "running" and sid not in self._notified_tasks:
+                return True
+        return False
+
+    def get_finished_notifications(self, session_id: str = "") -> List[str]:
         notifications = []
         for tid, t in list(self.tasks.items()):
+            if session_id and str(getattr(t, "session_id", "") or "") != session_id:
+                continue
             if not t.is_running() and tid not in self._notified_tasks:
                 self._notified_tasks.add(tid)
                 code = t.poll()
-                logs = t.read_logs(max_lines=15)
-                msg = f"[Background command '{t.cmd}' has finished with exit code {code}]"
+                logs = t.read_logs(max_lines=40)
+                msg = (
+                    f'<tool_response name="background_task" id="{tid}">\n'
+                    f"[Background command '{t.cmd}' ({tid}) has finished with exit code {code}]\n"
+                )
                 if logs.strip():
-                    msg += f"\nLast output:\n{logs.strip()}"
+                    msg += f"Output:\n{logs.strip()}\n"
+                msg += "Please report this background command result to the user.\n</tool_response>"
+                notifications.append(msg)
+        for sid, s in list(self.subagents.items()):
+            if session_id and str(s.get("session_id") or "") != session_id:
+                continue
+            if s.get("background") and s.get("status") != "running" and sid not in self._notified_tasks:
+                self._notified_tasks.add(sid)
+                role = s.get("role", "Subagent")
+                status = s.get("status", "finished")
+                res = s.get("result") or ""
+                msg = (
+                    f'<tool_response name="background_subagent" id="{sid}">\n'
+                    f"[Background subagent '{role}' ({sid}) has {status}]\n"
+                )
+                if str(res).strip():
+                    msg += f"Report:\n{str(res).strip()}\n"
+                msg += "Please summarize and report this background subagent result to the user.\n</tool_response>"
                 notifications.append(msg)
         return notifications
 
-    def spawn(self, cmd: str, cwd: str) -> Dict[str, Any]:
+    def spawn(self, cmd: str, cwd: str, session_id: str = "") -> Dict[str, Any]:
         self._counter += 1
         task_id = f"task_{self._counter}"
         temp_dir = tempfile.gettempdir()
@@ -89,7 +126,7 @@ class BackgroundTaskManager:
             stderr=subprocess.STDOUT,
             creationflags=creation_flags,
         )
-        bg_task = BackgroundTask(task_id, cmd, proc, log_path)
+        bg_task = BackgroundTask(task_id, cmd, proc, log_path, session_id=session_id)
         self.tasks[task_id] = bg_task
         return {
             "success": True,
@@ -100,10 +137,10 @@ class BackgroundTaskManager:
             "log_path": log_path,
         }
 
-    def adopt(self, cmd: str, proc: subprocess.Popen, log_path: str) -> Dict[str, Any]:
+    def adopt(self, cmd: str, proc: subprocess.Popen, log_path: str, session_id: str = "") -> Dict[str, Any]:
         self._counter += 1
         task_id = f"task_{self._counter}"
-        bg_task = BackgroundTask(task_id, cmd, proc, log_path)
+        bg_task = BackgroundTask(task_id, cmd, proc, log_path, session_id=session_id)
         self.tasks[task_id] = bg_task
         return {
             "success": True,
@@ -120,6 +157,7 @@ class BackgroundTaskManager:
             running = t.is_running()
             res.append({
                 "task_id": tid,
+                "session_id": str(getattr(t, "session_id", "") or ""),
                 "cmd": t.cmd,
                 "status": "running" if running else f"finished (code {t.poll()})",
                 "running": running,
@@ -135,3 +173,105 @@ class BackgroundTaskManager:
 
     def get_task(self, task_id: str) -> Optional[BackgroundTask]:
         return self.tasks.get(task_id)
+
+    def has_active_background(self, session_id: Optional[str] = None) -> bool:
+        sid_str = str(session_id or "").strip()
+        for t in self.tasks.values():
+            if t.is_running():
+                if not sid_str or str(getattr(t, "session_id", "") or "") == sid_str:
+                    return True
+        for s in self.subagents.values():
+            if bool(s.get("background")) and s.get("status") == "running":
+                if not sid_str or str(s.get("session_id") or "") == sid_str:
+                    return True
+        return False
+
+    def register_subagent(
+        self,
+        sid: str,
+        role: str,
+        task: str,
+        background: bool = False,
+        session_id: str = "",
+        cancel_cb: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.subagents[sid] = {
+            "subagent_id": sid,
+            "session_id": session_id,
+            "role": role,
+            "task": task,
+            "start_time": time.time(),
+            "status": "running",
+            "result": None,
+            "background": background,
+            "abort_requested": False,
+            "cancel_cb": cancel_cb,
+        }
+
+    def mark_subagent_background(self, sid: str) -> None:
+        if sid in self.subagents:
+            self.subagents[sid]["background"] = True
+
+    def update_subagent_tool(self, sid: str, tool: str, target: str = "") -> None:
+        if sid in self.subagents:
+            self.subagents[sid]["current_tool"] = tool
+            self.subagents[sid]["tool_target"] = target
+
+    def finish_subagent(self, sid: str, status: str = "finished", result: Any = None) -> None:
+        if sid in self.subagents:
+            self.subagents[sid]["status"] = status
+            self.subagents[sid]["result"] = result
+
+    def cancel_subagent(self, sid: str) -> bool:
+        """Cancel a running subagent immediately."""
+        s = self.subagents.get(sid)
+        if s:
+            s["status"] = "cancelled"
+            s["abort_requested"] = True
+            cb = s.get("cancel_cb")
+            if callable(cb):
+                try:
+                    cb()
+                except Exception:
+                    pass
+            return True
+        return False
+
+    def is_subagent_cancelled(self, sid: str) -> bool:
+        s = self.subagents.get(sid)
+        if s:
+            return bool(s.get("abort_requested") or s.get("status") in ("cancelled", "stopped"))
+        return False
+
+    def cancel_all_for_session(self, session_id: str) -> int:
+        """Cancel all running subagents and tasks for a given session."""
+        cancelled_count = 0
+        sid_str = str(session_id or "").strip()
+        for sid, s in list(self.subagents.items()):
+            if not sid_str or str(s.get("session_id") or "") == sid_str:
+                if s.get("status") == "running":
+                    self.cancel_subagent(sid)
+                    cancelled_count += 1
+        for tid, t in list(self.tasks.items()):
+            if not sid_str or str(getattr(t, "session_id", "") or "") == sid_str:
+                if t.is_running():
+                    t.kill()
+                    cancelled_count += 1
+        return cancelled_count
+
+    def list_subagents(self) -> List[Dict[str, Any]]:
+        res = []
+        for sid, s in list(self.subagents.items()):
+            res.append({
+                "subagent_id": sid,
+                "session_id": str(s.get("session_id") or ""),
+                "role": s["role"],
+                "task": s["task"],
+                "status": s["status"],
+                "elapsed": round(time.time() - s["start_time"], 1),
+                "background": bool(s.get("background", False)),
+            })
+        return res
+
+    def get_subagent(self, sid: str) -> Optional[Dict[str, Any]]:
+        return self.subagents.get(sid)

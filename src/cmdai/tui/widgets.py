@@ -37,13 +37,18 @@ class UserMessageCard(Vertical):
     }
     """
 
-    def __init__(self, prompt: str = "", turn_id: int = -1, **kwargs):
+    def __init__(self, prompt: str = "", turn_id: int = -1, label: str = "user · actions", **kwargs):
         classes = kwargs.pop("classes", "")
         classes = f"user-card {classes}".strip()
         super().__init__(classes=classes, **kwargs)
         self.prompt = prompt
         self.turn_id = turn_id
-        self._header = Static("[bold #58a6ff]user[/] [dim #6e7681]· actions[/]", classes="card-label")
+        if "·" in label:
+            p1, p2 = label.split("·", 1)
+            hdr = f"[bold #58a6ff]{p1.strip()}[/] [dim #6e7681]· {p2.strip()}[/]"
+        else:
+            hdr = f"[bold #58a6ff]{label.strip()}[/]"
+        self._header = Static(hdr, classes="card-label")
         self._body = Static(Text(prompt, style="white"), classes="card-body")
 
     def compose(self):
@@ -54,8 +59,13 @@ class UserMessageCard(Vertical):
         self.prompt = text
         self._body.update(Text(text, style="white"))
 
+    def set_prompt(self, prompt: str) -> None:
+        self.update_content(prompt)
+
     def on_click(self, event: events.Click) -> None:
         try:
+            if self.turn_id < 0:
+                return
             app = getattr(self, "app", None)
             if app and hasattr(app, "show_user_actions"):
                 app.show_user_actions(self.turn_id)
@@ -350,6 +360,22 @@ class LiveToolIndicator(Vertical):
                 pass
 
     def on_click(self, event: events.Click) -> None:
+        # A subagent still being announced has no block yet: open the newest
+        # subagent block, so the window can be entered from the very start.
+        if (self.tool_name or "").lower() in ("subagent", "spawn_subagent", "task"):
+            try:
+                card = next((a for a in self.ancestors if isinstance(a, AssistantTurnCard)), None)
+                blocks = list(getattr(card, "tool_blocks", []) or []) if card else []
+                cand = next((b for b in reversed(blocks)
+                             if getattr(b, "subagent_role", "") or (getattr(b, "tool_name", "") or "").lower() in ("subagent", "task")), None)
+                opener = getattr(self.app, "_open_subagent_chat", None)
+                if cand is not None and callable(opener):
+                    opener(cand)
+                else:
+                    self.app.notify("Subagent is starting — please wait a moment.", title="Subagent", timeout=2.0)
+            except Exception:
+                pass
+            return
         self.is_expanded = not self.is_expanded
         self.details_widget.styles.display = "block" if self.is_expanded else "none"
         if self.is_expanded and self._typewriter_timer is None and self._displayed_code != self._target_code:
@@ -380,6 +406,29 @@ class LiveToolIndicator(Vertical):
             self.details_widget.styles.display = "none"
         except Exception:
             pass
+
+
+def is_api_error_message(text: str) -> bool:
+    t = str(text or "").strip()
+    tl = t.lower()
+    if tl.startswith(("opencode bridge:", "api error", "error:", "model error:", "provider error:", "**error", "**model connection error", "execution error", "connection error")):
+        return True
+    if any(k in tl for k in (
+        "free usage limit reached",
+        "upstream model is overloaded",
+        "rate limit reached",
+        "quota exceeded",
+        "resource exhausted",
+        "[http 401]",
+        "[http 403]",
+        "[http 429]",
+        "[http 500]",
+        "[http 502]",
+        "[http 503]",
+        "[http 504]",
+    )):
+        return True
+    return False
 
 
 class AssistantTurnCard(Vertical):
@@ -423,8 +472,12 @@ class AssistantTurnCard(Vertical):
         self.flow_container = Vertical(classes="card-flow")
         self.tools_container = self.flow_container
         self.body_widget = Static("", classes="card-body")
-        self.current_body_widget: Static = self.body_widget
-        self.body_widgets: List[Static] = [self.body_widget]
+        if str(initial_text or "").strip():
+            self.current_body_widget: Optional[Static] = self.body_widget
+            self.body_widgets: List[Static] = [self.body_widget]
+        else:
+            self.current_body_widget = None
+            self.body_widgets = []
         self.footer_widget = Static("", classes="card-footer")
         # Textual's default Vertical sizing can claim all remaining space in a
         # scroll view.  Keep each turn content-sized so tool rows never get
@@ -465,8 +518,8 @@ class AssistantTurnCard(Vertical):
         with self.flow_container:
             # A card can start with no text yet (the subagent window builds one
             # from tool events), so the body widget is optional. Only yield in compose
-            # if no pending mounts were already queued (which preserves chronological order on replay).
-            if not self._pending_mounts and self.current_body_widget is not None:
+            # if initial text was provided and no pending mounts were already queued.
+            if not self._pending_mounts and self.current_body_widget is not None and getattr(self, "raw_text", "").strip():
                 yield self.current_body_widget
         yield self.live_tool_widget
         yield self.footer_widget
@@ -519,6 +572,7 @@ class AssistantTurnCard(Vertical):
             self.loading_block.finish()
         if not target and live_text:
             import re
+            KEY_PAT = r'(?:\\?"?(?:TargetFile|target_file|targetfile|filePath|filepath|file_path|filename|file_name|dest|destination|file|path|cmd|command|commandLine|command_line|url|query)\\?"?)'
             m = re.search(KEY_PAT + r'\s*[:=]\s*(?:\\?["\']([^"\'\r\n}>]+)(?:\\?["\'])?|([^"\'\s,}>]+))', live_text, flags=re.IGNORECASE)
             if not m:
                 m = re.search(r'<(?:TargetFile|target_file|targetfile|filePath|filepath|file_path|filename|file_name|file|path|dest)>([^<>\r\n]+)', live_text, flags=re.IGNORECASE)
@@ -658,7 +712,9 @@ class AssistantTurnCard(Vertical):
         for b in (self.flow_container.query(ToolBlock) or self.tool_blocks):
             if getattr(b, "tool_running", False):
                 b_name = (getattr(b, "tool_name", "") or "").lower()
-                if "background" in str(getattr(b, "target", "")).lower():
+                if getattr(b, "is_backgrounded", False) or "background" in str(getattr(b, "target", "")).lower():
+                    continue
+                if getattr(b, "subagent_role", "") or b_name in ("subagent", "task"):
                     continue
                 if b_name in ("read", "file_read", "web", "fetch", "webfetch", "ls", "grep", "search", "glob") or b_name == tool_name.lower():
                     b.finish({"result": "completed"})
@@ -683,7 +739,7 @@ class AssistantTurnCard(Vertical):
         for b in list(self.flow_container.query(ToolBlock) or self.tool_blocks):
             b_name = (getattr(b, "tool_name", "") or "").lower()
             b_tgt = str(getattr(b, "target", "")).strip().lower()
-            if b_name == tool_name.lower() and (b_tgt.startswith("<!doctype") or b_tgt in ("working", "running", "(no target)")):
+            if b_name == tool_name.lower() and getattr(b, "tool_running", False) and (b_tgt.startswith("<!doctype") or b_tgt in ("placeholder", "working", "running", "(no target)")):
                 try:
                     b.remove()
                     if b in self.tool_blocks:
@@ -691,7 +747,10 @@ class AssistantTurnCard(Vertical):
                 except Exception:
                     pass
 
-        block = ToolBlock(tool_name, target)
+        clean_initial_target = target
+        if clean_initial_target and clean_initial_target.strip().lower() in ("placeholder", "(no target)"):
+            clean_initial_target = ""
+        block = ToolBlock(tool_name, clean_initial_target)
         if gen_start is not None:
             block.start_time = gen_start
         if block.tool_name.lower() in ("write", "edit"):
@@ -707,6 +766,10 @@ class AssistantTurnCard(Vertical):
         if self.current_body_widget is not None and not getattr(self, "raw_text", "").strip():
             if self.current_body_widget in self.body_widgets:
                 self.body_widgets.remove(self.current_body_widget)
+            try:
+                self.current_body_widget.remove()
+            except Exception:
+                pass
             try:
                 self.current_body_widget.styles.display = "none"
             except Exception:
@@ -773,6 +836,8 @@ class AssistantTurnCard(Vertical):
             self.loading_block.finish()
 
         name = str(tool_name or "tool")
+        if name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command"):
+            name = "command"
         phase = str(phase or "running")
         detail = str(detail or "")
 
@@ -793,7 +858,7 @@ class AssistantTurnCard(Vertical):
                 name = "webfetch"
                 detail = url_m.group(0)
             elif any(k in raw_d.lower() for k in ("child_process", "exec(", "spawn(", "execsync", "bash", "cmd")):
-                name = "terminal"
+                name = "command"
                 cmd_m = re.search(r"(?:exec|spawn|execSync)\(\s*['\"]([^'\"]+)['\"]", raw_d)
                 detail = cmd_m.group(1) if cmd_m else "command"
             else:
@@ -893,11 +958,12 @@ class AssistantTurnCard(Vertical):
                 block = running_candidates[-1]
         if block is None:
             self.clear_generating_tool()
-            if not detail.strip() or detail.strip().lower() in ("done", "ok"):
+            first_l = detail.splitlines()[0].strip() if detail.strip() else ""
+            if not first_l or first_l.lower() in ("done", "ok", "placeholder"):
                 return
             # An outcome with no start: still worth showing, or a failure would
             # be the only thing anyone ever sees.
-            block = self.add_tool(name, detail.splitlines()[0])
+            block = self.add_tool(name, first_l)
 
         try:
             if phase == "done" and not is_execute:
@@ -934,17 +1000,69 @@ class AssistantTurnCard(Vertical):
         if self.loading_block and not self.loading_block.is_finished:
             self.loading_block.finish()
 
+        # Defensive JSON parsing for server-side subagent events
+        sub_role = None
+        sub_goal = None
+        sub_tool_ev = None
+        if detail.strip().startswith("{") and any(k in detail for k in ("sub_event", "tool", "role", "goal", "task")):
+            try:
+                import json as _json
+                data = _json.loads(detail)
+                if isinstance(data, dict):
+                    sub_role = str(data.get("role") or "").strip() or None
+                    sub_goal = str(data.get("goal") or "").strip() or None
+                    sev = data.get("sub_event")
+                    if sev == "tool_called":
+                        t_name = str(data.get("tool") or "").strip()
+                        if t_name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                            t_name = "command"
+                        t_tgt = str(data.get("target") or "").strip()
+                        detail = f"{t_name} {t_tgt}".strip() if t_tgt else t_name
+                    elif sev == "tool_done":
+                        t_name = str(data.get("tool") or "").strip()
+                        if t_name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                            t_name = "command"
+                        t_tgt = str(data.get("target") or "").strip()
+                        t_out = str(data.get("output") or "").strip()
+                        detail = f"{t_name} {t_tgt}".strip() if t_tgt else t_name
+                        sub_tool_ev = {
+                            "tool": t_name,
+                            "target": t_tgt,
+                            "result": {"success": bool(data.get("ok", True)), "content": t_out},
+                            "ok": bool(data.get("ok", True)),
+                        }
+                    elif sev == "text_delta":
+                        detail = str(data.get("text") or "").strip()
+                    elif data.get("task"):
+                        detail = str(data.get("task") or "").strip()
+            except Exception:
+                pass
+
         blocks = [b for b in (self.flow_container.query(ToolBlock) or self.tool_blocks)
                   if getattr(b, "tool_name", None) in ("subagent", "task")
                   and getattr(b, "subagent_role", "")]
         block = next((b for b in reversed(blocks)
                       if getattr(b, "tool_running", False)), None)
+        if block is None:
+            try:
+                app = getattr(self, "app", None)
+                if app:
+                    all_blocks = [b for b in app.query(ToolBlock)
+                                  if getattr(b, "tool_name", None) in ("subagent", "task")
+                                  and getattr(b, "subagent_role", "")
+                                  and getattr(b, "tool_running", False)]
+                    if all_blocks:
+                        block = all_blocks[-1]
+            except Exception:
+                pass
 
         if phase in ("running", "progress") and block is None:
             block = self.add_tool("subagent", detail or "running")
-            block.subagent_role = "Subagent"
-            block.subagent_goal = detail
+            block.subagent_role = sub_role or "Subagent"
+            block.subagent_goal = sub_goal or (detail if not detail.strip().startswith("{") else "Subagent task")
             block.subagent_status = "running"
+            if sub_tool_ev:
+                block.subagent_events.append(sub_tool_ev)
             try:
                 block.update_header()
             except Exception:
@@ -955,9 +1073,16 @@ class AssistantTurnCard(Vertical):
             # An outcome with no start. Still a marker, or a failure would open
             # nothing and the error would have nowhere to live.
             block = self.add_tool("subagent", detail or "done")
-            block.subagent_role = "Subagent"
-            block.subagent_goal = detail
+            block.subagent_role = sub_role or "Subagent"
+            block.subagent_goal = sub_goal or (detail if not detail.strip().startswith("{") else "Subagent task")
             block.subagent_status = "running"
+
+        if sub_role and block:
+            block.subagent_role = sub_role
+        if sub_goal and block and not getattr(block, "subagent_goal", ""):
+            block.subagent_goal = sub_goal
+        if sub_tool_ev and block:
+            block.subagent_events.append(sub_tool_ev)
 
         if phase == "progress":
             # The live line, not a new row: progress arrives repeatedly and each
@@ -974,11 +1099,20 @@ class AssistantTurnCard(Vertical):
                 # line and nothing else. Placeholders ("working", "starting")
                 # say nothing beyond "it runs", so only real details land here.
                 low = detail.strip().lower()
-                if low and low not in ("working", "starting", "…", "..."):
-                    notes = block.subagent_notes
-                    if not notes or notes[-1] != detail:
-                        notes.append(detail)
-                        del notes[:max(0, len(notes) - 30)]
+                if low and low not in ("working", "starting", "…", "...") and not low.startswith("{"):
+                    tool_kw = ("read", "edit", "write", "glob", "search", "shell", "command", "terminal", "bash", "ls", "scratch", "todo")
+                    words = detail.strip().split(None, 1)
+                    t_cand = words[0].lower() if words else ""
+                    if t_cand in tool_kw:
+                        t_arg = words[1].strip() if len(words) > 1 else ""
+                        ev_item = {"tool": t_cand, "target": t_arg, "ok": True}
+                        if not any(e.get("tool") == t_cand and e.get("target") == t_arg for e in block.subagent_events[-5:]):
+                            block.subagent_events.append(ev_item)
+                    else:
+                        notes = block.subagent_notes
+                        if not notes or notes[-1] != detail:
+                            notes.append(detail)
+                            del notes[:max(0, len(notes) - 30)]
                 try:
                     block.update_header()
                 except Exception:
@@ -1000,16 +1134,36 @@ class AssistantTurnCard(Vertical):
         except Exception:
             pass
 
+    def append_summary_chunk(self, chunk: str) -> None:
+        blocks = list(self.flow_container.query(ToolBlock)) or self.tool_blocks
+        for b in reversed(blocks):
+            if getattr(b, "tool_running", False) and (getattr(b, "tool_name", "") or "").lower() in ("summarizing", "summarize", "compact", "context_compact"):
+                if hasattr(b, "append_summary_chunk"):
+                    b.append_summary_chunk(chunk)
+                break
+
     def finish_tool(self, result: Dict[str, Any]) -> None:
         self.clear_generating_tool()
         blocks = list(self.flow_container.query(ToolBlock)) or self.tool_blocks
+        want_sum = isinstance(result, dict) and "summary" in result
         for b in reversed(blocks):
-            if getattr(b, "tool_running", False):
+            if getattr(b, "tool_running", False) and not getattr(b, "is_backgrounded", False):
+                if want_sum and (getattr(b, "tool_name", "") or "").lower() not in ("summarizing", "summarize", "compact", "context_compact"):
+                    continue
                 b.finish(result)
                 break
         else:
-            if blocks:
-                blocks[-1].finish(result)
+            if want_sum:
+                sum_blocks = [
+                    b for b in blocks
+                    if (getattr(b, "tool_name", "") or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+                ]
+                if sum_blocks:
+                    sum_blocks[-1].finish(result)
+            else:
+                non_bg = [b for b in blocks if not getattr(b, "is_backgrounded", False)]
+                if non_bg and getattr(non_bg[-1], "tool_running", False):
+                    non_bg[-1].finish(result)
 
         try:
             self.flow_container.refresh(layout=True)
@@ -1025,7 +1179,21 @@ class AssistantTurnCard(Vertical):
         for b in blocks:
             if getattr(b, "tool_running", False):
                 b_name = (getattr(b, "tool_name", "") or "").lower()
-                if "background" in str(getattr(b, "target", "")).lower():
+                if getattr(b, "is_backgrounded", False) or "background" in str(getattr(b, "target", "")).lower():
+                    continue
+                if getattr(b, "subagent_role", "") or b_name in ("subagent", "task"):
+                    if not self.is_generating:
+                        is_cancelled = bool(default_result and str(default_result.get("error", "")).lower() == "cancelled")
+                        b.finish_subagent({
+                            "role": getattr(b, "subagent_role", "") or "Subagent",
+                            "goal": getattr(b, "subagent_goal", "") or "",
+                            "status": "cancelled" if is_cancelled else "completed",
+                            "summary": str(getattr(b, "thinking", "") or ""),
+                            "history": list(getattr(b, "subagent_history", []) or []),
+                            "events": list(getattr(b, "subagent_events", []) or []),
+                            "findings": list(getattr(b, "subagent_findings", []) or []),
+                            "notes": list(getattr(b, "subagent_notes", []) or []),
+                        })
                     continue
                 b.finish(default_result or {"result": "completed"})
 
@@ -1044,6 +1212,8 @@ class AssistantTurnCard(Vertical):
     def update_pre_tool_content(self, text: str) -> None:
         """Update the text widget positioned above a currently-running server tool."""
         w = getattr(self, "_pre_tool_body_widget", None)
+        import re
+        text = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', str(text or ''), flags=re.IGNORECASE).strip()
         if w is not None and text.strip():
             self._last_finalized_text = text.strip()
             try:
@@ -1056,6 +1226,8 @@ class AssistantTurnCard(Vertical):
                     pass
 
     def update_last_body(self, text: str) -> None:
+        import re
+        text = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', str(text or ''), flags=re.IGNORECASE).strip()
         last_final = getattr(self, "_last_finalized_text", "").strip()
         if last_final:
             clean_text = text.strip()
@@ -1082,7 +1254,9 @@ class AssistantTurnCard(Vertical):
         self.finish_running_tools()
         if self.loading_block and not self.loading_block.is_finished:
             self.loading_block.finish()
-        if not text.strip():
+        import re
+        text = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', str(text or ''), flags=re.IGNORECASE).strip()
+        if not text:
             return
         last_final = getattr(self, "_last_finalized_text", "").strip()
         if last_final:
@@ -1128,23 +1302,47 @@ class AssistantTurnCard(Vertical):
                 pass
 
         try:
+            new_body._raw_markdown = text
+            is_err = is_api_error_message(text)
             new_body.styles.display = "block"
-            new_body.update(Markdown(text))
+            if is_err:
+                new_body.update(Text(text, style="bold #f85149"))
+            else:
+                new_body.update(Markdown(text))
         except Exception:
-            new_body.update(Text(text, style="white"))
+            new_body.update(Text(text, style="bold #f85149" if is_err else "white"))
+
+    def resume_turn(self) -> None:
+        """Resumes the active card after a background task finishes so the model continues seamlessly."""
+        self.is_generating = True
+        self._replay_finished_done = False
+        try:
+            self.footer_widget.update("")
+            self.footer_widget.styles.display = "none"
+        except Exception:
+            pass
+        self.prepare_for_next_turn()
+        self.update_header()
 
     def prepare_for_next_turn(self) -> None:
         """Resets active body pointer so the next autonomous turn appends below preceding tools/text."""
         self.finish_thinking()
         self.clear_generating_tool()
         self.finish_running_tools()
+        if self.is_generating:
+            try:
+                self.footer_widget.update("")
+            except Exception:
+                pass
         if getattr(self, "raw_text", "").strip():
             self._last_finalized_text = getattr(self, "raw_text", "").strip()
         self.current_body_widget = None
         self.raw_text = ""
 
     def _render_body(self, text: str) -> None:
-        if not text.strip():
+        import re
+        text = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', str(text or ''), flags=re.IGNORECASE).strip()
+        if not text:
             if self.current_body_widget is not None:
                 self.current_body_widget.update("")
             return
@@ -1178,10 +1376,17 @@ class AssistantTurnCard(Vertical):
             self.current_body_widget = new_body
             self.body_widgets.append(new_body)
 
+        if (
+            self.current_body_widget.parent is None
+            and not self.current_body_widget.is_mounted
+            and self.current_body_widget not in getattr(self, "_pending_mounts", [])
+        ):
+            body_to_mount = self.current_body_widget
+
             def _mount_body():
                 try:
-                    if self.flow_container.is_mounted:
-                        self.flow_container.mount(new_body)
+                    if self.flow_container.is_mounted and body_to_mount.parent is None:
+                        self.flow_container.mount(body_to_mount)
                     self.flow_container.refresh(layout=True)
                     self.refresh(layout=True)
                     if self.app:
@@ -1194,7 +1399,7 @@ class AssistantTurnCard(Vertical):
             else:
                 if not hasattr(self, "_pending_mounts"):
                     self._pending_mounts = []
-                self._pending_mounts.append(new_body)
+                self._pending_mounts.append(body_to_mount)
                 self.call_after_refresh(_mount_body)
                 try:
                     self.refresh(layout=True)
@@ -1203,10 +1408,15 @@ class AssistantTurnCard(Vertical):
 
         target_w = self.current_body_widget
         try:
+            target_w._raw_markdown = text
+            is_err = is_api_error_message(text)
             target_w.styles.display = "block"
-            target_w.update(Markdown(text))
+            if is_err:
+                target_w.update(Text(text, style="bold #f85149"))
+            else:
+                target_w.update(Markdown(text))
         except Exception:
-            target_w.update(Text(text, style="white"))
+            target_w.update(Text(text, style="bold #f85149" if is_err else "white"))
 
     def finish(
         self,
@@ -1222,8 +1432,12 @@ class AssistantTurnCard(Vertical):
         self.finish_running_tools()
         if elapsed is not None and elapsed > 0:
             self.elapsed = elapsed
-        else:
-            self.elapsed = time.time() - self.start_time
+        elif getattr(self, "elapsed", 0.0) <= 0.05:
+            self.elapsed = max(0.001, time.time() - self.start_time)
+        self.tokens = tokens
+        self.tok_s = tok_s
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
         if self.loading_block and not self.loading_block.is_finished:
             self.loading_block.finish()
         if self.thinking_block and not self.thinking_block.is_finished:
@@ -1253,10 +1467,15 @@ class AssistantTurnCard(Vertical):
             t.append(f"  ·  {tokens_in} tokens in", style="#8b949e")
         if tok_s > 0:
             t.append(f"  ({tok_s:.1f} tok/s)", style="dim #8b949e")
+        try:
+            self.footer_widget.styles.display = "block"
+        except Exception:
+            pass
         self.footer_widget.update(t)
 
     def abort(self) -> None:
         self.is_generating = False
+        self.abort_requested = True
         self._stop_spinner()
         self.clear_generating_tool()
         self.finish_running_tools({"error": "cancelled"})
@@ -1269,8 +1488,12 @@ class AssistantTurnCard(Vertical):
         self.update_header()
         t = Text()
         t.append("⌬  ", style="bold #8b949e")
-        t.append("Cancelled (Esc Esc)", style="#8b949e")
+        t.append("Cancelled (Esc)", style="#8b949e")
         t.append(f"  ·  {self.elapsed:.1f}s", style="dim #8b949e")
+        try:
+            self.footer_widget.styles.display = "block"
+        except Exception:
+            pass
         self.footer_widget.update(t)
 
 
@@ -1405,7 +1628,7 @@ class ThinkingBlock(Vertical):
         self.elapsed = time.time() - self.start_time
         self.update_header(live=True)
 
-    def finish(self) -> None:
+    def finish(self, elapsed: Optional[float] = None) -> None:
         if self.is_finished:
             return
         self.is_finished = True
@@ -1415,7 +1638,10 @@ class ThinkingBlock(Vertical):
         if not self.thinking_text.strip():
             self.styles.display = "none"
             return
-        self.elapsed = max(0.001, time.time() - self.start_time)
+        if elapsed is not None and elapsed > 0:
+            self.elapsed = elapsed
+        elif getattr(self, "elapsed", 0.0) <= 0.0:
+            self.elapsed = max(0.001, time.time() - self.start_time)
         self.update_header(live=False)
         self._update_body()
 
@@ -1478,6 +1704,11 @@ class ToolBlock(Vertical):
         text-wrap: nowrap;
         text-overflow: clip;
         overflow-x: hidden;
+    }
+    ToolBlock .tool-bg-hint {
+        width: 100%;
+        height: auto;
+        display: none;
     }
     """
 
@@ -1573,6 +1804,8 @@ class ToolBlock(Vertical):
         self._spinner_timer = None
         self.start_time: float = time.time()
         self.elapsed_text: str = ""
+        self.is_backgrounded: bool = False
+        self.bg_task_id: str = ""
 
         # Subagent-only state. A subagent block shows its role instead of the
         # literal tool name and keeps the live session data so a click can open
@@ -1592,21 +1825,53 @@ class ToolBlock(Vertical):
         self.subagent_elapsed: float = 0.0
         self.subagent_events: List[Dict[str, Any]] = []
 
+        self.summary_live_text: str = ""
         self.header_widget = Static("", classes="tool-header")
-        self.details_widget = Static("", classes="tool-details")
+        is_sum_init = self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact")
+        self.details_widget = Static("", classes="thinking-body" if is_sum_init else "tool-details")
         self.details_widget.styles.display = "none"
-        self.details_widget.styles.text_wrap = "nowrap"
-        self.details_widget.styles.text_overflow = "clip"
-        self.details_widget.styles.overflow_x = "hidden"
+        if is_sum_init:
+            self.details_widget.styles.text_wrap = "wrap"
+            init_txt = Text("Summarizing conversation history…", style="dim #8b949e")
+            self._original_details = init_txt
+            self.details_text = init_txt.plain
+        else:
+            self.details_widget.styles.text_wrap = "nowrap"
+            self.details_widget.styles.text_overflow = "clip"
+            self.details_widget.styles.overflow_x = "hidden"
+        self.bg_hint_widget = Static("", classes="tool-bg-hint")
+        self.bg_hint_widget.styles.display = "none"
 
     def compose(self):
         yield self.header_widget
         yield self.details_widget
+        yield self.bg_hint_widget
 
     def on_mount(self) -> None:
         self.update_header()
+        if self._original_details is not None:
+            try:
+                self.details_widget.update(self._original_details)
+            except Exception:
+                pass
         if self.tool_running:
             self._start_spinner()
+
+    def append_summary_chunk(self, chunk: str) -> None:
+        if not chunk or not self.tool_running:
+            return
+        self.summary_live_text += str(chunk)
+        self.details_text = self.summary_live_text
+        try:
+            md = Markdown(self.summary_live_text)
+            self._original_details = md
+            if self.is_expanded:
+                self.details_widget.update(md)
+        except Exception:
+            txt = Text(self.summary_live_text, style="#8b949e")
+            self._original_details = txt
+            if self.is_expanded:
+                self.details_widget.update(txt)
 
     def on_enter(self, event: events.Enter) -> None:
         self._is_mouse_hovered = True
@@ -1636,8 +1901,22 @@ class ToolBlock(Vertical):
                 return
             self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
             self.elapsed_text = f"{elapsed:.1f}s"
+
+            is_cmd_or_subagent = bool(self.subagent_role) or tl in (
+                "command", "terminal", "shell", "bash", "cmd", "run_command", "sh", "exec", "subagent"
+            )
+            if self.tool_running and is_cmd_or_subagent and elapsed >= 1.5 and not getattr(self, "is_backgrounded", False):
+                if self.bg_hint_widget.styles.display != "block":
+                    from rich.text import Text
+                    self.bg_hint_widget.update(Text("\n  [Ctrl+B] send to background", style="dim #8b949e"))
+                    self.bg_hint_widget.styles.display = "block"
+            else:
+                if self.bg_hint_widget.styles.display != "none":
+                    self.bg_hint_widget.styles.display = "none"
+
             self.update_header()
-        self._spinner_timer = self.set_interval(0.18, _tick)
+        is_sum = (self.tool_name or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+        self._spinner_timer = self.set_interval(0.10 if is_sum else 0.18, _tick)
 
     def _stop_spinner(self) -> None:
         if self._spinner_timer:
@@ -1677,8 +1956,22 @@ class ToolBlock(Vertical):
         except Exception:
             pass
 
+    def mark_backgrounded(self, task_id: str = "") -> None:
+        """Mark this tool/subagent block as running in background."""
+        self.is_backgrounded = True
+        if task_id:
+            self.bg_task_id = str(task_id)
+        if hasattr(self, "bg_hint_widget"):
+            self.bg_hint_widget.styles.display = "none"
+        self.update_header()
+
     def update_header(self) -> None:
-        frame = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)] if self.tool_running else ""
+        is_sum = (self.tool_name or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+        if is_sum and self.tool_running:
+            elapsed = max(0.0, time.time() - self.start_time)
+            frame = ["⌬", "✻"][int(elapsed / 0.35) % 2]
+        else:
+            frame = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)] if self.tool_running else ""
         display_name = self.subagent_role if self.subagent_role else ""
         target = self.target
         if self.subagent_role:
@@ -1693,9 +1986,25 @@ class ToolBlock(Vertical):
             if self.subagent_live_tool:
                 target = self.subagent_live_tool
             elif self.tool_running:
-                target = ""
+                if getattr(self, "subagent_events", None):
+                    last_ev = self.subagent_events[-1]
+                    l_tool = str(last_ev.get("tool", "") or "")
+                    l_tgt = str(last_ev.get("target", "") or "")
+                    target = f"{l_tool} {l_tgt}".strip() if l_tool else "thinking…"
+                elif self.target and self.target != "starting":
+                    target = self.target
+                else:
+                    target = "thinking…"
             else:
                 target = self.target
+            if target and str(target).strip().startswith("{") and any(k in str(target) for k in ("sub_event", "tool", "goal", "role", "text")):
+                try:
+                    import json as _json
+                    p = _json.loads(str(target))
+                    if isinstance(p, dict):
+                        target = f"{p.get('tool', '')} {p.get('target', '')}".strip() or p.get("text", "") or ""
+                except Exception:
+                    pass
             target = ("  " + str(target).strip()) if str(target).strip() else ""
         is_exp = self.is_expanded if self.is_tool_expandable() else False
         text = render_tool_header(
@@ -1707,6 +2016,8 @@ class ToolBlock(Vertical):
             is_error=self.has_error,
             display_name=display_name,
             elapsed_str=self.elapsed_text,
+            is_background=bool(getattr(self, "is_backgrounded", False)),
+            bg_task_id=str(getattr(self, "bg_task_id", "") or ""),
         )
         try:
             self.header_widget.update(text)
@@ -1718,15 +2029,27 @@ class ToolBlock(Vertical):
         try:
             tool = str(getattr(progress, "current_tool", "") or "")
             arg = str(getattr(progress, "tool_arg", "") or "")
-            if tool == "thinking":
-                # Between tools. Clear the live line instead of leaving the
-                # last one up: the subagent had already finished it, so a
-                # spinner kept spinning on a tool that was already done and the
-                # window claimed it was looking at the wrong file.
-                self.subagent_live_tool = ""
+            thought = str(getattr(progress, "thought", "") or getattr(progress, "thinking", "") or "")
+            if thought:
+                self.thinking = thought
+            if tool.lower() == "thinking":
+                self.subagent_live_tool = "Thinking …"
+            elif tool in ("",):
+                if getattr(self, "subagent_events", None):
+                    last_ev = self.subagent_events[-1]
+                    l_tool = str(last_ev.get("tool", "") or "")
+                    if l_tool.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                        l_tool = "command"
+                    l_tgt = str(last_ev.get("target", "") or "")
+                    self.subagent_live_tool = f"{l_tool} {l_tgt}".strip() if l_tool else ""
+                else:
+                    self.subagent_live_tool = ""
             elif tool and tool not in ("loading model", "agent_note"):
                 clean_arg = arg.strip()
                 tl = tool.lower()
+                if tl in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                    tool = "command"
+                    tl = "command"
                 if tl == "read":
                     for prefix in ("read file ", "reading file ", "read ", "reading "):
                         if clean_arg.lower().startswith(prefix):
@@ -1767,8 +2090,13 @@ class ToolBlock(Vertical):
         try:
             self.tool_running = False
             self._stop_spinner()
+            if hasattr(self, "bg_hint_widget"):
+                self.bg_hint_widget.styles.display = "none"
             self.result_data = agent
-            self.subagent_status = str(agent.get("status", "completed"))
+            if agent.get("is_backgrounded") or agent.get("background"):
+                self.is_backgrounded = True
+            st = str(agent.get("status", "completed")).lower()
+            self.subagent_status = st
             self.subagent_goal = str(agent.get("goal", "") or self.subagent_goal)
             self.subagent_system = str(agent.get("system_prompt", "") or self.subagent_system)
             hist = agent.get("history") or []
@@ -1779,15 +2107,18 @@ class ToolBlock(Vertical):
             self.subagent_tool_count = int(agent.get("tool_count", 0) or 0)
             self.subagent_live_tool = ""
             self.subagent_events = list(agent.get("events") or [])
-            self.has_error = str(agent.get("status", "")) == "failed"
+            self.has_error = (st == "failed")
 
             summary = str(agent.get("summary", "")).strip()
-            if self.has_error:
+            if st in ("cancelled", "stopped"):
+                self.target = "cancelled"
+                self.subagent_live_tool = "Cancelled"
+            elif self.has_error:
                 # Keep the reason visible; render_tool_header adds "[failed]".
                 first = (str(agent.get("error", "") or summary).splitlines() or ["error"])[0]
                 self.target = first.strip()[:70] or "error"
             else:
-                self.target = "complete"
+                self.target = ""
             self.subagent_tokens = int(agent.get("tokens", 0) or 0)
             # The orchestrator measures the real runtime; fall back to the local
             # clock only when it did not report one.
@@ -1817,6 +2148,9 @@ class ToolBlock(Vertical):
             elif isinstance(content, Syntax):
                 self._original_details = content
                 self.details_text = getattr(content, "code", "")
+            elif isinstance(content, Markdown):
+                self._original_details = content
+                self.details_text = getattr(content, "markup", "")
             elif hasattr(content, "plain"):
                 self._original_details = Text(str(content.plain), no_wrap=True)
                 self.details_text = content.plain
@@ -1858,7 +2192,7 @@ class ToolBlock(Vertical):
             return
         try:
             from rich.syntax import Syntax
-            if isinstance(self._original_details, Syntax) or self.h_offset <= 0:
+            if isinstance(self._original_details, (Syntax, Markdown)) or self.h_offset <= 0:
                 self.details_widget.update(self._original_details)
                 return
 
@@ -1878,17 +2212,18 @@ class ToolBlock(Vertical):
     def finish(self, result: Dict[str, Any]) -> None:
         self.tool_running = False
         self._stop_spinner()
+        if hasattr(self, "bg_hint_widget"):
+            self.bg_hint_widget.styles.display = "none"
         elapsed = time.time() - self.start_time
         self.elapsed_text = f"{elapsed:.1f}s"
         if self.tool_name.lower() in ("execute", "eval", "evaluate") or str(self.target).strip().startswith('{"code":'):
-            import re
             raw_t = str(self.target)
             url_m = re.search(r"https?://[^\s'\"`\\]+", raw_t)
             if ("fetch" in raw_t.lower() or "http" in raw_t.lower()) and url_m:
                 self.tool_name = "webfetch"
                 self.target = url_m.group(0)
             elif any(k in raw_t.lower() for k in ("child_process", "exec(", "spawn(", "execsync", "bash", "cmd")):
-                self.tool_name = "terminal"
+                self.tool_name = "command"
                 cmd_m = re.search(r"(?:exec|spawn|execSync)\(\s*['\"]([^'\"]+)['\"]", raw_t)
                 self.target = cmd_m.group(1) if cmd_m else "command"
             else:
@@ -2266,22 +2601,38 @@ class ToolBlock(Vertical):
                 else:
                     txt.append("  ●  Task completed successfully\n", style="bold #7ee787")
             self._safe_update_details(txt)
-        elif self.tool_name in ("summarizing", "summarize", "compact", "context_compact"):
-            txt = Text(no_wrap=False)
-            summary_content = result.get("summary") or result.get("content") or self.target or ""
+        elif self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact"):
+            self.details_widget.styles.text_wrap = "wrap"
+            summary_content = (
+                result.get("summary")
+                or result.get("content")
+                or (result.get("result") if result.get("result") not in ("completed", "done", "ok") else "")
+                or self.summary_live_text
+                or self.target
+                or ""
+            )
+            if not str(summary_content).strip():
+                try:
+                    app_msgs = getattr(self.app, "messages", None) or []
+                    for m in app_msgs:
+                        mc = str(m.get("content", "") or "")
+                        if "CONTEXT COMPACTION" in mc.upper() or (m.get("role") == "assistant" and app_msgs.index(m) == 1 and len(app_msgs) <= 4):
+                            summary_content = mc
+                            break
+                except Exception:
+                    pass
             clean_summary = str(summary_content).strip()
             clean_summary = re.sub(r"^#+\s*CONTEXT COMPACTION STATE HANDOFF\s*", "", clean_summary, flags=re.IGNORECASE).strip()
             clean_summary = re.sub(r"^●?\s*Context Compaction[^\n]*\n*", "", clean_summary, flags=re.IGNORECASE).strip()
             clean_summary = re.sub(r"^●?\s*CONTEXT COMPACTION[^\n]*\n*", "", clean_summary, flags=re.IGNORECASE).strip()
 
-            txt.append("  ● Conversation Summary:\n\n", style="bold #58a6ff")
-            for l in clean_summary.splitlines():
-                line = l.rstrip()
-                if not line:
-                    txt.append("\n")
-                else:
-                    txt.append(f"  {line}\n", style="#e6edf3")
-            self._safe_update_details(txt)
+            if clean_summary:
+                try:
+                    self._safe_update_details(Markdown(clean_summary))
+                except Exception:
+                    self._safe_update_details(Text(clean_summary, style="#8b949e", no_wrap=False))
+            else:
+                self._safe_update_details(Text("Conversation history compacted.", style="dim #8b949e", no_wrap=False))
 
         elif self.tool_name == "ask":
             txt = Text()
@@ -2300,7 +2651,12 @@ class ToolBlock(Vertical):
                     txt.append(f"  ↳  {ans}\n", style="bold #7ee787")
             self._safe_update_details(txt)
 
-        if self.is_tool_expandable():
+        is_sum_done = self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact")
+        if is_sum_done:
+            self.update_header()
+            if self.is_expanded:
+                self.details_widget.styles.display = "block"
+        elif self.is_tool_expandable():
             self.set_expanded(False)
 
         try:
@@ -2327,23 +2683,34 @@ class ToolBlock(Vertical):
             self._apply_horizontal_shift()
 
     def on_click(self, event: events.Click) -> None:
-        if self.subagent_role:
-            # A subagent click opens the subagent chat, even while it is still
-            # running, so the user can watch it work. It never expands.
-            opener = getattr(self.app, "_open_subagent_chat", None)
+        tl = (getattr(self, "tool_name", "") or "").lower().strip()
+        if tl.startswith("tool:"):
+            tl = tl[5:].strip()
+        is_subagent = bool(getattr(self, "subagent_role", "")) or tl in ("subagent", "spawn_subagent", "task")
+        if is_subagent:
+            # Clicking a subagent ALWAYS opens the subagent chat view immediately,
+            # whether running in foreground, background, or completed!
+            event.stop()
+            event.prevent_default()
+            app = getattr(self, "app", None)
+            opener = getattr(app, "_open_subagent_chat", None)
             if callable(opener):
                 try:
                     opener(self)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    if app and hasattr(app, "notify"):
+                        app.notify(f"Could not open subagent: {ex}", severity="error")
             return
+
+        # Clicking the background shortcut hint sends non-subagent tasks to background
+        if getattr(event, "widget", None) == getattr(self, "bg_hint_widget", None):
+            app = getattr(self, "app", None)
+            if app and hasattr(app, "action_send_to_background"):
+                app.action_send_to_background()
+                return
         if not self.is_tool_expandable():
             return
-        if self.tool_running:
-            # Expanding while the tool is still running used to be refused. That
-            # is the moment the arguments matter most - a long command is
-            # exactly what you want to read before it has finished, not after.
-            # The details are already there; only the spinner is still going.
+        if tl in ("summarizing", "summarize", "compact", "context_compact") or self.tool_running:
             self.set_expanded(not self.is_expanded)
             return
         if self.tool_name == "screenshot" and self.result_data and self.result_data.get("path"):
@@ -2503,25 +2870,52 @@ class AutoExpandingInput(TextArea):
 
     def render_line(self, y: int):
         strip = super().render_line(y)
-        if not self._pasted_chunks:
-            return strip
         from rich.segment import Segment
         from rich.style import Style
         from textual.strip import Strip
 
         badge_pattern = re.compile(r"(\[pasted \d+ lines(?: #\d+)?\])")
-        highlight_style = Style(color="#ffffff", bgcolor="#0969da", bold=True)
+        mention_pattern = re.compile(r"(@[a-zA-Z0-9_\-\./\\]+)")
+        badge_style = Style(color="#ffffff", bgcolor="#0969da", bold=True)
+        mention_style = Style(color="#58a6ff", bold=True)
+
         new_segments = []
         modified = False
 
         for seg in strip._segments:
-            if seg.text and "[pasted " in seg.text:
-                parts = badge_pattern.split(seg.text)
+            text = seg.text or ""
+            if not text:
+                new_segments.append(seg)
+                continue
+
+            if "[pasted " in text:
+                parts = badge_pattern.split(text)
                 for part in parts:
                     if not part:
                         continue
                     if badge_pattern.match(part):
-                        new_segments.append(Segment(part, highlight_style))
+                        new_segments.append(Segment(part, badge_style))
+                        modified = True
+                    else:
+                        if "@" in part:
+                            m_parts = mention_pattern.split(part)
+                            for mp in m_parts:
+                                if not mp:
+                                    continue
+                                if mention_pattern.match(mp):
+                                    new_segments.append(Segment(mp, mention_style))
+                                    modified = True
+                                else:
+                                    new_segments.append(Segment(mp, seg.style))
+                        else:
+                            new_segments.append(Segment(part, seg.style))
+            elif "@" in text:
+                parts = mention_pattern.split(text)
+                for part in parts:
+                    if not part:
+                        continue
+                    if mention_pattern.match(part):
+                        new_segments.append(Segment(part, mention_style))
                         modified = True
                     else:
                         new_segments.append(Segment(part, seg.style))
@@ -2546,12 +2940,12 @@ class AutoExpandingInput(TextArea):
             copy_text_to_clipboard(sel)
             app = getattr(self, "app", None)
             if app:
-                app.notify(f"Skopiowano zaznaczenie ({len(sel)} zn.)", title="Clipboard", timeout=1.5)
+                app.notify(f"Copied selection to clipboard ({len(sel)} chars)", title="Clipboard", timeout=2.0)
         elif self.text.strip():
             copy_text_to_clipboard(self.text)
             app = getattr(self, "app", None)
             if app:
-                app.notify("Skopiowano tekst wpisu", title="Clipboard", timeout=1.5)
+                app.notify("Copied input text to clipboard", title="Clipboard", timeout=2.0)
 
     def action_submit(self) -> None:
         app = getattr(self, "app", None)
@@ -2615,6 +3009,27 @@ class AutoExpandingInput(TextArea):
             or "shift" in key_name
             or key_name in ("shift+enter", "shift+return")
         )
+
+        if key_name == "backspace" and self.selection.is_empty:
+            row, col = self.cursor_location
+            try:
+                line = self.document.get_line(row)
+            except Exception:
+                line = ""
+            if "@" in line:
+                import re
+                for match in re.finditer(r"@[a-zA-Z0-9_\-\./\\]+", line):
+                    m_start, m_end = match.start(), match.end()
+                    if (m_start < col <= m_end) or (col == m_end + 1 and m_end < len(line) and line[m_end] == " "):
+                        del_end = m_end + 1 if (m_end < len(line) and line[m_end] == " ") else m_end
+                        event.prevent_default()
+                        event.stop()
+                        self.delete((row, m_start), (row, del_end))
+                        self.cursor_location = (row, m_start)
+                        self._update_auto_height()
+                        if app and hasattr(app, "_hint_on_input_changed"):
+                            app._hint_on_input_changed(self)
+                        return
 
         if key_name in ("shift+tab", "backtab"):
             event.prevent_default()

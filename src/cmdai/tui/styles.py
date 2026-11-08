@@ -47,9 +47,14 @@ Screen {
 }
 
 #hero-version {
+    dock: bottom;
     width: 100%;
-    height: 0;
-    display: none;
+    height: 1;
+    text-align: right;
+    color: #6e7681;
+    padding-right: 1;
+    margin-bottom: 1;
+    display: block;
 }
 
 #hero-input-box {
@@ -84,17 +89,17 @@ Screen {
 #hero-meta-left {
     width: auto;
     color: #58a6ff;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #hero-meta-mode {
     width: auto;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #hero-meta-thinking {
     width: auto;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #hero-meta-spacer {
@@ -446,17 +451,17 @@ HintRow.selected, .cmd-hint.selected {
 #input-meta-left {
     width: auto;
     color: #58a6ff;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #input-meta-mode {
     width: auto;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #input-meta-thinking {
     width: auto;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #input-meta-spacer {
@@ -633,7 +638,7 @@ ModalScreen {
 }
 
 #ask-options > .option-list--option-highlighted {
-    background: #1f6feb !important;
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -701,7 +706,7 @@ ModalScreen {
 }
 
 #file-picker-list > .option-list--option-highlighted {
-    background: #1f6feb !important;
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: none;
 }
@@ -795,8 +800,8 @@ Input .input--cursor {
 
 /* Sessions dialog: wide enough for title, relative time, token badge, model and dir */
 #modal-dialog.sessions-dialog {
-    width: 86;
-    max-width: 95%;
+    width: 98;
+    max-width: 96%;
     height: auto;
     max-height: 85%;
 }
@@ -804,6 +809,7 @@ Input .input--cursor {
 #modal-dialog.sessions-dialog #modal-list {
     height: auto;
     max-height: 16;
+    overflow-x: hidden;
 }
 
 /* MCP servers: rows stay one line, prose goes in the line at the bottom. */
@@ -998,7 +1004,7 @@ Input .input--cursor {
 }
 
 #tools-list > .option-list--option-highlighted {
-    background: #1f6feb !important;
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -1031,14 +1037,15 @@ Input .input--cursor {
     color: #8b949e !important;
 }
 
-#modal-list > .option-list--option-highlighted {
-    background: #1f6feb !important;
-    color: #ffffff !important;
-    text-style: bold;
-}
-
-#modal-list > .option-list--option-selected {
-    background: #1f6feb !important;
+#modal-list > .option-list--option-highlighted,
+#modal-list > .option-list--option-selected,
+#modal-list:focus > .option-list--option-highlighted,
+#modal-list:focus > .option-list--option-selected,
+OptionList:focus > .option-list--option-highlighted,
+OptionList:focus > .option-list--option-selected,
+OptionList > .option-list--option-highlighted,
+OptionList > .option-list--option-selected {
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -1111,7 +1118,7 @@ Input .input--cursor {
 }
 
 #diff-file-list > .option-list--option-highlighted {
-    background: #1f6feb !important;
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -1229,18 +1236,18 @@ Input .input--cursor {
     padding: 1 2;
 }
 
-#plan-list {
+#plan-list, #tasks-list {
     background: #0d1117;
     border: none !important;
     height: auto;
-    max-height: 6;
+    max-height: 8;
     padding: 0;
     margin: 0;
     scrollbar-size-vertical: 1;
     scrollbar-color: #30363d;
 }
 
-#plan-list:focus {
+#plan-list:focus, #tasks-list:focus {
     border: none !important;
 }
 
@@ -1250,13 +1257,13 @@ OptionList:focus {
     background-tint: transparent 0%;
 }
 
-#plan-list > .option-list--option {
+#plan-list > .option-list--option, #tasks-list > .option-list--option {
     color: #8b949e;
     background: transparent;
 }
 
-#plan-list > .option-list--option-highlighted {
-    background: #1f6feb !important;
+#plan-list > .option-list--option-highlighted, #tasks-list > .option-list--option-highlighted {
+    background: #21262d !important;
     color: #ffffff !important;
     text-style: bold;
 }
@@ -1334,5 +1341,99 @@ ContextDirectoryTree {
 
 ContextDirectoryTree:focus {
     border: none;
+}
+
+/* ═════════════════════════════════════════════════════════════
+   TOAST NOTIFICATIONS (Variant A - Refined Top-Right Minimalist)
+   ═════════════════════════════════════════════════════════════ */
+#subagent-jump-bar {
+    height: 1;
+    background: #000000;
+    padding: 0;
+    margin: 0;
+    display: none;
+}
+
+#subagent-jump-spacer {
+    width: 1fr;
+    height: 0;
+}
+
+#subagent-jump-to-new {
+    width: auto;
+    height: auto;
+    color: #8b949e;
+}
+
+#subagent-jump-to-new:hover {
+    color: #ffffff;
+}
+
+ToastRack {
+    dock: top;
+    align: right top;
+    margin-top: 0;
+    margin-right: 0;
+    margin-bottom: 0;
+    max-height: 80%;
+    width: 1fr;
+    background: transparent;
+    overflow-x: hidden;
+    overflow-y: hidden;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
+}
+
+ToastHolder {
+    align-horizontal: right;
+    width: 1fr;
+    height: auto;
+    background: transparent;
+}
+
+Toast {
+    width: 44;
+    min-height: 4;
+    max-height: 8;
+    height: auto;
+    background: #161b22;
+    color: #c9d1d9;
+    padding: 1 2;
+    margin: 0;
+    margin-bottom: 1;
+    border-left: tall #58a6ff;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+    align: left top;
+}
+
+Toast .toast--title {
+    color: #58a6ff;
+    text-style: bold;
+}
+
+Toast.-information {
+    border-left: tall #58a6ff;
+}
+
+Toast.-information .toast--title {
+    color: #58a6ff;
+}
+
+Toast.-warning {
+    border-left: tall #d29922;
+}
+
+Toast.-warning .toast--title {
+    color: #d29922;
+}
+
+Toast.-error {
+    border-left: tall #f85149;
+}
+
+Toast.-error .toast--title {
+    color: #f85149;
 }
 """

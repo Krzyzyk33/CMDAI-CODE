@@ -37,6 +37,8 @@ from ...core.providers import PROVIDERS_CATALOG, fetch_remote_models, has_reason
 from ...core.settings import get_settings
 from .add_model import AddModelModal
 from .api_key import ApiKeyModal
+from .add_provider import AddProviderModal
+from ...core.providers import load_custom_providers
 
 # Providers that run on this machine and need no key.
 LOCAL_PROVIDERS = ("local_gguf", "ollama", "lmstudio", "vllm")
@@ -125,6 +127,7 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
         Binding("enter", "open_provider", "Open"),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
+        Binding("ctrl+a", "add_provider", "Add Provider"),
         Binding("ctrl+d", "configure_key", "Set API Key"),
         Binding("ctrl+r", "refresh_all", "Refresh"),
     ]
@@ -155,7 +158,7 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Open]  [ctrl+d: Key]  [ctrl+r: Refresh]")
+                yield Static("enter: Open  ·  ctrl+a: Add Provider  ·  ctrl+d: Key  ·  ctrl+r: Refresh")
                 yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -167,11 +170,41 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
         # them is a wall of text that says less than one moving dot per card.
         self._spinner_timer = self.set_interval(SPINNER_INTERVAL, self._tick_spinner)
 
+    def _render_provider_row(self, pid: str, pinfo: Any) -> Text:
+        is_active = pid == self.current_provider
+        loading = pid in self.fetching_providers
+
+        text = Text()
+        if loading:
+            text.append(self._spinner_for(pid) + " ", style="#58a6ff")
+        if pid == TOP_PROVIDER:
+            text.append(f"{pinfo.name}", style="bold #58a6ff")
+        else:
+            text.append(f"{pinfo.name} ", style="bold white")
+
+        if not loading:
+            state, state_style = self._state_text(pid)
+            text.append("  ")
+            text.append(state, style=state_style)
+        if is_active:
+            text.append(" *", style="bold #58a6ff")
+        return text
+
     def _tick_spinner(self) -> None:
         if not self.fetching_providers:
             return
         self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
-        self.rebuild()
+        try:
+            ol = self.query_one("#modal-list", OptionList)
+            for pid in self.fetching_providers:
+                pinfo = PROVIDERS_CATALOG.get(pid)
+                if pinfo:
+                    try:
+                        ol.replace_option_prompt(f"prov_{pid}", self._render_provider_row(pid, pinfo))
+                    except Exception:
+                        pass
+        except Exception:
+            self.rebuild()
 
     def _spinner_for(self, pid: str) -> str:
         return SPINNER_FRAMES[self._spinner_idx]
@@ -277,31 +310,12 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
     def rebuild(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
         prev = ol.highlighted
+        saved_scroll_y = getattr(ol, "scroll_y", 0)
         ol.clear_options()
         self.filtered_items.clear()
 
         for pid, pinfo in self._ordered_providers():
-            is_active = pid == self.current_provider
-            loading = pid in self.fetching_providers
-
-            text = Text()
-            if loading:
-                text.append(self._spinner_for(pid) + " ", style="#58a6ff")
-            # The one provider that works with nothing configured stays blue and
-            # stays on top. It was sorting between LM Studio and Ollama by name,
-            # in the same grey as the ones that need a key and cannot answer.
-            if pid == TOP_PROVIDER:
-                text.append(f"{pinfo.name}", style="bold #58a6ff")
-            else:
-                text.append(f"{pinfo.name} ", style="bold white")
-
-            if not loading:
-                state, state_style = self._state_text(pid)
-                text.append("  ")
-                text.append(state, style=state_style)
-            if is_active:
-                text.append(" *", style="bold #58a6ff")
-
+            text = self._render_provider_row(pid, pinfo)
             ol.add_option(Option(text, id=f"prov_{pid}"))
             self.filtered_items.append(pid)
 
@@ -309,6 +323,12 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
             ol.highlighted = prev
         elif self.filtered_items and ol.highlighted is None:
             ol.highlighted = 0
+
+        if saved_scroll_y > 0:
+            try:
+                ol.scroll_to(y=saved_scroll_y, animate=False, immediate=True)
+            except Exception:
+                pass
 
     def _ordered_providers(self):
         """Local GGUF first, everything else alphabetically by name.
@@ -355,6 +375,18 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
         if pid:
             self._fetch_one(pid)
         self.refresh_catalog()
+
+    def action_add_provider(self) -> None:
+        def on_provider_added(new_pid: Optional[str]) -> None:
+            if new_pid:
+                load_custom_providers()
+                self._fetch_one(new_pid)
+                self.rebuild()
+                self.notify(f"Provider {new_pid} added successfully!", timeout=3.0)
+                # Auto open the newly added provider
+                self.app.push_screen(ModelListModal(new_pid, self.current_model), self._on_models_chosen)
+
+        self.app.push_screen(AddProviderModal(), on_provider_added)
 
     def action_configure_key(self) -> None:
         pid = self._current()
@@ -432,7 +464,7 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter: Select]  [ctrl+a: Add]  [F5: Refresh]  [esc: Back]")
+                yield Static("enter: Select  ·  ctrl+a: Add  ·  F5: Refresh  ·  esc: Back")
                 yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -445,7 +477,14 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
         if not self.fetching:
             return
         self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
-        self.rebuild()
+        try:
+            ol = self.query_one("#modal-list", OptionList)
+            spin = Text()
+            spin.append("  " + SPINNER_FRAMES[self._spinner_idx], style="#58a6ff")
+            spin.append(" loading", style="dim #58a6ff")
+            ol.replace_option_prompt("row_loading", spin)
+        except Exception:
+            self.rebuild()
 
     # ---------------------------------------------------------- fetching
 
@@ -513,6 +552,7 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
         term = self._search_term()
         ol = self.query_one("#modal-list", OptionList)
         prev = ol.highlighted
+        saved_scroll_y = getattr(ol, "scroll_y", 0)
         ol.clear_options()
         self.filtered_items.clear()
 
@@ -551,6 +591,12 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
             ol.highlighted = prev
         elif self.filtered_items and ol.highlighted is None:
             ol.highlighted = 0
+
+        if saved_scroll_y > 0:
+            try:
+                ol.scroll_to(y=saved_scroll_y, animate=False, immediate=True)
+            except Exception:
+                pass
 
     def _empty_hint(self) -> str:
         if self.provider_id == "huggingface":

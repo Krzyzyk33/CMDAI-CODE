@@ -39,7 +39,7 @@ class StatsModal(ModalScreen[None]):
             )
 
             with Horizontal(id="modal-footer"):
-                yield Static("[enter/esc: Close]")
+                yield Static("enter / esc: Close")
 
     def action_close(self) -> None:
         self.dismiss(None)

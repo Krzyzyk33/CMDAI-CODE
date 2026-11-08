@@ -69,12 +69,18 @@ def _all_tools_failed(events: List[Any]) -> bool:
     non-bookkeeping event keeps that case out of the "everything broke" verdict
     while still catching a run where the workspace was never actually read.
     """
-    real = [e for e in (events or [])
-            if isinstance(e, dict)
-            and str(e.get("tool", "")) not in ("agent_note", "scratch", "todo", "tasks")]
+    real = [
+        e for e in (events or [])
+        if isinstance(e, dict)
+        and bool(str(e.get("tool", "") or "").strip())
+        and e.get("type") not in ("text", "thinking")
+        and str(e.get("tool", "")).strip().lower() not in ("agent_note", "scratch", "todo", "tasks")
+    ]
     if not real:
         return False
     return all(not e.get("ok", False) for e in real)
+
+    # ---- end of _all_tools_failed ----
 
 
 def _parse_only(text: str) -> List[Tuple[str, Any]]:
@@ -91,6 +97,96 @@ def _parse_only(text: str) -> List[Tuple[str, Any]]:
     if _BARE_RUNNER is None:
         globals()["_BARE_RUNNER"] = AgentRunner.__new__(AgentRunner)
     return _BARE_RUNNER.parse_chronological_segments(text)
+
+
+def _strip_xml_tool_calls_clean(text: str) -> str:
+    """Strip XML tool call tags, tool response artifacts, and JSON artifacts from model text."""
+    if not text:
+        return ""
+    import re
+    clean = re.sub(r'<(?:tool:\w+|tool_call|function_call)[\s\S]*?(?:/>|</(?:tool:)?\w+>|</tool_call>|</function_call>)', '', text, flags=re.IGNORECASE)
+    clean = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'<(?:tool:\w+|tool_call|function_call)[^>]*$', '', clean, flags=re.IGNORECASE)
+    return clean
+
+
+def clean_subagent_call(raw: Any) -> Dict[str, str]:
+    """Normalize any subagent arguments dictionary or JSON payload."""
+    import json
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {"goal": raw}
+    if not isinstance(raw, dict):
+        return {"name": "Subagent", "role": "Subagent", "goal": str(raw or ""), "system": ""}
+
+    # Unpack nested structures if present (e.g. live_code from bridge, arguments, parameters)
+    for nest_key in ("live_code", "arguments", "parameters", "input"):
+        val = raw.get(nest_key)
+        if isinstance(val, str) and val.strip().startswith("{"):
+            try:
+                inner = json.loads(val)
+                if isinstance(inner, dict):
+                    raw = {**raw, **inner}
+            except Exception:
+                pass
+        elif isinstance(val, dict):
+            raw = {**raw, **val}
+
+    role = str(
+        raw.get("name")
+        or raw.get("role")
+        or raw.get("agent")
+        or raw.get("type")
+        or raw.get("subagent")
+        or "Subagent"
+    ).strip()
+    if role.lower() in ("general", "subagent", "default", "agent"):
+        role = "Subagent"
+    role = role[:60] or "Subagent"
+
+    goal = str(
+        raw.get("goal")
+        or raw.get("task")
+        or raw.get("description")
+        or raw.get("prompt")
+        or raw.get("instruction")
+        or raw.get("text")
+        or raw.get("target")
+        or ""
+    ).strip()
+
+    bg_val = raw.get("background")
+    bg_str = str(bg_val if bg_val is not None else "").strip().lower()
+    is_bg_true = bg_str in ("true", "1", "yes")
+    is_bg_flag = bg_str in ("true", "1", "yes", "false", "0", "no", "")
+    system = str(
+        raw.get("system")
+        or raw.get("system_prompt")
+        or raw.get("context")
+        or (bg_val if not is_bg_flag else "")
+        or ""
+    ).strip()
+
+    if not goal and system:
+        goal = system
+    if not goal:
+        goal = "Inspect the workspace and complete the task."
+    if not system:
+        system = f"You are the autonomous {role} subagent."
+
+    res = dict(raw)
+    res.update({
+        "name": role,
+        "role": role,
+        "goal": goal,
+        "task": goal,
+        "system": system,
+        "system_prompt": system,
+        "background": "true" if is_bg_true else "false",
+    })
+    return res
 
 
 _BARE_RUNNER: Optional["AgentRunner"] = None
@@ -115,6 +211,13 @@ class AgentRunner:
         self.on_todo_updated = on_todo_updated
         self.ask_handler = ask_handler
         self.mcp = mcp_client
+        self.permissions = getattr(ctx, "permissions", None)
+        if not self.permissions:
+            try:
+                from ..core.settings import SettingsManager
+                self.permissions = SettingsManager(getattr(ctx, "workdir", ".")).config.get("permissions")
+            except Exception:
+                self.permissions = None
         # Optional hook telling us whether the loaded model can accept images.
         # Defaults to False so an image from a tool is never silently attached
         # to a text-only model - the caller gets told instead.
@@ -591,7 +694,7 @@ class AgentRunner:
                     a_dict["new"] = _strip_code_fence(new_m.group(1), a_dict.get("path", ""))
                 elif not old_m and "new" not in a_dict and b_text:
                     a_dict["new"] = _strip_code_fence(b_text, a_dict.get("path", ""))
-            elif t_name == "command":
+            elif t_name in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command"):
                 if b_text and "cmd" not in a_dict:
                     a_dict["cmd"] = _strip_code_fence(b_text, "")
             elif t_name in ("scratch", "todo", "tasks"):
@@ -607,6 +710,16 @@ class AgentRunner:
                 if not a_dict.get("goal") and not a_dict.get("task") and b_text:
                     a_dict["goal"] = b_text
 
+        _NORM_NAMES = {
+            "create_file": "write", "write_file": "write", "write_to_file": "write", "save_file": "write",
+            "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
+            "read_file": "read", "view_file": "read", "cat": "read",
+            "list_directory": "ls", "list_dir": "ls",
+            "run_command": "command", "execute_command": "command", "bash": "command", "sh": "command", "terminal": "command", "cmd": "command",
+            "shell": "command", "exec": "command", "powershell": "command", "pwsh": "command", "run_shell_command": "command", "shell_command": "command",
+            "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch", "read_browser_page": "webfetch",
+        }
+
         raw_matches = []
 
         gemma_pattern = re.compile(
@@ -614,7 +727,7 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in gemma_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             body = (match.group(3) or "").strip()
             attrs = _parse_attrs(attrs_str)
@@ -626,7 +739,7 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in body_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
             attrs = _parse_attrs(attrs_str)
@@ -636,11 +749,11 @@ class AgentRunner:
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
 
         unclosed_body_pattern = re.compile(
-            r'<tool:(write|edit|command)\b(?:\s+([^>]*?))?\s*/?>\s*((?:(?!</?(?:tool:|tool_call|\|tool_call)).)+)$',
+            r'<tool:(write|edit|command|shell|bash|terminal|cmd|sh|run_command|subagent)\b(?:\s+([^>]*?))?\s*/?>\s*((?:(?!</?(?:tool:|tool_call|\|tool_call)).)+)$',
             re.DOTALL | re.IGNORECASE,
         )
         for match in unclosed_body_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
             if body:
@@ -650,7 +763,7 @@ class AgentRunner:
 
         single_tag_pattern = re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*/?>', re.DOTALL | re.IGNORECASE)
         for match in single_tag_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             attrs = _parse_attrs(attrs_str)
             _normalize_attrs(tool_name, attrs, "")
@@ -661,21 +774,12 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in tool_call_block.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             body = (match.group(3) or "").strip()
             attrs = _parse_attrs(attrs_str)
             _normalize_attrs(tool_name, attrs, body)
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
-
-        _NORM_NAMES = {
-            "create_file": "write", "write_file": "write", "write_to_file": "write", "save_file": "write",
-            "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
-            "read_file": "read", "view_file": "read", "cat": "read",
-            "list_directory": "ls", "list_dir": "ls",
-            "run_command": "command", "execute_command": "command", "bash": "command", "sh": "command", "terminal": "command", "cmd": "command",
-            "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch", "read_browser_page": "webfetch",
-        }
         dec = json.JSONDecoder()
         scan_pos = 0
         while scan_pos < len(text):
@@ -766,6 +870,7 @@ class AgentRunner:
             if start > pos:
                 raw_chunk = text[pos:start]
                 clean_chunk = self.strip_xml_tool_calls(raw_chunk).strip()
+                clean_chunk = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', clean_chunk, flags=re.IGNORECASE).strip()
                 if clean_chunk:
                     segments.append(("text", clean_chunk))
                     last_tool_sig = None
@@ -785,6 +890,7 @@ class AgentRunner:
         if pos < len(text):
             raw_chunk = text[pos:]
             clean_chunk = self.strip_xml_tool_calls(raw_chunk).strip()
+            clean_chunk = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', clean_chunk, flags=re.IGNORECASE).strip()
             if clean_chunk:
                 segments.append(("text", clean_chunk))
 
@@ -793,6 +899,52 @@ class AgentRunner:
     def parse_xml_tool_calls(self, text: str) -> List[Tuple[str, Dict[str, str]]]:
         segments = self.parse_chronological_segments(text)
         return [data for kind, data in segments if kind == "tool"]
+
+    def check_tool_permission(self, tool_name: str, args: Dict[str, Any], mode: str) -> str:
+        """Evaluate granular permission: returns 'allow', 'ask', or 'deny'."""
+        import fnmatch
+        name = tool_name.lower().strip()
+        if mode == "plan" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+            return "deny"
+
+        perms = getattr(self, "permissions", None)
+        if not perms or not isinstance(perms, dict):
+            if mode == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+                return "ask"
+            if mode == "code" and name in ("command", "shell", "bash", "cmd"):
+                return "ask"
+            return "allow"
+
+        rule = perms.get(name)
+        if rule is None and name in ("shell", "bash", "terminal", "sh", "cmd", "run_command"):
+            rule = perms.get("command") or perms.get("bash")
+
+        if rule is None:
+            if mode == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+                return "ask"
+            if mode == "code" and name in ("command", "shell", "bash", "cmd"):
+                return "ask"
+            return "allow"
+
+        if isinstance(rule, str):
+            val = rule.lower().strip()
+            return val if val in ("allow", "ask", "deny") else "ask"
+
+        if isinstance(rule, dict):
+            target = ""
+            if name in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command"):
+                target = str(args.get("cmd") or args.get("command") or "").strip()
+            elif name in ("write", "edit", "read"):
+                target = str(args.get("path") or "").strip()
+
+            for pattern, decision in rule.items():
+                if fnmatch.fnmatch(target, pattern):
+                    d = str(decision).lower().strip()
+                    if d in ("allow", "ask", "deny"):
+                        return d
+            return "ask"
+
+        return "allow"
 
     def execute_tool(self, tool_name: str, args: Dict[str, str], ctx: Any = None,
                    ask: bool = True, notify: bool = True) -> Dict[str, Any]:
@@ -847,7 +999,13 @@ class AgentRunner:
             }
 
 
-        should_ask = (mode == "ask" and name in ("write", "edit", "command")) or (mode == "code" and name == "command")
+        perm_decision = self.check_tool_permission(name, args, mode)
+        if perm_decision == "deny" and mode != "plan":
+            return {
+                "success": False,
+                "error": f"Permission denied: execution of tool '{name}' is forbidden by permissions configuration.",
+            }
+        should_ask = (perm_decision == "ask")
         if should_ask and self.ask_handler and ask:
             target = args.get("path") or args.get("cmd") or name
             diff_info = ""
@@ -1308,14 +1466,13 @@ class AgentRunner:
                 self.on_tool_finish(name, str(args.get("path") or args.get("cmd") or ""), err_res)
             return err_res
 
-
     def execute_subagents(
         self,
         calls: List[Dict[str, str]],
         on_progress: Optional[Callable[[Any], None]] = None,
         is_local: Optional[bool] = None,
         model_call: Optional[Callable[[List[Dict[str, Any]]], str]] = None,
-        max_turns: int = 8,
+        max_turns: int = 25,
     ) -> Dict[str, Any]:
         """Run a batch of <tool:subagent ... /> calls.
 
@@ -1327,22 +1484,21 @@ class AgentRunner:
         from .subagents.orchestrator import SUBAGENT_AVAILABLE_TOOLS, SubagentOrchestrator
         from .tools import AgentContext
 
-        calls = [c for c in (calls or []) if isinstance(c, dict)]
+        calls = [clean_subagent_call(c) for c in (calls or []) if c]
         if not calls:
             return {"success": False, "error": "subagent was called without a task", "subagents": []}
 
+        if getattr(self.ctx, "workdir", None):
+            self.workdir = self.ctx.workdir
         mode = getattr(self.ctx, "mode", "auto")
         orch = SubagentOrchestrator(engine=None)
         tasks: List[SubagentTask] = []
 
         for raw in calls:
-            role = str(raw.get("name") or raw.get("role") or "Subagent").strip()[:60] or "Subagent"
-            goal = str(raw.get("goal") or raw.get("task") or raw.get("description") or "").strip()
-            system = str(raw.get("system") or raw.get("system_prompt") or raw.get("prompt") or "").strip()
-            if not goal:
-                goal = system or "Inspect the workspace and report what you find."
-            if not system:
-                system = f"You are the autonomous {role} subagent."
+            role = raw["role"]
+            goal = raw["goal"]
+            system = raw["system"]
+            call_workdir = (raw.get("workdir") or self.workdir)
             task = SubagentTask(
                 role=role,
                 goal=goal,
@@ -1351,7 +1507,7 @@ class AgentRunner:
                 # defaults to a 4-item read-only list, and run_subagent only
                 # falls back to SUBAGENT_AVAILABLE_TOOLS when tools is empty.
                 tools=list(SUBAGENT_AVAILABLE_TOOLS),
-                context={"workdir": self.workdir},
+                context={"workdir": call_workdir, "subagent_id": raw.get("_sid", "")},
             )
             if mode == "ask":
                 # Ask mode needs a human OK for write/edit/command, and a
@@ -1372,11 +1528,25 @@ class AgentRunner:
             task = queue.pop(0) if queue else None
             # Per-subagent context so scratch/todo entries and queued images do
             # not bleed into the lead agent's context.
-            sub_ctx = AgentContext(workdir=self.workdir)
+            sub_w = (task.context.get("workdir") if task and isinstance(task.context, dict) else None) or self.workdir
+            sub_ctx = AgentContext(workdir=sub_w)
             sub_ctx.mode = mode
+            sub_ctx.is_subagent = True
 
             def _exec(name: str, args: Dict[str, str]) -> Dict[str, Any]:
                 n = (name or "").lower().strip()
+                if n in ("shell", "terminal", "bash", "cmd", "sh", "run_command", "exec"):
+                    n = "command"
+                elif n in ("file_read", "read_file"):
+                    n = "read"
+                elif n in ("file_write", "write_file"):
+                    n = "write"
+                elif n in ("file_edit", "edit_file"):
+                    n = "edit"
+                if n in ("subagent", "spawn_subagent"):
+                    return {"success": False, "error": "Subagents cannot spawn other subagents. Do your work directly."}
+                if n in ("task", "tasks", "bg_task", "background_task"):
+                    return {"success": False, "error": "Subagents cannot manage or spawn background tasks. Inspect files directly."}
                 if n in ("todo", "tasks"):
                     n = "scratch"
                 if n == "agent_note":
@@ -1405,6 +1575,9 @@ class AgentRunner:
             provider = getattr(self, "provider_id", "local_gguf") or "local_gguf"
             is_local = provider in ("local_gguf", "local", "llama_cpp", "ollama")
 
+        if is_local and (max_turns is None or max_turns > 6):
+            max_turns = 6
+
         results = orch.execute_tasks(
             tasks,
             on_progress=on_progress,
@@ -1424,6 +1597,13 @@ class AgentRunner:
                 1 for m in history
                 if m.get("role") == "user" and str(m.get("content", "")).startswith("[tool:")
             )
+            server_tools_count = sum(
+                1 for ev in (r.events or [])
+                if isinstance(ev, dict)
+                and bool(str(ev.get("tool", "") or "").strip())
+                and ev.get("type") not in ("text", "thinking")
+            )
+            tool_count = max(tool_count, server_tools_count)
             all_failed = _all_tools_failed(r.events or [])
             # A subagent whose every tool errored did not do its task, whatever
             # its closing text claims. Trusting that text let "done, all fine"
@@ -1549,6 +1729,7 @@ class AgentRunner:
         clean = re.sub(r'<task[^>]*$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?subagent[^>]*>', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?task[^>]*>', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'</?tool_response[^>]*>', '', clean, flags=re.IGNORECASE)
         return clean.strip()
 
     def format_tool_result_for_llm(self, tool_name: str, res: Dict[str, Any]) -> str:
@@ -1598,15 +1779,25 @@ class AgentRunner:
                 lines.append(f"Total lines written: {res['lines']}")
             if res.get("verification") == "OK":
                 lines.append("Self-check syntax verification: PASSED (0 errors).")
+            if res.get("diagnostics"):
+                lines.append(f"\n{res['diagnostics']}\nACTION REQUIRED: Review and fix the diagnostic issues above using <tool:edit> before concluding.")
             if res.get("test_status"):
                 lines.append(f"\n{res['test_status']}")
         elif name in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command"):
-            lines.append(f"Return code: {res.get('returncode')}")
+            if res.get("background"):
+                lines.append(
+                    f"Command '{res.get('cmd', '')}' is running in the background "
+                    f"(task_id: {res.get('task_id', '')}, pid: {res.get('pid', '')}).\n"
+                    "Inform the user that the command is running in the background and continue with other steps or finish your turn. "
+                    "When the background command finishes, its output will be automatically delivered to you so you can report the result to the user."
+                )
+            else:
+                lines.append(f"Return code: {res.get('returncode')}")
 
-            if res.get("stdout"):
-                lines.append(f"Stdout:\n{res['stdout']}")
-            if res.get("stderr"):
-                lines.append(f"Stderr:\n{res['stderr']}")
+                if res.get("stdout"):
+                    lines.append(f"Stdout:\n{res['stdout']}")
+                if res.get("stderr"):
+                    lines.append(f"Stderr:\n{res['stderr']}")
         elif name == "web":
             results = res.get("results", [])
             if results:
@@ -1657,41 +1848,48 @@ class AgentRunner:
             else:
                 lines.append(f"Vision failed: {res.get('error', 'unknown')}")
         elif name == "subagent":
-            # The subagent's final report comes back as the tool result - that is
-            # the data channel, the same shape OpenCode's task tool uses. What
-            # stays out is the transcript and the raw tool output, which is what
-            # actually keeps the lead agent's context small: a subagent that
-            # read forty files hands over its conclusions, not the files.
-            agents = res.get("subagents", [])
-            if not agents:
-                lines.append("No subagent produced a result.")
+            if res.get("background"):
+                roles_str = ", ".join(res.get("roles") or ["Subagent"])
+                lines.append(
+                    f"Subagent(s) [{roles_str}] are now running in the background (task_id: {res.get('task_id', '')}).\n"
+                    "Inform the user that the subagent is working in the background and continue with other work or finish your turn. "
+                    "As soon as the background subagent finishes, its report will be automatically delivered to you so you can present the findings to the user."
+                )
             else:
-                names = [str(a.get("role", "Subagent")) for a in agents]
-                failed = [str(a.get("role", "Subagent")) for a in agents
-                          if str(a.get("status", "")) == "failed"]
-                lines.append(f"{len(agents)} subagent(s) finished: {', '.join(names)}.")
-                if failed:
-                    lines.append(f"Failed: {', '.join(failed)}.")
-                notes = res.get("notes") or []
-                if notes:
-                    lines.append("Notes they left for you:")
-                    for nt in notes:
-                        lines.append(f"  - {nt}")
-                for a in agents:
-                    summary = str(a.get("summary", "") or "").strip()
-                    if not summary:
-                        continue
-                    role = str(a.get("role", "Subagent"))
-                    if len(summary) > 1800:
-                        summary = summary[:1800] + "\n... [report truncated]"
-                    lines.append(f"\nReport from {role}:")
-                    lines.append(summary)
-                if not any(str(a.get("summary", "") or "").strip() for a in agents):
-                    lines.append("None of them wrote a report. Their work is not in your context: "
-                                 "do not assume what they found, check the files yourself.")
-                lines.append("Review before telling the user it is done: "
-                             "<tool:command cmd=\"git diff --stat\" />, then <tool:read> the files that matter, "
-                             "verify with <tool:bugs />, and describe the result in your own words.")
+                # The subagent's final report comes back as the tool result - that is
+                # the data channel, the same shape OpenCode's task tool uses. What
+                # stays out is the transcript and the raw tool output, which is what
+                # actually keeps the lead agent's context small: a subagent that
+                # read forty files hands over its conclusions, not the files.
+                agents = res.get("subagents", [])
+                if not agents:
+                    lines.append("No subagent produced a result.")
+                else:
+                    names = [str(a.get("role", "Subagent")) for a in agents]
+                    failed = [str(a.get("role", "Subagent")) for a in agents
+                              if str(a.get("status", "")) == "failed"]
+                    lines.append(f"{len(agents)} subagent(s) finished: {', '.join(names)}.")
+                    if failed:
+                        lines.append(f"Failed: {', '.join(failed)}.")
+                    notes = res.get("notes") or []
+                    if notes:
+                        lines.append("Notes they left for you:")
+                        for nt in notes:
+                            lines.append(f"  - {nt}")
+                    for a in agents:
+                        summary = str(a.get("summary", "") or "").strip()
+                        if not summary:
+                            continue
+                        role = str(a.get("role", "Subagent"))
+                        if len(summary) > 1800:
+                            summary = summary[:1800] + "\n... [report truncated]"
+                        lines.append(f"\nReport from {role}:")
+                        lines.append(summary)
+                    if not any(str(a.get("summary", "") or "").strip() for a in agents):
+                        lines.append("None of them wrote a report. Their work is not in your context: "
+                                     "do not assume what they found, check the files yourself.")
+                    lines.append("Present the subagent findings clearly to the user in your own words now. "
+                                 "Do NOT spawn the same subagent again and do NOT call any more tools unless a file edit is needed.")
         elif name == "mcp":
             if res.get("error"):
                 lines.append(f"Error: {res.get('error')}")
@@ -1757,19 +1955,19 @@ _PLAN_TOOLS_BLOCK = (
     "7. Plan/Todo Tracker: <tool:todo action=\"set\" todos=\"step one|step two|step three\" /> - "
     "that is how you record the plan. 'set' replaces the checklist, 'add' appends one "
     "step, 'done' marks a finished step.\n"
+    "8. Spawn Subagent: <tool:subagent name=\"Role\" system=\"instructions for the subagent\">the task it must do</tool:subagent>\n"
     "\n"
     "NOT AVAILABLE IN PLAN MODE: Write File, Edit File and Run Command. Calling them does "
     "not work - the app answers with an error and the step is wasted. Never call "
-    "<tool:write>, <tool:edit> or <tool:command> in this mode. MCP servers and subagents "
-    "are not used in PLAN mode either.\n"
+    "<tool:write>, <tool:edit> or <tool:command> in this mode.\n"
 )
 
 _PLAN_DIRECTIVES_BLOCK = (
     "\nEXECUTION DIRECTIVES:\n"
+    "- CRITICAL (ANTI-STALLING): You are an autonomous agent, NOT a chatbot. Never output only a statement of intent without immediately invoking the required tool in the same response.\n"
     "- INTERLEAVED EXPLANATIONS & ACTIONS: say in one sentence what you are looking at "
     "before each tool call, so the user can follow the investigation.\n"
-    "- STRUCTURE: [what you checked] -> <tool:...> -> [what you found] -> <tool:...> -> "
-    "[the plan]. Do NOT dump a wall of tools without explanations.\n"
+    "- STRUCTURE: Explain briefly what you are checking before each <tool:...>, then summarize what you found and present the plan. Do NOT dump a wall of tools without explanations, and never output literal bracket placeholders.\n"
     "- ONE CHECKLIST CALL: record the plan with a single <tool:todo action=\"set\" ... /> "
     "call, after the investigation and before your summary.\n"
     "- STOP AFTER THE PLAN: no tool call after the checklist, and no second checklist.\n"
@@ -1787,7 +1985,7 @@ def _full_tools_block(vision: bool) -> str:
         "5. Find Files: <tool:glob pattern=\"*.*\" dir=\".\" />\n"
         "6. Text Search: <tool:search query=\"search_term\" path=\".\" />\n"
         "7. Symbol Search (AST/FTS5): <tool:code_search query=\"symbol_or_function\" />\n"
-        "8. Run Command: <tool:command cmd=\"shell command\" />\n"
+        "8. Run Command: <tool:command cmd=\"shell command\" /> (or <tool:command cmd=\"shell command\" background=\"true\" /> to run in background without blocking)\n"
         "9. Web Search: <tool:web query=\"docs or query or https://url\" />\n"
         "10. Syntax Bug Check: <tool:bugs />\n"
         "11. Plan/Todo Tracker: <tool:todo action=\"add\" note=\"step description\" /> - "
@@ -1800,7 +1998,7 @@ def _full_tools_block(vision: bool) -> str:
         "object between the tags. Only the two `mcp` tools are listed here on purpose: "
         "server tools appear in context only after you open a server, so you never have to "
         "guess a name. Writing tools are approved by the user at call time.\n"
-        "13. Spawn Subagent: <tool:subagent name=\"Role\" system=\"instructions for the subagent\">the task it must do</tool:subagent>\n"
+        "13. Spawn Subagent: <tool:subagent name=\"Role\" system=\"instructions for the subagent\">the task it must do</tool:subagent> (optional attribute background=\"true\" to run in background)\n"
         + (
             "14. Screenshot: <tool:screenshot target=\"active_window\" /> (captures a window to a PNG file)\n"
             "15. Vision: <tool:vision image_path=\"path.png\" question=\"what to check\" /> (attaches the image to your next request)\n"
@@ -1811,14 +2009,35 @@ def _full_tools_block(vision: bool) -> str:
 
 _FULL_DIRECTIVES_BLOCK = (
     "\nEXECUTION DIRECTIVES:\n"
-    "- INTERLEAVED EXPLANATIONS & ACTIONS: Always include a brief 1-2 sentence explanation before and between your tool actions (e.g. state what you are inspecting, what you found, or why you are making a change), followed by the tool call. This allows the user to follow your step-by-step progress chronologically.\n"
-    "- STRUCTURE: Write naturally as: [Brief reasoning/finding] -> <tool:...> -> [Next finding/decision] -> <tool:...> -> [Final outcome]. Do NOT dump a wall of tools without explanations.\n"
-    "- SUBAGENTS: When a task is large, split it and delegate with <tool:subagent>. You may emit several in one turn — they run one after another on a local model, or all at once on an API model.\n"
-    "- SUBAGENT CONTRACT: `name` is the short role shown in the UI (e.g. \"Code Architect\"). `system` is the prompt you generate for it, so spell out what it must and must not do. The element body is the task itself, and it is the only text the user sees under TASK. Subagents can use every tool you have except spawning more subagents. They cannot ask the user anything, so never give them a task that needs a decision.\n"
-    "- AGENT NOTES: a subagent works in its own context. It cannot spawn more subagents and cannot ask the user anything. Its transcript, its tool calls and their raw output never reach you. What reaches you is its final report, plus any notes it chose to send with <tool:agent_note text=\"...\" />, all arriving when the batch finishes. Treat that report as the subagent's answer and build on it, but do not present it as verified: after the batch, review before reporting — run <tool:command cmd=\"git diff --stat\" />, check the files that matter, verify with <tool:bugs />, and describe the result in your own words.\n"
+    "- CRITICAL (ANTI-STALLING): You are an autonomous execution engine, NOT a conversational chatbot. Never output only an announcement of what you plan to do without immediately emitting the corresponding <tool:...> call in the exact same response.\n"
+    "- INTERLEAVED EXPLANATIONS & ACTIONS: Always include a brief 1-2 sentence explanation before and between your tool actions, followed by the tool call.\n"
+    "- STRUCTURE: Write natural prose before each <tool:...> call, then explain the next finding or final outcome. Do NOT dump a wall of tools without explanations, and never output literal bracket placeholders.\n"
+    "- SUBAGENTS: When the user asks to use or invoke a subagent (e.g. 'wywołaj subagenta', 'use a subagent') or when delegating a review/analysis task, immediately emit `<tool:subagent name=\"Code Reviewer\" system=\"Inspect the project files with ls and read, then provide a detailed evaluation.\">task description</tool:subagent>`. You may emit several in one turn — they run one after another on a local model, or all at once on an API model.\n"
+    "- BACKGROUND EXECUTION (`background=\"true\"`): Only when the user explicitly asks to run a command or subagent in the background, add `background=\"true\"` to `<tool:command cmd=\"...\" background=\"true\" />` or `<tool:subagent name=\"...\" background=\"true\">...</tool:subagent>`.\n"
+    "- SUBAGENT CONTRACT: `name` is the short role shown in the UI (e.g. \"Code Reviewer\"). `system` is the prompt you generate for it, so spell out what it must and must not do. The element body is the task itself, and it is the only text the user sees under TASK. Subagents can use every tool you have except spawning more subagents. They cannot ask the user anything, so never give them a task that needs a decision.\n"
+    "- AGENT NOTES: a subagent works in its own context. It cannot spawn more subagents and cannot ask the user anything. What reaches you is its final report, plus any notes it chose to send with <tool:agent_note text=\"...\" />, all arriving when the batch finishes. Treat that report as the subagent's answer, synthesize its findings clearly for the user in your own words, and if files were modified, verify with <tool:bugs />.\n"
     "- Be fast, direct, and proactive: execute the necessary reads, edits, writes, and commands to complete the user request.\n"
     "- Always verify your work with `<tool:bugs />` or `<tool:command>` to ensure zero errors.\n"
 )
+
+
+def load_project_instructions(workdir: str = ".") -> str:
+    """Read project-specific rules from AGENTS.md, CLAUDE.md, or .cursorrules if present."""
+    import os
+    if not workdir or not os.path.isdir(workdir):
+        return ""
+    candidates = ["AGENTS.md", "agents.md", ".agents.md", "CLAUDE.md", ".cursorrules"]
+    for fname in candidates:
+        fpath = os.path.join(workdir, fname)
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read().strip()
+                if content:
+                    return f"\n\n### PROJECT-SPECIFIC RULES & INSTRUCTIONS (`{fname}`):\n{content}\n"
+            except Exception:
+                pass
+    return ""
 
 
 def get_agent_system_prompt(workdir: str = ".", mode: str = "auto", vision: bool = False) -> str:
@@ -1869,9 +2088,11 @@ def get_agent_system_prompt(workdir: str = ".", mode: str = "auto", vision: bool
         tools_block = _full_tools_block(vision)
         directives_block = _FULL_DIRECTIVES_BLOCK
 
+    project_rules = load_project_instructions(workdir)
     return (
         f"\n\n### AUTONOMOUS CODE AGENT ({mode_clean.upper()} MODE) IN WORKSPACE: `{abs_work}`\n"
         f"{mode_section}\n\n"
         f"{tools_block}"
         f"{directives_block}"
+        f"{project_rules}"
     )

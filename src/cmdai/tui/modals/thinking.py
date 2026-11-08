@@ -101,7 +101,7 @@ class ThinkingModal(ModalScreen[Optional[str]]):
 
             with Horizontal(id="modal-footer"):
                 yield Static(self._wire_note())
-                yield Static("[enter: Select]  [Ctrl+T: next level]", id="modal-footer-right")
+                yield Static("enter: Select  ·  Ctrl+T: next level", id="modal-footer-right")
 
     def _budget_for(self, level: str) -> int:
         """The number that will actually be sent for this level.
