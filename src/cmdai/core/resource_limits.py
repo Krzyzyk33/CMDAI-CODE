@@ -544,18 +544,6 @@ def resolve_context_limit(
     except Exception:
         pass
 
-    # models.dev, and the model file, before OpenRouter.
-    #
-    # The order matters because of what the fallback cost. This used to fall
-    # through to OpenRouter's `/models` and then to a flat 32,768 - and that
-    # number was not only what `/modelinfo` displayed, it was what
-    # `should_summarize` compared against. A model with a 1M window was being
-    # compacted at 32,768 * 0.97, which is 3.2% of its real window: the 97% rule
-    # was right and was being applied to a limit nobody had ever heard of.
-    published = published_context_limit(model_id, provider_id)
-    if published:
-        return published
-
     try:
         import requests
         resp = requests.get("https://openrouter.ai/api/v1/models", timeout=3.0)

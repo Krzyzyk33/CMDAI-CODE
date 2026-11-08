@@ -8,17 +8,6 @@
   "scripts": {
     "start": "node bin/cmdai.js"
   },
-  "scripts": {
-    "prepublishOnly": "python tools/sync_versions.py && python tools/gen_bundled_release.py --check && python -m pytest -q"
-  },
-  "keywords": [
-    "ai",
-    "agent",
-    "cli",
-    "coding-agent",
-    "terminal",
-    "windows"
-  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Krzyzyk33/CMDAI-CODE.git"

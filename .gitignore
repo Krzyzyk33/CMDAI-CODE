@@ -7,12 +7,6 @@ __pycache__/
 env/
 venv/
 ENV/
-*-venv/
-
-# Modele GGUF sa duze; katalog ustawia CMDAI_MODELS_DIR albo config["models_dir"].
-models/
-*.gguf
-*.gguf.part
 
 .pytest_cache/
 cache/
@@ -20,9 +14,6 @@ cache/
 htmlcov/
 
 config.json
-# Trzyma tokeny w `env`, wiec nie moze byc sledzony. mcp_config.example.json
-# jest sledzony i pokazuje ksztalt bez sekretow.
-mcp_config.json
 .CMDAISETTINGS.json
 .cmdai_code_project/
 .cmdai/
@@ -32,16 +23,6 @@ app/sessions/*.json
 models/
 logs/
 *.log
-
-# `config.json` jest NASTĘPNIE w `git ls-files`, mimo wpisu powyżej -
-# `.gitignore` działa TYLKO dla plików nieśledzonych. Dopóki plik jest
-# w indeksie, wpisanie klucza API i `git add .` wyśle go do publicznego
-# repo. Jednorazowo wywal go z indeksu:
-#
-#     git rm --cached config.json
-#
-# Szablon struktury jest w config.example.json (w repo). Dziś klucze są
-# puste - sprawdzone także w historii gita.
 
 test_*.svg
 sim_*.log

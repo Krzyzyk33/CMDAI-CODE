@@ -198,8 +198,6 @@ def render_tool_header(
         if summary_line and summary_line.lower() not in ("failed", "execution failed"):
             text.append(f" {summary_line}", style="#ff7b72")
         text.append(" [failed]", style="dim #f85149")
-        if should_show_time:
-            text.append(f"  {elapsed_str}", style="dim #f85149")
         return text
 
     is_sum = tl in ("summarizing", "summarize", "compact", "context_compact")
