@@ -205,6 +205,21 @@ def _match_agents_to_calls(calls: List[Dict[str, Any]],
 
 
 class CMDAICodeTUI(App):
+    @property
+    def is_generating(self) -> bool:
+        curr_sid = str(getattr(self, "current_session_id", "") or "")
+        return bool(curr_sid and curr_sid in getattr(self, "_active_generation_sessions", set()))
+
+    @is_generating.setter
+    def is_generating(self, val: bool) -> None:
+        curr_sid = str(getattr(self, "current_session_id", "") or "")
+        if not hasattr(self, "_active_generation_sessions"):
+            self._active_generation_sessions = set()
+        if val and curr_sid:
+            self._active_generation_sessions.add(curr_sid)
+        elif not val and curr_sid:
+            self._active_generation_sessions.discard(curr_sid)
+
 
     CSS = SWIFT_CSS
     HINTS_VISIBLE_ROWS: int = 5
@@ -256,6 +271,13 @@ class CMDAICodeTUI(App):
 
         self.current_provider: str = self.settings.config.get("default_provider", "openrouter")
         self.current_model_id: str = self.settings.config.get("default_model", "")
+        if self.current_provider == "local_gguf" and (not self.current_model_id or self.current_model_id == "default"):
+            from ..core.providers import fetch_remote_models
+            local_models = fetch_remote_models("local_gguf")
+            if local_models:
+                coder_model = next((m["id"] for m in local_models if "coder" in m["id"].lower()), local_models[0]["id"])
+                self.current_model_id = coder_model
+
         if not self.current_model_id:
             info = PROVIDERS_CATALOG.get(self.current_provider)
             self.current_model_id = info.default_models[0] if info and info.default_models else "default"
@@ -306,6 +328,7 @@ class CMDAICodeTUI(App):
             "- <tool:web>url_or_query</tool:web> : Web fetch or search\n"
             "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue\n"
             "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation\n"
+            "- <tool:subagent name=\"Code Reviewer\" system=\"Inspect project files using ls and read, then provide a detailed evaluation.\">task description</tool:subagent> : Spawn an autonomous subagent to review, analyze, or execute a task\n"
             "- <tool:mcp /> : List MCP servers. Then <tool:mcp open server=\"NAME\" /> reveals that server's tools; call them as <tool:mcp__NAME__TOOL>{\"arg\":\"v\"}</tool:mcp__NAME__TOOL>\n"
             "- <tool:screenshot target=\"active_window\" /> + <tool:vision image_path=\"file.png\" question=\"...\" /> : Only listed in the agent section below when the loaded model supports vision\n"
         )
@@ -313,7 +336,7 @@ class CMDAICodeTUI(App):
         self.messages: List[Dict[str, Any]] = []
         self._turn_counter: int = 0
         self.in_chat_mode: bool = False
-        self.is_generating: bool = False
+        self._active_generation_sessions: set = set()
         self.abort_requested: bool = False
         # Set while /update's worker thread is pulling. Guards against a second
         # update racing the same working tree.
@@ -417,7 +440,7 @@ class CMDAICodeTUI(App):
                         yield Static("", id="input-meta-mode", classes="meta-clickable")
                         yield Static("", id="input-meta-thinking", classes="meta-clickable")
                         yield Static("", id="input-meta-spacer")
-                        yield Static("[dim]esc: cancel[/dim]", id="input-meta-right")
+                        yield Static("", id="input-meta-right")
 
     def on_mount(self) -> None:
         try:
@@ -549,6 +572,29 @@ class CMDAICodeTUI(App):
         prev_bg = getattr(self, "_last_bg_active", False)
         self._last_bg_active = bg_active
 
+        try:
+            for b in self.query(ToolBlock):
+                if getattr(b, "tool_running", False):
+                    b_sid = str(getattr(b, "subagent_id", "") or "")
+                    b_r = str(getattr(b, "subagent_role", "") or "")
+                    if b_sid or b_r:
+                        s_info = mgr.get_subagent(b_sid) if b_sid else None
+                        if not b_sid and not s_info and b_r:
+                            s_info = next((s for s in mgr.list_subagents() if s.get("role", "").lower() == b_r.lower()), None)
+                        if s_info and str(s_info.get("status", "")).lower() in ("finished", "completed", "failed"):
+                            res_sum = str(s_info.get("result", "") or s_info.get("summary", "") or "")
+                            b.finish_subagent({
+                                "subagent_id": b_sid or s_info.get("subagent_id", ""),
+                                "role": b_r or s_info.get("role", "Subagent"),
+                                "status": "completed" if str(s_info.get("status")).lower() != "failed" else "failed",
+                                "goal": s_info.get("task", ""),
+                                "summary": res_sum,
+                                "elapsed": float(s_info.get("elapsed", 0.0) or 0.0),
+                            })
+                            b.update_header()
+        except Exception:
+            pass
+
         if self.is_generating or bg_active:
             self._meta_spinner_idx = (self._meta_spinner_idx + 1) % len(self.SPINNER_FRAMES)
             self._update_meta_bars()
@@ -628,6 +674,16 @@ class CMDAICodeTUI(App):
             else:
                 think_w.styles.display = "none"
                 think_w.update("")
+            cancel_w = self.query_one("#input-meta-right", Static)
+            curr_sid = str(getattr(self, "current_session_id", "") or "")
+            from ..agent.tasks import BackgroundTaskManager
+            has_bg = BackgroundTaskManager.get_instance().has_active_background(session_id=curr_sid)
+            if self.is_generating or has_bg:
+                cancel_w.styles.display = "block"
+                cancel_w.update("[dim]esc: cancel[/dim]")
+            else:
+                cancel_w.styles.display = "none"
+                cancel_w.update("")
         except Exception:
             pass
 
@@ -1199,7 +1255,12 @@ class CMDAICodeTUI(App):
                         if getattr(b, "subagent_role", "") or tl in (
                             "command", "terminal", "shell", "bash", "cmd", "run_command", "sh", "exec", "subagent", "task"
                         ):
+                            b.is_backgrounded = True
                             b.mark_backgrounded()
+                            sid = getattr(b, "subagent_id", "")
+                            if sid:
+                                from ..agent.tasks import BackgroundTaskManager
+                                BackgroundTaskManager.get_instance().mark_subagent_background(sid)
                             break
         except Exception:
             pass
@@ -1401,24 +1462,39 @@ class CMDAICodeTUI(App):
             self._hide_hints()
             return
 
-        if self.is_generating:
-            now = time.time()
-            if now - self._last_escape_time < 1.5:
-                self.abort_requested = True
-                self.is_generating = False
-                self._last_escape_time = 0.0
-                if self._current_assistant_card:
-                    self._current_assistant_card.abort()
-                self._update_meta_bars()
-                self._hide_hints()
-                self.notify("Generation cancelled.", severity="warning", timeout=2.0)
-                try:
-                    self.set_focus(self.query_one("#prompt-input", AutoExpandingInput))
-                except Exception:
-                    pass
+        from ..agent.tasks import BackgroundTaskManager
+        bg_mgr = BackgroundTaskManager.get_instance()
+        has_active_bg = bg_mgr.has_active_background(session_id=self.current_session_id)
+
+        if self.is_generating or has_active_bg:
+            self.abort_requested = True
+            self.is_generating = False
+            self._last_escape_time = 0.0
+            if self._current_assistant_card:
+                self._current_assistant_card.abort()
+            num_cancelled = bg_mgr.cancel_all_for_session(self.current_session_id)
+            try:
+                cs = self.query_one("#chat-scroll", VerticalScroll)
+                for b in cs.query(ToolBlock):
+                    if getattr(b, "tool_running", False):
+                        b.tool_running = False
+                        b._stop_spinner()
+                        if getattr(b, "subagent_role", ""):
+                            b.subagent_status = "cancelled"
+                            b.subagent_live_tool = "Cancelled"
+                        b.update_header()
+            except Exception:
+                pass
+            self._update_meta_bars()
+            self._hide_hints()
+            if num_cancelled > 0:
+                self.notify(f"Generation and {num_cancelled} background task(s) cancelled.", severity="warning", timeout=2.5)
             else:
-                self._last_escape_time = now
-                self.notify("Press Esc again to cancel generation", timeout=1.5)
+                self.notify("Generation cancelled.", severity="warning", timeout=2.0)
+            try:
+                self.set_focus(self.query_one("#prompt-input", AutoExpandingInput))
+            except Exception:
+                pass
             return
 
         self._last_escape_time = 0.0
@@ -1879,7 +1955,8 @@ class CMDAICodeTUI(App):
             self.session_title = clean_title_from_prompt(prompt)
             self._session_named_by_model = False
             self._update_terminal_title()
-            self._maybe_auto_name_session()
+            if self.current_provider != "local_gguf":
+                self._maybe_auto_name_session()
         self._save_current_session()
         self.start_generation(prompt)
 
@@ -1916,6 +1993,7 @@ class CMDAICodeTUI(App):
             "/params": self._cmd_params,
             "/settings": self._cmd_settings,
             "/summarize": self._cmd_summarize,
+            "/ctx": self._cmd_context,
             "/stats": self._cmd_stats,
             "/changelog": self._cmd_releases,
             "/update": self._cmd_update,
@@ -2011,7 +2089,7 @@ class CMDAICodeTUI(App):
     def _cmd_new(self, arg: str = "") -> None:
         if self.messages:
             self._save_current_session()
-        self.messages.clear()
+        self.messages = []
         self._transcript = []
         self.current_session_id = f"session_{int(time.time())}"
         self.session_title = ""
@@ -2036,21 +2114,23 @@ class CMDAICodeTUI(App):
     def _record_user_turn(self, text: str, turn_id: int) -> None:
         self._transcript.append({"kind": "user", "text": text, "turn_id": turn_id})
 
-    def _record_assistant_text(self, text: str) -> None:
+    def _record_assistant_text(self, text: str, target_transcript: Optional[List[Dict[str, Any]]] = None) -> None:
         import re
         clean = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', str(text or ''), flags=re.IGNORECASE).strip()
         if not clean:
             return
-        self._transcript.append({"kind": "assistant", "text": clean})
+        dest = target_transcript if target_transcript is not None else self._transcript
+        dest.append({"kind": "assistant", "text": clean})
 
-    def _record_tool(self, tool_name: str, target: str, result: Any) -> None:
+    def _record_tool(self, tool_name: str, target: str, result: Any, target_transcript: Optional[List[Dict[str, Any]]] = None) -> None:
         """Record one tool call so the replay can rebuild its card.
 
         Keeps the whole result, not a summary: the card renders command output,
         diffs and file contents out of it, and a trimmed copy would come back
         as an empty block.
         """
-        self._transcript.append({
+        dest = target_transcript if target_transcript is not None else self._transcript
+        dest.append({
             "kind": "tool",
             "tool": tool_name,
             "target": target,
@@ -2067,6 +2147,7 @@ class CMDAICodeTUI(App):
             "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
             "read_file": "read", "view_file": "read", "cat": "read",
             "run_command": "command", "execute_command": "command", "bash": "command", "terminal": "command", "sh": "command", "cmd": "command",
+            "shell": "command", "exec": "command", "powershell": "command", "pwsh": "command", "run_shell_command": "command", "shell_command": "command",
             "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch",
         }
 
@@ -2249,8 +2330,6 @@ class CMDAICodeTUI(App):
                             })
                     else:
                         raw_md = str(getattr(fc, "_raw_markdown", "") or "").strip()
-                        if not raw_md:
-                            raw_md = str(getattr(child, "raw_text", "") or getattr(child, "_last_finalized_text", "") or "").strip()
                         if raw_md:
                             if not (rebuilt and rebuilt[-1].get("kind") == "assistant" and rebuilt[-1].get("text") == raw_md):
                                 rebuilt.append({"kind": "assistant", "text": raw_md})
@@ -2270,11 +2349,52 @@ class CMDAICodeTUI(App):
         if rebuilt:
             self._transcript = rebuilt
 
+    def _save_session_data(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        transcript: Optional[List[Dict[str, Any]]] = None,
+        title: Optional[str] = None,
+        stats: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Save an isolated session's data safely without touching or reading active UI state."""
+        if not session_id:
+            return
+        try:
+            existing = self.session_manager.load_session(session_id) or {}
+            s_title = str(title or existing.get("title") or "")
+            if not s_title.strip():
+                first_u = next((str(m.get("content", "")) for m in (messages or []) if isinstance(m, dict) and m.get("role") == "user"), "")
+                from ..core.sessions import clean_title_from_prompt
+                if first_u:
+                    s_title = clean_title_from_prompt(first_u)
+            s_stats = stats or existing.get("stats") or self.stats
+            s_model = existing.get("model_id") or self.current_model_id
+            s_workdir = existing.get("directory") or self.workdir
+            s_mode = existing.get("mode") or self.agent_mode
+            from ..core.sessions import reconcile_transcript
+            final_transcript = reconcile_transcript(transcript or existing.get("transcript"), messages)
+            self.session_manager.save_session(
+                session_id=session_id,
+                messages=messages,
+                model_id=s_model,
+                stats=s_stats,
+                title=s_title,
+                transcript=final_transcript,
+                workdir=s_workdir,
+                agent_mode=s_mode,
+                named_by_model=bool(existing.get("named_by_model", False)),
+            )
+        except Exception:
+            pass
+
     def _save_current_session(self, session_id: Optional[str] = None) -> None:
         try:
             target_id = session_id or self.current_session_id
-            if not session_id or session_id == self.current_session_id:
-                self._sync_transcript_from_ui()
+            # Safety guard: never overwrite another session using active screen data
+            if session_id and session_id != self.current_session_id:
+                return
+            self._sync_transcript_from_ui()
             from ..core.sessions import clean_title_from_prompt, reconcile_transcript
             if self.messages:
                 self._transcript = reconcile_transcript(self._transcript, self.messages)
@@ -2324,7 +2444,12 @@ class CMDAICodeTUI(App):
         try:
             if getattr(self, "_session_named_by_model", False):
                 if self.session_title.strip():
-                    self.call_from_thread(self._update_terminal_title)
+                    try:
+                        self._update_terminal_title()
+                    except Exception:
+                        self.call_from_thread(self._update_terminal_title)
+                return
+            if self.current_provider == "local_gguf" and self.is_generating:
                 return
             first_u = next((str(m.get("content", "")) for m in self.messages if m.get("role") == "user"), "")
             if not first_u:
@@ -2358,8 +2483,32 @@ class CMDAICodeTUI(App):
             ]
             think = ""
             if self.current_provider == "local_gguf":
+                if self.is_generating:
+                    return
+                local_naming = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Jesteś generatorem krótkich tytułów sesji czatu (2 do 4 słów). "
+                            "NIGDY nie odpowiadaj użytkownikowi, nie witaj się i nie prowadź rozmowy. "
+                            "Zwróć wyłącznie krótki tytuł określający temat wiadomości w tym samym języku co wiadomość użytkownika "
+                            "(np. dla 'hej' zwróć 'Powitanie i rozmowa', dla 'napisz kalkulator' zwróć 'Kalkulator w Pythonie')."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f'Wygeneruj krótki tytuł sesji (2-4 słowa) dla wiadomości: "{clean_u}".\n'
+                            "Zwróć TYLKO sam tytuł bez cudzysłowów, bez kropek i bez odpowiadania na wiadomość."
+                        ),
+                    },
+                ]
                 title, think = self.gguf_loader.stream_chat(
-                    messages=naming, temperature=0.1, max_tokens=20, model_filename=self.current_model_id
+                    messages=local_naming,
+                    temperature=0.1,
+                    max_tokens=20,
+                    model_filename=self.current_model_id,
+                    is_aborted=lambda: self.is_generating or self.abort_requested,
                 )
             else:
                 from ..core.providers import stream_chat_completion
@@ -2377,15 +2526,17 @@ class CMDAICodeTUI(App):
                 title = self.agent_runner.strip_xml_tool_calls(title)
             title = re.sub(r'</?(?:tool_response|tool_call|function_call|\w+)[^>]*>', '', title, flags=re.IGNORECASE)
             title = re.sub(r'<[^>]+>', '', title)
-            title = re.sub(r'^(?:session\s+title:\s*|title:\s*|#+\s*|nazwa(?:\s+sesji)?:\s*|temat:\s*)', '', title, flags=re.IGNORECASE).strip()
+            title = re.sub(r'^(?:session\s+title:\s*|title:\s*|#+\s*|nazwa(?:\s+sesji)?:\s*|temat:\s*|tytuł(?:\s+sesji)?:\s*)', '', title, flags=re.IGNORECASE).strip()
             title = " ".join(str(title or "").strip().strip('"\'`').split())[:50]
-            title = title.strip('"\'`').strip(" .:-_")
+            title = title.strip('"\'`').strip(" .:-_?!")
 
             bad_tokens = (
                 "tool", "mock", "<tool", "</tool", "tool_call", "function_call", "tool_response",
                 "error", "failed", "exception", "traceback", "api key", "json",
                 "opencode bridge", "bridge", "http", "503", "502", "500", "401", "429", "403",
                 "limit reached", "usage limit", "quota", "rate limit", "service unavailable",
+                "how can i assist", "how can i help", "jak mogę pomóc", "w czym mogę pomóc",
+                "jak moge pomoc", "hello, how", "cześć, w czym",
             )
             if not title or len(title) < 3 or any(b in title.lower() for b in bad_tokens):
                 title = clean_title_from_prompt(user_text)
@@ -3015,33 +3166,57 @@ class CMDAICodeTUI(App):
         except Exception:
             return ""
 
-    def _dynamic_limit(self) -> int:
+    def _resolve_context_limit(self) -> Tuple[int, bool, str]:
         try:
-            from ..core.resource_limits import get_dynamic_context_limit
+            from ..core.resource_limits import resolve_context_limit
             m_dir = getattr(getattr(self, "gguf_loader", None), "models_dir", "models")
-            return get_dynamic_context_limit(
-                self.current_model_id, self.current_provider,
+            api_key = ""
+            try:
+                api_key = self.settings.get_api_key(self.current_provider)
+            except Exception:
+                api_key = ""
+            return resolve_context_limit(
+                self.current_model_id,
+                self.current_provider,
                 model_path=self._find_model_file(self.current_model_id) or None,
-                models_dir=m_dir, workdir=getattr(self, "workdir", ""),
+                api_key=api_key,
+                models_dir=m_dir,
+                workdir=getattr(self, "workdir", ""),
             )
         except Exception:
-            return 8192
+            return 8192, False, "fallback"
+
+    def _dynamic_limit(self) -> int:
+        limit, _, _ = self._resolve_context_limit()
+        return limit
 
     def _build_modelinfo_body(self) -> str:
         import psutil
         from ..core.capabilities import budget_for, clamp_effort, normalize_level
         from ..core.resource_limits import (
-            get_dynamic_context_limit,
-            FALLBACK_CONTEXT_LIMIT,
+            estimate_kv_cache_bytes_per_token,
+            read_gguf_metadata,
         )
 
         vm = psutil.virtual_memory()
         total_ram_gb = vm.total / (1024**3)
         avail_ram_gb = vm.available / (1024**3)
-        cache_budget_70 = max(0.5, (avail_ram_gb * 0.70))
-        tokens_70_ram = int(cache_budget_70 * 128_000)
 
-        dyn_limit = self._dynamic_limit()
+        model_file = self._find_model_file(self.current_model_id) if (
+            self.current_provider == "local_gguf" or str(self.current_model_id or "").lower().endswith(".gguf")
+        ) else ""
+        if model_file and os.path.exists(model_file):
+            meta = read_gguf_metadata(model_file)
+            model_size_gb = float(meta.get("file_size_gb", 0.0) or 0.0)
+            ram_after_model = max(0.5, avail_ram_gb - model_size_gb)
+            cache_budget_70 = ram_after_model * 0.70
+            bytes_per_tok = estimate_kv_cache_bytes_per_token(meta)
+            tokens_70_ram = int(cache_budget_70 * (1024**3) / bytes_per_tok)
+        else:
+            cache_budget_70 = max(0.5, (avail_ram_gb * 0.70))
+            tokens_70_ram = int(cache_budget_70 * 128_000)
+
+        dyn_limit, known, _ = self._resolve_context_limit()
         cap = self._capability()
         gen = self.settings.config.get("generation", {})
         active_reasoning = normalize_level(gen.get("reasoning_level")) or (
@@ -3089,11 +3264,6 @@ class CMDAICodeTUI(App):
             lines.append("  [dim]• thinking:     Not supported for this model[/dim]")
 
         lines.append("\n[bold white]Context & Hardware Safety (70% RAM Rule):[/]")
-        # A bare number here is a claim. When nobody has published a window for
-        # this model the number is the core's fallback, and the compaction
-        # threshold is built on top of it - so the user is entitled to know which
-        # of the two they are looking at.
-        known = dyn_limit > 0 and dyn_limit != FALLBACK_CONTEXT_LIMIT
         safe = f"[b #58a6ff]{dyn_limit:,} tokens[/]" if known else (
             f"[b #58a6ff]{dyn_limit:,}[/] [dim]fallback - nobody published this window[/]"
         )
@@ -3206,14 +3376,26 @@ class CMDAICodeTUI(App):
         from .modals.git_modal import GitBranchesModal
         self.push_screen(GitBranchesModal(workdir=self.workdir))
 
-    def _new_subagent_block(self, card: Any, role: str, goal: str, system: str, index: int, total: int) -> Any:
+    def _new_subagent_block(self, card: Any, role: str, goal: str, system: str, index: int, total: int, subagent_id: str = "") -> Any:
         """Create one chat marker for a subagent and label it with its role."""
         def _create():
             try:
                 card.finish_thinking()
             except Exception:
                 pass
-            return card.add_tool("subagent", "starting")
+            blk = card.add_tool("subagent", "starting")
+            if blk is not None:
+                if subagent_id:
+                    blk.subagent_id = subagent_id
+                blk.subagent_role = role
+                blk.subagent_goal = goal
+                blk.subagent_system = system
+                blk.subagent_index = index
+                blk.subagent_total = total
+                blk.subagent_live_tool = "starting"
+                blk.subagent_started = time.monotonic()
+                blk.update_header()
+            return blk
 
         try:
             if threading.current_thread() is threading.main_thread():
@@ -3225,14 +3407,13 @@ class CMDAICodeTUI(App):
         if block is None:
             return None
         try:
+            if subagent_id:
+                block.subagent_id = subagent_id
             block.subagent_role = role
             block.subagent_goal = goal
             block.subagent_system = system
             block.subagent_index = index
             block.subagent_total = total
-            block.subagent_live_tool = "starting"
-            block.subagent_started = time.monotonic()
-            block.update_header()
             if threading.current_thread() is threading.main_thread():
                 self._scroll_chat_to_end_if_enabled()
             else:
@@ -3259,20 +3440,44 @@ class CMDAICodeTUI(App):
                 idx = siblings.index(block) + 1
             except ValueError:
                 idx = 1
-            agents = [{
-                "role": getattr(b, "subagent_role", "") or getattr(b, "target", "") or "Subagent",
-                "goal": getattr(b, "subagent_goal", "") or "",
-                "system_prompt": getattr(b, "subagent_system", "") or "",
-                "summary": str((getattr(b, "result_data", {}) or {}).get("summary", "") or ""),
-                "history": list(getattr(b, "subagent_history", []) or []),
-                "findings": list(getattr(b, "subagent_findings", []) or []),
-                "notes": list(getattr(b, "subagent_notes", []) or []),
-                "events": list(getattr(b, "subagent_events", []) or []),
-                "status": getattr(b, "subagent_status", "running" if getattr(b, "tool_running", False) else "completed"),
-                "elapsed": float(getattr(b, "subagent_elapsed", 0.0) or 0.0),
-                "tokens": int(getattr(b, "subagent_tokens", 0) or 0),
-                "error": getattr(b, "error_msg", "") if getattr(b, "has_error", False) else "",
-            } for b in siblings]
+            from ..agent.tasks import BackgroundTaskManager
+            _bg_mgr_chat = BackgroundTaskManager.get_instance()
+            agents = []
+            for b in siblings:
+                b_sid = getattr(b, "subagent_id", "")
+                b_info = _bg_mgr_chat.get_subagent(b_sid) if b_sid else None
+                res_d = getattr(b, "result_data", {}) or {}
+                if isinstance(res_d, dict) and not b_info and res_d.get("subagent_id"):
+                    b_info = _bg_mgr_chat.get_subagent(res_d["subagent_id"])
+                evs = list(getattr(b, "subagent_events", []) or [])
+                nts = list(getattr(b, "subagent_notes", []) or [])
+                fnds = list(getattr(b, "subagent_findings", []) or [])
+                hsty = list(getattr(b, "subagent_history", []) or [])
+                summ = str(res_d.get("summary", "") or (b_info.get("result", "") if b_info else "") or "")
+                if b_info and isinstance(b_info, dict):
+                    if b_info.get("events") and len(b_info["events"]) > len(evs):
+                        evs = list(b_info["events"])
+                    if b_info.get("notes") and len(b_info["notes"]) > len(nts):
+                        nts = list(b_info["notes"])
+                    if b_info.get("findings") and len(b_info["findings"]) > len(fnds):
+                        fnds = list(b_info["findings"])
+                    if b_info.get("history") and len(b_info["history"]) > len(hsty):
+                        hsty = list(b_info["history"])
+                agents.append({
+                    "role": getattr(b, "subagent_role", "") or getattr(b, "target", "") or "Subagent",
+                    "goal": getattr(b, "subagent_goal", "") or (b_info.get("task") if b_info else "") or "",
+                    "system_prompt": getattr(b, "subagent_system", "") or "",
+                    "summary": summ,
+                    "history": hsty,
+                    "findings": fnds,
+                    "notes": nts,
+                    "events": evs,
+                    "status": getattr(b, "subagent_status", "running" if getattr(b, "tool_running", False) else "completed"),
+                    "elapsed": float(getattr(b, "subagent_elapsed", 0.0) or (b_info.get("elapsed", 0.0) if b_info else 0.0)),
+                    "tokens": int(getattr(b, "subagent_tokens", 0) or 0),
+                    "error": getattr(b, "error_msg", "") if getattr(b, "has_error", False) else "",
+                    "thinking": str(getattr(b, "thinking", "") or (b_info.get("thinking") if b_info else "") or ""),
+                })
             running = bool(getattr(block, "tool_running", False))
             self.push_screen(SubagentChatModal(
                 role=getattr(block, "subagent_role", "") or getattr(block, "target", "") or "Subagent",
@@ -3284,6 +3489,7 @@ class CMDAICodeTUI(App):
                 agent_total=len(agents),
                 agents=agents,
                 live_agent=block if running else None,
+                thinking=str(getattr(block, "thinking", "") or ""),
             ))
         except Exception as e:
             self.notify(f"Could not open subagent view: {e}", severity="error")
@@ -3702,6 +3908,9 @@ class CMDAICodeTUI(App):
 
         if getattr(self, "agent_ctx", None):
             self.agent_ctx.workdir = self.workdir
+            self.agent_ctx.current_cwd = self.workdir
+        if getattr(self, "agent_runner", None):
+            self.agent_runner.workdir = self.workdir
 
         if hasattr(self, "system_prompt") and "Current working directory:" in self.system_prompt:
             self.system_prompt = re.sub(
@@ -3877,6 +4086,13 @@ class CMDAICodeTUI(App):
         )
         api_key = self.settings.get_api_key(self.current_provider)
 
+        def _on_sum_chunk(chunk: str) -> None:
+            if chunk:
+                try:
+                    self.call_from_thread(tool_block.append_summary_chunk, chunk)
+                except Exception:
+                    pass
+
         summary_text = ""
         try:
             if self.current_provider == "local_gguf":
@@ -3885,6 +4101,7 @@ class CMDAICodeTUI(App):
                     temperature=0.3,
                     max_tokens=1024,
                     model_filename=self.current_model_id,
+                    on_chunk=_on_sum_chunk,
                 )
                 summary_text = resp
             else:
@@ -3894,6 +4111,7 @@ class CMDAICodeTUI(App):
                     messages=payload,
                     api_key=api_key,
                     generation_params={"temperature": 0.3, "max_tokens": 1024},
+                    on_chunk=_on_sum_chunk,
                 )
                 summary_text = resp
         except Exception:
@@ -3916,13 +4134,19 @@ class CMDAICodeTUI(App):
         ]
 
         def _update_ui():
-            tool_block.finish({"success": True, "summary": handoff_content.strip()})
-            chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
-            chat_scroll.scroll_end(animate=False)
+            try:
+                sum_res = {"success": True, "summary": handoff_content.strip()}
+                tool_block.finish(sum_res)
+                self._record_tool("summarizing", "", sum_res)
+                self._save_current_session()
+                chat_scroll = self.query_one("#chat-scroll", VerticalScroll)
+                chat_scroll.scroll_end(animate=False)
+            except Exception:
+                pass
 
         self.call_from_thread(_update_ui)
 
-    def _replay_transcript(self, transcript: List[Dict[str, Any]]) -> None:
+    def _replay_transcript(self, transcript: List[Dict[str, Any]], is_active_generating: bool = False) -> None:
         """Rebuild a session into the chat with the widgets it used before.
 
         Same cards, same tool blocks, same order - a reloaded session is
@@ -3957,6 +4181,11 @@ class CMDAICodeTUI(App):
                 has_think = any(isinstance(t, dict) and t.get("kind") == "thinking" for t in transcript)
                 card = AssistantTurnCard(self.current_model_id, has_thinking=True if has_think else None, turn_id=turn_id)
                 chat_scroll.mount(card)
+            elif getattr(card, "_replay_finished_done", False) and kind in ("thinking", "assistant", "tool", "subagent"):
+                card.footer_widget.update("")
+                card.footer_widget.styles.display = "none"
+                card._replay_finished_done = False
+                card.prepare_for_next_turn()
 
             if kind == "thinking":
                 text = str(item.get("text", "") or "").strip()
@@ -4159,7 +4388,18 @@ class CMDAICodeTUI(App):
                     card._replay_finished_done = True
 
         if card is not None and not getattr(card, "_replay_finished_done", False):
-            card.finish(getattr(card, "elapsed", None))
+            if is_active_generating:
+                card.is_generating = True
+                card._replay_finished_done = False
+                card._start_spinner()
+            else:
+                card.finish(getattr(card, "elapsed", None))
+        if card is not None:
+            self._current_assistant_card = card
+            if is_active_generating and hasattr(self, "_active_generation_data"):
+                cur_sid = str(self.current_session_id or "")
+                if cur_sid in self._active_generation_data:
+                    self._active_generation_data[cur_sid]["card"] = card
 
         # Sibling position is only known once every marker exists.
         total = len(marks)
@@ -4175,24 +4415,24 @@ class CMDAICodeTUI(App):
             return
         if session_id == self.current_session_id and self.in_chat_mode:
             return
+        old_sid = str(self.current_session_id or "")
         if self.is_generating:
             try:
-                self._flush_live_turn_to_session()
-                self.abort_requested = True
-                if self._current_assistant_card is not None:
-                    try:
-                        self._current_assistant_card.finish(getattr(self._current_assistant_card, "elapsed", None))
-                    except Exception:
-                        pass
-                self.is_generating = False
+                if old_sid and (self.messages or self._transcript):
+                    self._save_session_data(
+                        session_id=old_sid,
+                        messages=list(self.messages),
+                        transcript=list(self._transcript),
+                    )
             except Exception:
                 pass
         else:
             try:
-                if self.messages or self._transcript:
-                    self._save_current_session()
+                if old_sid and (self.messages or self._transcript):
+                    self._save_current_session(session_id=old_sid)
             except Exception:
                 pass
+        self._current_assistant_card = None
 
         try:
             data = self.session_manager.load_session(session_id)
@@ -4214,6 +4454,28 @@ class CMDAICodeTUI(App):
 
         self.current_session_id = session_id
         self._session_flushed_on_exit = False
+        sess_dir = data.get("directory") or data.get("workdir")
+        if sess_dir and os.path.isdir(str(sess_dir)):
+            try:
+                new_workdir = os.path.abspath(str(sess_dir))
+                self.workdir = new_workdir
+                os.chdir(new_workdir)
+                if hasattr(self, "agent_ctx"):
+                    self.agent_ctx.workdir = new_workdir
+                    self.agent_ctx.current_cwd = new_workdir
+                if hasattr(self, "agent_runner"):
+                    self.agent_runner.workdir = new_workdir
+                if hasattr(self, "session_manager"):
+                    self.session_manager.project_dir = new_workdir
+                if hasattr(self, "system_prompt") and "Current working directory:" in self.system_prompt:
+                    import re as _re
+                    self.system_prompt = _re.sub(
+                        r"Current working directory: [^\n]+",
+                        f"Current working directory: {self.workdir}",
+                        self.system_prompt,
+                    )
+            except Exception:
+                pass
         self.messages = list(data.get("messages", []) or [])
         self.session_title = str(data.get("title", "") or "")
         bad_titles = ("new session", "untitled", "untitled session", "session", "tool", "mock", "tool mock")
@@ -4241,17 +4503,25 @@ class CMDAICodeTUI(App):
             self.settings.save_config()
             self.update_meta_bars()
 
-        from ..core.sessions import reconcile_transcript
-        transcript = data.get("transcript")
-        self._transcript = reconcile_transcript(transcript, self.messages)
+        is_active_gen = bool(session_id in getattr(self, "_active_generation_sessions", set()))
+        if is_active_gen and hasattr(self, "_active_generation_data") and session_id in self._active_generation_data:
+            active_info = self._active_generation_data[session_id]
+            self.messages = list(active_info.get("messages") or list(data.get("messages", []) or []))
+            self._transcript = list(active_info.get("transcript") or [])
+        else:
+            from ..core.sessions import reconcile_transcript
+            transcript = data.get("transcript")
+            self._transcript = reconcile_transcript(transcript, self.messages)
 
         # Switch to chat view and render replayed cards
         self._switch_to_chat()
         try:
-            self._replay_transcript(self._transcript)
+            self._replay_transcript(self._transcript, is_active_generating=is_active_gen)
         except Exception as ex:
             import logging
             logging.exception("Error replaying transcript: %s", ex)
+        if is_active_gen:
+            self.update_meta_bars()
         self._update_terminal_title()
         try:
             self.call_after_refresh(lambda: self.query_one("#prompt-input", AutoExpandingInput).focus())
@@ -4289,6 +4559,7 @@ class CMDAICodeTUI(App):
                     "- <tool:command>shell_command</tool:command> : Run terminal command\n"
                     "- <tool:web>url_or_query</tool:web> : Web fetch or search\n"
                     "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue\n"
+                    "- <tool:subagent name=\"Code Reviewer\" system=\"Inspect project files using ls and read, then provide a detailed evaluation.\">task description</tool:subagent> : Spawn an autonomous subagent\n"
                     "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation\n"
                 )
             else:
@@ -4379,6 +4650,15 @@ class CMDAICodeTUI(App):
         cap = self._capability()
         has_thinking_support = bool(cap and cap.thinking)
 
+        if resume_existing:
+            if self._current_assistant_card is None:
+                try:
+                    cards = [c for c in chat_scroll.children if isinstance(c, AssistantTurnCard)]
+                    if cards:
+                        self._current_assistant_card = cards[-1]
+                except Exception:
+                    pass
+
         if resume_existing and self._current_assistant_card is not None:
             assistant_card = self._current_assistant_card
             assistant_card.resume_turn()
@@ -4399,6 +4679,19 @@ class CMDAICodeTUI(App):
 
         self._scroll_chat_to_end_if_enabled(force=True)
 
+        worker_sid = str(getattr(assistant_card, "session_id", "") or self.current_session_id)
+        assistant_card.session_id = worker_sid
+        self._active_generation_sessions.add(worker_sid)
+        assistant_card._worker_messages = list(self.messages)
+        assistant_card._worker_transcript = list(self._transcript)
+        if not hasattr(self, "_active_generation_data"):
+            self._active_generation_data = {}
+        self._active_generation_data[worker_sid] = {
+            "card": assistant_card,
+            "messages": assistant_card._worker_messages,
+            "transcript": assistant_card._worker_transcript,
+        }
+
         self._generation_worker(assistant_card)
 
 
@@ -4410,28 +4703,109 @@ class CMDAICodeTUI(App):
             import traceback
             traceback.print_exc()
             try:
-                self.call_from_thread(assistant_card.update_content, f"**Execution error**: {exc}")
+                target_c = getattr(self, "_active_generation_data", {}).get(getattr(assistant_card, "session_id", ""), {}).get("card") or assistant_card
+                self.call_from_thread(target_c.update_content, f"**Execution error**: {exc}")
             except Exception:
                 pass
         finally:
-            if getattr(assistant_card, "is_generating", False):
+            worker_sid = getattr(assistant_card, "session_id", None) or getattr(self, "current_session_id", "")
+            active_c = assistant_card
+            is_still_active_worker = True
+            if hasattr(self, "_active_generation_data") and worker_sid in self._active_generation_data:
+                reg_c = self._active_generation_data[worker_sid].get("card")
+                if reg_c is not None and getattr(reg_c, "turn_id", -1) != getattr(assistant_card, "turn_id", -2):
+                    is_still_active_worker = False
+                else:
+                    active_c = reg_c or assistant_card
+                    del self._active_generation_data[worker_sid]
+
+            if is_still_active_worker and worker_sid and hasattr(self, "_active_generation_sessions"):
+                self._active_generation_sessions.discard(str(worker_sid))
+            if getattr(active_c, "is_generating", False) and is_still_active_worker:
+                self.call_from_thread(active_c.finish, 0.0, 0, 0.0)
+            if getattr(assistant_card, "is_generating", False) and assistant_card is not active_c:
                 self.call_from_thread(assistant_card.finish, 0.0, 0, 0.0)
-            self.is_generating = False
-            self.abort_requested = False
-            self.call_from_thread(self._save_current_session)
             self.call_from_thread(self._update_meta_bars)
-            self.call_from_thread(self._maybe_auto_name_session)
+            if is_still_active_worker:
+                self.abort_requested = False
+            if self.current_session_id == worker_sid:
+                self.call_from_thread(self._save_current_session)
+                if is_still_active_worker:
+                    self.call_from_thread(self._maybe_auto_name_session)
+            else:
+                self._save_session_data(
+                    session_id=worker_sid,
+                    messages=getattr(assistant_card, "_worker_messages", self.messages),
+                    transcript=getattr(assistant_card, "_worker_transcript", self._transcript),
+                )
 
     def _generation_worker_impl(
         self,
         assistant_card: AssistantTurnCard,
     ) -> None:
         start_time = time.time()
-        worker_session_id = self.current_session_id
+        worker_session_id = str(getattr(assistant_card, "session_id", "") or self.current_session_id)
+        assistant_card.session_id = worker_session_id
+        if not hasattr(assistant_card, "_worker_messages"):
+            assistant_card._worker_messages = list(self.messages)
+        if not hasattr(assistant_card, "_worker_transcript"):
+            assistant_card._worker_transcript = list(self._transcript)
+        worker_messages = assistant_card._worker_messages
+        worker_transcript = assistant_card._worker_transcript
+
+        def _card() -> AssistantTurnCard:
+            if (
+                self.current_session_id == worker_session_id
+                and self._current_assistant_card is not None
+                and getattr(self._current_assistant_card, "turn_id", -1) == getattr(assistant_card, "turn_id", -2)
+            ):
+                return self._current_assistant_card
+            active_info = getattr(self, "_active_generation_data", {}).get(worker_session_id)
+            if active_info and active_info.get("card") and getattr(active_info.get("card"), "turn_id", -1) == getattr(assistant_card, "turn_id", -2):
+                return active_info["card"]
+            return assistant_card
+
+        def _call_card(method_name: str, *args, **kwargs) -> None:
+            def _runner():
+                c = _card()
+                m = getattr(c, method_name, None)
+                if m:
+                    try:
+                        m(*args, **kwargs)
+                    except Exception:
+                        pass
+            self.call_from_thread(_runner)
+
+        def _add_message(msg: Dict[str, Any]) -> None:
+            worker_messages.append(msg)
+            if self.current_session_id == worker_session_id and worker_messages is not self.messages:
+                if not (self.messages and self.messages[-1] == msg):
+                    self.messages.append(msg)
+
+        def _add_transcript(item: Dict[str, Any]) -> None:
+            worker_transcript.append(item)
+            if self.current_session_id == worker_session_id and worker_transcript is not self._transcript:
+                self._transcript.append(item)
+
+        def _rec_assistant(t_str: str) -> None:
+            self._record_assistant_text(t_str, target_transcript=worker_transcript)
+            if self.current_session_id == worker_session_id and worker_transcript is not self._transcript:
+                self._record_assistant_text(t_str, target_transcript=self._transcript)
+
+        def _rec_tool(t_name: str, t_target: str, t_res: Any) -> None:
+            self._record_tool(t_name, t_target, t_res, target_transcript=worker_transcript)
+            if self.current_session_id == worker_session_id and worker_transcript is not self._transcript:
+                self._record_tool(t_name, t_target, t_res, target_transcript=self._transcript)
+
         current_turn_id = int(getattr(assistant_card, "turn_id", -1) or self._turn_counter or 0)
         if current_turn_id > 0:
             self._capture_workspace_snapshot(current_turn_id)
-        self.agent_ctx.session_id = self.current_session_id
+        self.agent_ctx.session_id = worker_session_id
+        if hasattr(self, "agent_ctx") and self.agent_ctx is not None:
+            self.agent_ctx.workdir = self.workdir
+            self.agent_ctx.current_cwd = self.workdir
+        if hasattr(self, "agent_runner") and self.agent_runner is not None:
+            self.agent_runner.workdir = self.workdir
         api_key = self.settings.get_api_key(self.current_provider)
         gen_params = dict(self.settings.config.get("generation", {}) or {})
         gen_params["workdir"] = self.workdir
@@ -4446,7 +4820,7 @@ class CMDAICodeTUI(App):
                 # card for it was noise in every single MCP turn. The model
                 # still receives the full result.
                 return
-            self.call_from_thread(assistant_card.add_tool, tool_name, target)
+            _call_card("add_tool", tool_name, target)
             self.call_from_thread(self._scroll_chat_to_end_if_enabled)
 
         self._turn_diff_stats = {"added": 0, "deleted": 0}
@@ -4456,7 +4830,7 @@ class CMDAICodeTUI(App):
                 # No card was started, so finish_tool must not run either: with
                 # nothing running it falls back to the last block and would
                 # paint this result onto the previous tool.
-                self._record_tool(tool_name, target, res)
+                _rec_tool(tool_name, target, res)
                 self.call_from_thread(self.refresh)
                 return
             if tool_name in ("write", "edit") and res.get("success"):
@@ -4470,8 +4844,8 @@ class CMDAICodeTUI(App):
                     adds = len(str(res.get("content", "")).splitlines()) or 1
                 self._turn_diff_stats["added"] += adds
                 self._turn_diff_stats["deleted"] += dels
-            self._record_tool(tool_name, target, res)
-            self.call_from_thread(assistant_card.finish_tool, res)
+            _rec_tool(tool_name, target, res)
+            _call_card("finish_tool", res)
             self.call_from_thread(self._scroll_chat_to_end_if_enabled)
             self.call_from_thread(self.refresh)
 
@@ -4491,16 +4865,17 @@ class CMDAICodeTUI(App):
             )
             if needs_load:
                 load_start = time.time()
-                loaded = self.gguf_loader.load_model(self.current_model_id)
+                target_n_ctx = min(32768, self._dynamic_limit())
+                loaded = self.gguf_loader.load_model(self.current_model_id, n_ctx=target_n_ctx)
                 load_elapsed = time.time() - load_start
                 if not loaded:
                     err_msg = f"Model '{self.current_model_id}' not found or could not be loaded."
-                    self.call_from_thread(assistant_card.finish_loading, load_elapsed)
-                    self.call_from_thread(assistant_card.update_content, f"**Error**: {err_msg}")
-                    self.call_from_thread(assistant_card.finish, load_elapsed, 0, 0.0)
+                    _call_card("finish_loading", load_elapsed)
+                    _call_card("update_content", f"**Error**: {err_msg}")
+                    _call_card("finish", load_elapsed, 0, 0.0)
                     self.is_generating = False
                     return
-                self.call_from_thread(assistant_card.finish_loading, load_elapsed)
+                _call_card("finish_loading", load_elapsed)
 
         turn = 0
         total_tokens = 0
@@ -4508,9 +4883,18 @@ class CMDAICodeTUI(App):
         total_completion_tokens = 0
         total_gen_time = 0.0
         last_tool_failed = [False]
+        had_api_err = False
+        completed_subagent_roles: Dict[str, str] = {}
+        tool_call_counts: Dict[str, int] = {}
+        stop_after_subagent_repeat = [False]
+        empty_after_tools_nudged = [False]
+        max_agent_turns = 15 if self.current_provider == "local_gguf" else 25
+        is_worker_aborted = lambda: bool(self.abort_requested or getattr(assistant_card, "abort_requested", False))
 
-        while not self.abort_requested:
+        while not is_worker_aborted() and not stop_after_subagent_repeat[0]:
             turn += 1
+            if turn > max_agent_turns:
+                break
             step_chunks: List[str] = []
             step_thinking: List[str] = []
             self._live_step_chunks = step_chunks
@@ -4529,9 +4913,9 @@ class CMDAICodeTUI(App):
                 if not first_token_time[0]:
                     first_token_time[0] = now_t
                 last_token_time[0] = now_t
-                tb = getattr(assistant_card, "thinking_block", None)
+                tb = getattr(_card(), "thinking_block", None)
                 if tb and not tb.is_finished:
-                    self.call_from_thread(assistant_card.finish_thinking)
+                    _call_card("finish_thinking")
                 if self.abort_requested:
                     return
                 step_chunks.append(chunk)
@@ -4547,7 +4931,7 @@ class CMDAICodeTUI(App):
                     pre_slice = accumulated[pre_tool_start[0]:]
                     clean_pre = self.agent_runner.strip_xml_tool_calls(pre_slice) if self.agent_runner else pre_slice
                     clean_pre = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', clean_pre, flags=re.IGNORECASE).strip()
-                    self.call_from_thread(assistant_card.update_pre_tool_content, clean_pre)
+                    _call_card("update_pre_tool_content", clean_pre)
                     step_rendered[0] = len(accumulated)
                     return
 
@@ -4558,19 +4942,19 @@ class CMDAICodeTUI(App):
                     fresh = accumulated[step_rendered[0]:]
                     tl_name, tl_tgt, live_content = self._extract_live_tool_stream(fresh)
                     if tl_name and (tl_tgt or tl_name not in ("write", "edit", "read")):
-                        self.call_from_thread(assistant_card.set_generating_tool, tl_name, tl_tgt, live_content)
+                        _call_card("set_generating_tool", tl_name, tl_tgt, live_content)
                     else:
-                        self.call_from_thread(assistant_card.clear_generating_tool)
+                        _call_card("clear_generating_tool")
 
                     clean_preview = self.agent_runner.strip_xml_tool_calls(fresh) if self.agent_runner else fresh
                     clean_preview = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', clean_preview, flags=re.IGNORECASE)
                     clean_preview = re.sub(
-                        r'(?:<(?:tool:|\/tool_call:?|tool_call:?|\|tool_call>call:)[a-zA-Z0-9_-]+.*$|```(?:json)?\s*\[?\s*\{.*$)',
+                        r'(?:<(?:tool:|\/tool_call:?|tool_call:?|\|tool_call>call:)[a-zA-Z0-9_-]*.*$|```(?:json)?\s*\[?\s*\{.*$|<[a-zA-Z0-9_:|/-]*$)',
                         '',
                         clean_preview,
                         flags=re.DOTALL | re.IGNORECASE,
                     )
-                    self.call_from_thread(assistant_card.update_content, clean_preview)
+                    _call_card("update_content", clean_preview)
                     self.call_from_thread(self._scroll_chat_to_end_if_enabled)
 
             last_thinking_render = [0.0]
@@ -4588,7 +4972,7 @@ class CMDAICodeTUI(App):
                 """A tool the provider ran itself, mid-turn."""
                 if str(name or "").lower() == "question":
                     return
-                self.call_from_thread(assistant_card.finish_thinking)
+                _call_card("finish_thinking")
                 if phase in ("generating", "running"):
                     accumulated_now = "".join(step_chunks)
                     pending = accumulated_now[step_rendered[0]:]
@@ -4601,16 +4985,14 @@ class CMDAICodeTUI(App):
                             clean_pending,
                             flags=re.DOTALL | re.IGNORECASE,
                         )
-                        self.call_from_thread(assistant_card.update_content, clean_pending)
+                        _call_card("update_content", clean_pending)
                         if clean_pending.strip():
-                            self._record_assistant_text(clean_pending.strip())
+                            _rec_assistant(clean_pending.strip())
                     if not server_tool_running[0]:
                         pre_tool_start[0] = step_rendered[0]
                     step_rendered[0] = len(accumulated_now)
                     server_tool_running[0] = True
-                self.call_from_thread(
-                    assistant_card.note_server_tool, name, phase, detail
-                )
+                _call_card("note_server_tool", name, phase, detail)
                 if phase in ("done", "finished", "failed"):
                     server_tool_running[0] = False
                     server_tools_ran[0] += 1
@@ -4622,7 +5004,7 @@ class CMDAICodeTUI(App):
                         tgt_f = detail.splitlines()[0].split(" (")[0].strip()
                         if tgt_f and tgt_f not in ("(no target)", "ok", "done"):
                             self._last_modified_files.append(tgt_f)
-                    self._record_tool(name, detail, {"success": True, "content": detail})
+                    _rec_tool(name, detail, {"success": True, "content": detail})
 
             def on_thinking(chunk: str) -> None:
                 now_t = time.time()
@@ -4638,75 +5020,10 @@ class CMDAICodeTUI(App):
                 # a cache miss on every token for a model detected mid-stream.
                 step_thinking.append(chunk)
                 now = time.time()
-                self.call_from_thread(assistant_card.append_thinking, chunk)
+                _call_card("append_thinking", chunk)
                 if now - last_thinking_render[0] > 0.05:
                     last_thinking_render[0] = now
                     self.call_from_thread(self._scroll_chat_to_end_if_enabled)
-
-            ctx_limit = self._dynamic_limit()
-            current_toks = estimate_token_count(self.messages)
-            if should_summarize(current_toks, ctx_limit) and len(self.messages) > 1:
-                try:
-                    self.call_from_thread(assistant_card.add_tool, "summarizing", "")
-                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
-
-                    compact_payload = build_summarization_payload(
-                        self.messages[:-1],
-                        last_modified_files=getattr(self, "_last_modified_files", None),
-                        max_budget_tokens=min(2500, max(1200, ctx_limit // 2)),
-                    )
-                    c_resp = ""
-                    try:
-                        if self.current_provider == "local_gguf":
-                            c_resp, _ = self.gguf_loader.stream_chat(
-                                messages=compact_payload,
-                                temperature=0.3,
-                                max_tokens=1024,
-                                model_filename=self.current_model_id,
-                            )
-                        else:
-                            c_resp, _ = stream_chat_completion(
-                                provider_id=self.current_provider,
-                                model_id=self.current_model_id,
-                                messages=compact_payload,
-                                api_key=api_key,
-                                generation_params={"temperature": 0.3, "max_tokens": 1024},
-                            )
-                    except Exception:
-                        c_resp = ""
-
-                    is_err = not c_resp or any(err_kw in str(c_resp).lower() for err_kw in [
-                        "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
-                    ])
-
-                    handoff_content = format_compacted_handoff(
-                        c_resp if not is_err else "",
-                        last_modified_files=getattr(self, "_last_modified_files", None),
-                        lang=detect_conversation_language(self.messages),
-                    )
-                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
-                    last_msg = self.messages[-1]
-                    self.messages = [
-                        {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
-                        {"role": "assistant", "content": handoff_content.strip()},
-                        last_msg,
-                    ]
-                    self.call_from_thread(assistant_card.finish_tool, {"success": True, "summary": handoff_content.strip()})
-                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
-                except Exception:
-                    init_goal = self.messages[0]["content"][:300] if self.messages else ""
-                    last_msg = self.messages[-1] if self.messages else {"role": "user", "content": ""}
-                    handoff_content = format_compacted_handoff(
-                        "",
-                        last_modified_files=getattr(self, "_last_modified_files", None),
-                        lang=detect_conversation_language(self.messages),
-                    )
-                    self.messages = [
-                        {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
-                        {"role": "assistant", "content": handoff_content.strip()},
-                        last_msg,
-                    ]
-                    self.call_from_thread(assistant_card.finish_tool, {"success": True, "summary": handoff_content.strip()})
 
             sys_content = self.system_prompt
             agent_on = self.settings.config.get("agent", {}).get("enabled", True)
@@ -4724,12 +5041,95 @@ class CMDAICodeTUI(App):
                     pinned_section.append(f"--- File: {p_path} ---\n{p_content}\n--- End of {p_path} ---")
                 sys_content += "\n".join(pinned_section)
             from ..agent.tasks import BackgroundTaskManager
-            bg_notes = BackgroundTaskManager.get_instance().get_finished_notifications(session_id=self.current_session_id)
+            bg_notes = BackgroundTaskManager.get_instance().get_finished_notifications(session_id=worker_session_id)
             for note in bg_notes:
-                self.messages.append({"role": "user", "content": note})
+                _add_message({"role": "user", "content": note})
+
+            ctx_limit = self._dynamic_limit()
+            if self.current_provider == "local_gguf":
+                loaded_n_ctx = int(getattr(self.gguf_loader, "current_n_ctx", 0) or 0)
+                if loaded_n_ctx > 0:
+                    ctx_limit = min(ctx_limit, loaded_n_ctx)
+            current_toks = estimate_token_count([{"role": "system", "content": sys_content}] + worker_messages)
+            if should_summarize(current_toks, ctx_limit) and len(worker_messages) > 2:
+                try:
+                    _call_card("add_tool", "summarizing", "")
+                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+
+                    compact_payload = build_summarization_payload(
+                        worker_messages[:-1],
+                        last_modified_files=getattr(self, "_last_modified_files", None),
+                        max_budget_tokens=min(2500, max(1200, ctx_limit // 2)),
+                    )
+                    c_resp = ""
+                    try:
+                        def _on_auto_sum_chunk(chunk: str) -> None:
+                            if chunk:
+                                _call_card("append_summary_chunk", chunk)
+
+                        if self.current_provider == "local_gguf":
+                            c_resp, _ = self.gguf_loader.stream_chat(
+                                messages=compact_payload,
+                                temperature=0.3,
+                                max_tokens=1024,
+                                model_filename=self.current_model_id,
+                                on_chunk=_on_auto_sum_chunk,
+                            )
+                        else:
+                            c_resp, _ = stream_chat_completion(
+                                provider_id=self.current_provider,
+                                model_id=self.current_model_id,
+                                messages=compact_payload,
+                                api_key=api_key,
+                                generation_params={"temperature": 0.3, "max_tokens": 1024},
+                                on_chunk=_on_auto_sum_chunk,
+                            )
+                    except Exception:
+                        c_resp = ""
+
+                    is_err = not c_resp or any(err_kw in str(c_resp).lower() for err_kw in [
+                        "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
+                    ])
+
+                    handoff_content = format_compacted_handoff(
+                        c_resp if not is_err else "",
+                        last_modified_files=getattr(self, "_last_modified_files", None),
+                        lang=detect_conversation_language(worker_messages),
+                    )
+                    init_goal = worker_messages[0]["content"][:300] if worker_messages else ""
+                    last_msg = worker_messages[-1]
+                    worker_messages[:] = [
+                        {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
+                        {"role": "assistant", "content": handoff_content.strip()},
+                        last_msg,
+                    ]
+                    if self.current_session_id == worker_session_id:
+                        self.messages = list(worker_messages)
+                    sum_res = {"success": True, "summary": handoff_content.strip()}
+                    _call_card("finish_tool", sum_res)
+                    _rec_tool("summarizing", "", sum_res)
+                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+                except Exception:
+                    init_goal = worker_messages[0]["content"][:300] if worker_messages else ""
+                    last_msg = worker_messages[-1] if worker_messages else {"role": "user", "content": ""}
+                    handoff_content = format_compacted_handoff(
+                        "",
+                        last_modified_files=getattr(self, "_last_modified_files", None),
+                        lang=detect_conversation_language(worker_messages),
+                    )
+                    worker_messages[:] = [
+                        {"role": "user", "content": "Poprzednie ustalenia i cel projektu:\n" + init_goal},
+                        {"role": "assistant", "content": handoff_content.strip()},
+                        last_msg,
+                    ]
+                    if self.current_session_id == worker_session_id:
+                        self.messages = list(worker_messages)
+                    sum_res = {"success": True, "summary": handoff_content.strip()}
+                    _call_card("finish_tool", sum_res)
+                    _rec_tool("summarizing", "", sum_res)
 
             payload_messages = [{"role": "system", "content": sys_content}]
-            payload_messages.extend(self.messages)
+            payload_messages.extend(worker_messages)
             self._attach_pending_images(payload_messages)
 
             if self.abort_requested:
@@ -4769,9 +5169,12 @@ class CMDAICodeTUI(App):
                     )
             except Exception as stream_exc:
                 if not step_chunks:
-                    err_text = f"API Error ({self.current_provider}): {stream_exc}"
-                    self.call_from_thread(assistant_card.update_content, err_text)
-                    self._record_assistant_text(err_text)
+                    err_text = f"⚠ API Error ({self.current_provider}): {stream_exc}"
+                    _call_card("update_content", err_text)
+                    _call_card("finish", 0.0, 0, 0.0)
+                    _rec_assistant(err_text)
+                    self.call_from_thread(self.notify, f"{err_text[:120]}...", severity="error", title="API Error", timeout=5.0)
+                    had_api_err = True
                 break
             step_stream_end = time.time()
 
@@ -4782,10 +5185,10 @@ class CMDAICodeTUI(App):
                 step_gen_duration = max(0.05, step_stream_end - step_stream_start)
 
             step_think_text = ("".join(step_thinking) or (think if isinstance(think, str) else "") or "").strip()
-            tb = getattr(assistant_card, "thinking_block", None)
+            tb = getattr(_card(), "thinking_block", None)
             think_el = float(getattr(tb, "elapsed", 0.0) or 0.0) if tb else 0.0
             if step_think_text and not getattr(self, "_session_flushed_on_exit", False):
-                self._transcript.append({"kind": "thinking", "text": step_think_text, "elapsed": think_el})
+                _add_transcript({"kind": "thinking", "text": step_think_text, "elapsed": think_el})
 
             if self.abort_requested:
                 # Keep what was already generated: dropping it left a saved
@@ -4794,11 +5197,11 @@ class CMDAICodeTUI(App):
                 partial_clean = (self.agent_runner.strip_xml_tool_calls(partial)
                                  if self.agent_runner else partial).strip()
                 if partial_clean and not getattr(self, "_session_flushed_on_exit", False):
-                    self.messages.append({"role": "assistant", "content": partial_clean})
-                    self._record_assistant_text(partial_clean)
+                    _add_message({"role": "assistant", "content": partial_clean})
+                    _rec_assistant(partial_clean)
                 break
 
-            self.call_from_thread(assistant_card.finish_thinking)
+            _call_card("finish_thinking")
 
             step_text = "".join(step_chunks) or resp or ""
             s_low = step_text.lower().strip()
@@ -4824,17 +5227,18 @@ class CMDAICodeTUI(App):
                 or ("503" in s_low and "service" in s_low)
             )
             if is_api_err:
-                self.abort_requested = True
                 self.is_generating = False
-                self.call_from_thread(assistant_card.finish_thinking)
-                self.call_from_thread(assistant_card.clear_generating_tool)
+                _call_card("finish_thinking")
+                _call_card("clear_generating_tool")
                 clean_err = step_text.strip()
                 if not clean_err.startswith("⚠ API Error"):
                     clean_err = f"⚠ API Error: {clean_err}"
-                self.call_from_thread(assistant_card.update_content, clean_err)
-                self.call_from_thread(assistant_card.finish, 0.0, 0, 0.0)
+                _call_card("update_content", clean_err)
+                _call_card("finish", 0.0, 0, 0.0)
                 self.call_from_thread(self._update_meta_bars)
-                self._record_assistant_text(clean_err)
+                self.call_from_thread(self.notify, f"{clean_err[:120]}...", severity="error", title="API Error", timeout=6.0)
+                _rec_assistant(clean_err)
+                had_api_err = True
                 break
 
             step_p_tok = step_usage.get("prompt_tokens")
@@ -4862,19 +5266,19 @@ class CMDAICodeTUI(App):
             det_srv = getattr(self.agent_runner, "last_detached_server_tool", None) if self.agent_runner else None
             if det_srv:
                 self.agent_runner.last_detached_server_tool = None
-                self.call_from_thread(assistant_card.clear_generating_tool)
+                _call_card("clear_generating_tool")
                 clean_pre_det = (self.agent_runner.strip_xml_tool_calls(step_text) if self.agent_runner else step_text).strip()
                 if clean_pre_det:
-                    self.messages.append({"role": "assistant", "content": clean_pre_det})
-                    self._record_assistant_text(clean_pre_det)
+                    _add_message({"role": "assistant", "content": clean_pre_det})
+                    _rec_assistant(clean_pre_det)
                 det_feedback = self.agent_runner.format_tool_result_for_llm("subagent", {
                     "success": True,
                     "background": True,
                     "task_id": det_srv.get("task_id", ""),
                     "roles": [det_srv.get("name", "Subagent")],
                 })
-                self.messages.append({"role": "user", "content": det_feedback})
-                self.call_from_thread(assistant_card.prepare_for_next_turn)
+                _add_message({"role": "user", "content": det_feedback})
+                _call_card("prepare_for_next_turn")
                 continue
 
             if not step_text.strip():
@@ -4892,11 +5296,11 @@ class CMDAICodeTUI(App):
                             )
                         )
                     if not step_text.strip():
-                        self.messages.append({
+                        _add_message({
                             "role": "assistant",
                             "content": f"<think>\n{step_think_text.strip()}\n</think>",
                         })
-                        self.messages.append({
+                        _add_message({
                             "role": "user",
                             "content": (
                                 "Zakończyłeś fazę myślenia (thinking), ale nie wygenerowałeś odpowiedzi ani wywołania narzędzia. "
@@ -4905,58 +5309,76 @@ class CMDAICodeTUI(App):
                                 "lub udziel pełnej odpowiedzi."
                             ),
                         })
-                        self.call_from_thread(assistant_card.prepare_for_next_turn)
+                        _call_card("prepare_for_next_turn")
                         continue
                 if not step_text.strip():
                     if turn == 1 and not self.abort_requested:
-                        self.call_from_thread(assistant_card.update_content, "*(Model returned an empty response. Check model connection or try another model in /models)*")
+                        _call_card("update_content", "*(Model returned an empty response. Check model connection or try another model in /models)*")
+                    elif (
+                        turn > 1
+                        and not empty_after_tools_nudged[0]
+                        and not self.abort_requested
+                        and not getattr(_card(), "raw_text", "").strip()
+                    ):
+                        empty_after_tools_nudged[0] = True
+                        _add_message({
+                            "role": "user",
+                            "content": (
+                                "Narzędzia zostały już wykonane. Napisz teraz pełną, szczegółową odpowiedź dla użytkownika "
+                                "na podstawie powyższych wyników narzędzi (bez wywoływania kolejnych tagów <tool:...>, chyba że chcesz odczytać istniejący plik z listy ls)."
+                            ),
+                        })
+                        _call_card("prepare_for_next_turn")
+                        continue
                     break
 
             if any(kw in step_text.lower() for kw in ["exceed context window", "context_length_exceeded", "maximum context length", "too many tokens"]):
-                init_msg = self.messages[0] if self.messages else {"role": "user", "content": ""}
-                last_msg = self.messages[-1] if len(self.messages) > 1 else {"role": "user", "content": ""}
+                init_msg = worker_messages[0] if worker_messages else {"role": "user", "content": ""}
+                last_msg = worker_messages[-1] if len(worker_messages) > 1 else {"role": "user", "content": ""}
                 handoff = format_compacted_handoff(
                     "",
                     last_modified_files=getattr(self, "_last_modified_files", None),
-                    lang=detect_conversation_language(self.messages),
+                    lang=detect_conversation_language(worker_messages),
                 )
-                self.messages = [
+                worker_messages[:] = [
                     init_msg,
                     {"role": "assistant", "content": handoff},
                     last_msg,
                 ]
-                self.call_from_thread(assistant_card.update_last_body, "⚠️ Wykryto przekroczenie limitu kontekstu. Pamięć podręczna została pomyślnie skompresowana i zresetowana. Kontynuuję pracę...")
-                self.call_from_thread(assistant_card.prepare_for_next_turn)
+                if self.current_session_id == worker_session_id:
+                    self.messages = list(worker_messages)
+                _call_card("update_last_body", "⚠️ Wykryto przekroczenie limitu kontekstu. Pamięć podręczna została pomyślnie skompresowana i zresetowana. Kontynuuję pracę...")
+                _call_card("prepare_for_next_turn")
                 continue
 
             segments = self.agent_runner.parse_chronological_segments(step_text) if self.agent_runner else [("text", step_text)]
             tool_calls = [data for kind, data in segments if kind == "tool"]
 
             if not tool_calls:
-                self.call_from_thread(assistant_card.clear_generating_tool)
+                _call_card("clear_generating_tool")
                 clean_step = self.agent_runner.strip_xml_tool_calls(step_text) if self.agent_runner else step_text
                 if step_rendered[0] > 0:
                     raw_tail = step_text[step_rendered[0]:]
                     tail_text = (self.agent_runner.strip_xml_tool_calls(raw_tail) if self.agent_runner else raw_tail).strip()
                     tail_text = re.sub(r'</?(?:tool_response|tool_call|function_call)[^>]*>', '', tail_text, flags=re.IGNORECASE).strip()
                     if tail_text:
-                        self.call_from_thread(assistant_card.update_last_body, tail_text)
+                        _call_card("update_last_body", tail_text)
                     elif server_tools_ran[0] == 0 and clean_step.strip():
-                        self.call_from_thread(assistant_card.update_last_body, clean_step)
+                        _call_card("update_last_body", clean_step)
                 else:
-                    self.call_from_thread(assistant_card.update_last_body, clean_step)
+                    _call_card("update_last_body", clean_step)
                 if clean_step.strip():
-                    self.messages.append({"role": "assistant", "content": clean_step})
-                    self._record_assistant_text(clean_step)
+                    _add_message({"role": "assistant", "content": clean_step})
+                    _rec_assistant(clean_step)
 
                 if last_tool_failed[0]:
                     last_tool_failed[0] = False
                     if turn < 8 and not self.abort_requested:
-                        self.messages.append({
+                        _add_message({
                             "role": "user",
                             "content": "Poprzednie wywołanie narzędzia zakończyło się błędem. Popraw parametry narzędzia i kontynuuj zadanie aż do pełnego ukończenia.",
                         })
-                        self.call_from_thread(assistant_card.prepare_for_next_turn)
+                        _call_card("prepare_for_next_turn")
                         continue
 
                 # If the response was cut off abruptly mid-sentence, stopped right after
@@ -5004,27 +5426,44 @@ class CMDAICodeTUI(App):
                     )
                 )
 
-                is_short_action_prompt = False
-                if turn == 1 and self.messages and len(c_str) < 180:
-                    last_user_prompt = ""
-                    for m in reversed(self.messages):
-                        if m.get("role") == "user":
-                            cand_u = str(m.get("content", "")).strip()
-                            if not cand_u.startswith("<tool_response"):
-                                last_user_prompt = cand_u.lower()
+                last_user_prompt = ""
+                _nudge_prefixes = (
+                    "<tool_response",
+                    "twoje poprzednie wywołanie",
+                    "w trybie plan musisz",
+                    "wywołaj teraz subagenta",
+                    "nie zatrzymuj się na samej",
+                    "kontynuuj na podstawie wykonanych",
+                )
+                for m in reversed(worker_messages):
+                    if m.get("role") == "user":
+                        cand_u = str(m.get("content", "")).strip()
+                        cand_low = cand_u.lower()
+                        if cand_u and not any(cand_low.startswith(p) for p in _nudge_prefixes):
+                            last_user_prompt = cand_low
                             break
-                    action_triggers = (
-                        "start", "zrób", "stwórz", "napisz", "dodaj", "todo", "plan",
-                        "implement", "create", "make", "fix", "wywołaj", "uruchom",
-                        "oceń", "przeanalizuj", "sprawdź", "subagent", "przetestuj",
-                    )
-                    if last_user_prompt and any(t in last_user_prompt for t in action_triggers):
-                        is_short_action_prompt = True
+
+                action_triggers = (
+                    "start", "zrób", "stwórz", "napisz", "dodaj", "todo", "plan",
+                    "implement", "create", "make", "fix", "wywołaj", "uruchom",
+                    "oceń", "przeanalizuj", "sprawdź", "subagent", "przetestuj",
+                )
+                has_action_trigger = bool(
+                    last_user_prompt and any(t in last_user_prompt for t in action_triggers)
+                )
+                is_short_action_prompt = bool(
+                    turn == 1
+                    and len(c_str) < 180
+                    and has_action_trigger
+                    and not completed_subagent_roles
+                )
 
                 needs_plan_recording = (
                     self.agent_mode == "plan"
+                    and has_action_trigger
+                    and "subagent" not in last_user_prompt
                     and not (getattr(self.agent_ctx, "todo_list", None) or [])
-                    and turn <= 3
+                    and turn <= 2
                 )
 
                 if (
@@ -5041,7 +5480,7 @@ class CMDAICodeTUI(App):
                 ):
                     if had_unclosed_tool_tag or stopped_empty_after_thinking:
                         if step_text.strip() and not clean_step.strip():
-                            self.messages.append({"role": "assistant", "content": step_text.strip()})
+                            _add_message({"role": "assistant", "content": step_text.strip()})
                         nudge_content = (
                             "Twoje poprzednie wywołanie narzędzia zostało urwane lub nie zostało domknięte tagiem zamykającym. "
                             "Wyemituj teraz kompletny, domknięty tag narzędzia (np. <tool:subagent name=\"...\" system=\"...\">zadanie</tool:subagent>, "
@@ -5053,41 +5492,47 @@ class CMDAICodeTUI(App):
                             "oraz przedstawić zwięzłe podsumowanie. Wywołaj narzędzie <tool:todo> teraz."
                         )
                     elif intent_only or is_short_action_prompt:
-                        nudge_content = (
-                            "Nie zatrzymuj się na samej zapowiedzi ani opisie intencji. Przejdź natychmiast do działania "
-                            "i wywołaj odpowiednie narzędzie (<tool:subagent>, <tool:todo>, <tool:read>, <tool:ls>, <tool:write>, <tool:command> itp.)."
-                        )
+                        if "subagent" in last_user_prompt:
+                            nudge_content = (
+                                "Wywołaj teraz subagenta za pomocą dokładnego tagu XML:\n"
+                                "<tool:subagent name=\"Code Reviewer\" system=\"Inspect the project files using ls and read, and write a detailed evaluation report.\">Oceń aplikację w obecnym katalogu</tool:subagent>"
+                            )
+                        else:
+                            nudge_content = (
+                                "Nie zatrzymuj się na samej zapowiedzi ani opisie intencji. Przejdź natychmiast do działania "
+                                "i wywołaj odpowiednie narzędzie (<tool:subagent>, <tool:todo>, <tool:read>, <tool:ls>, <tool:write>, <tool:command> itp.)."
+                            )
                     else:
                         nudge_content = (
                             "Kontynuuj na podstawie wykonanych narzędzi i przedstaw pełną odpowiedź/plan "
                             "(nie zatrzymuj się na samym wstępie ani nie przerywaj po sprawdzeniu plików)."
                         )
-                    self.messages.append({
+                    _add_message({
                         "role": "user",
                         "content": nudge_content,
                     })
-                    self.call_from_thread(assistant_card.prepare_for_next_turn)
+                    _call_card("prepare_for_next_turn")
                     continue
 
                 try:
                     from ..agent.tasks import BackgroundTaskManager
                     bg_mgr_end = BackgroundTaskManager.get_instance()
-                    if bg_mgr_end.has_finished_notifications(session_id=self.current_session_id) and not self.abort_requested:
-                        self.call_from_thread(assistant_card.prepare_for_next_turn)
+                    if bg_mgr_end.has_finished_notifications(session_id=worker_session_id) and not self.abort_requested:
+                        _call_card("prepare_for_next_turn")
                         continue
                 except Exception:
                     pass
 
                 break
             else:
-                self.call_from_thread(assistant_card.clear_generating_tool)
-                self.messages.append({"role": "assistant", "content": step_text})
+                _call_card("clear_generating_tool")
+                _add_message({"role": "assistant", "content": step_text})
 
                 first_seg = segments[0] if segments else None
                 first_text = first_seg[1] if (first_seg and first_seg[0] == "text") else ""
                 if first_text:
-                    self.call_from_thread(assistant_card.update_last_body, first_text)
-                    self._record_assistant_text(first_text)
+                    _call_card("update_last_body", first_text)
+                    _rec_assistant(first_text)
 
                 remaining_segments = segments[1:] if (first_seg and first_seg[0] == "text") else segments
 
@@ -5101,12 +5546,12 @@ class CMDAICodeTUI(App):
                         if first_text and text_chunk.strip() == first_text.strip():
                             idx += 1
                             continue
-                        self.call_from_thread(assistant_card.append_text_block, text_chunk)
-                        self._record_assistant_text(text_chunk)
+                        _call_card("append_text_block", text_chunk)
+                        _rec_assistant(text_chunk)
                         self.call_from_thread(self._scroll_chat_to_end_if_enabled)
                         idx += 1
                     elif kind == "tool":
-                        self.call_from_thread(assistant_card.finish_thinking)
+                        _call_card("finish_thinking")
                         tool_name, args = data
                         if tool_name == "subagent":
                             # A batch of N <tool:subagent> calls becomes N
@@ -5123,43 +5568,74 @@ class CMDAICodeTUI(App):
                             from ..agent.tasks import BackgroundTaskManager
                             from ..agent.runner import clean_subagent_call
                             bg_mgr = BackgroundTaskManager.get_instance()
+                            if hasattr(self, "agent_runner"):
+                                self.agent_runner.workdir = self.workdir
+                            if hasattr(self, "agent_ctx"):
+                                self.agent_ctx.workdir = self.workdir
                             batch = [clean_subagent_call(a) for a in batch]
+                            if self.current_provider == "local_gguf" and completed_subagent_roles:
+                                prev_reports = [
+                                    completed_subagent_roles.get(str(c.get("role") or "Subagent").lower(), "")
+                                    for c in batch
+                                ]
+                                prev_report_text = "\n\n".join(r.strip() for r in prev_reports if r and r.strip())
+                                if prev_report_text:
+                                    _call_card("clear_generating_tool")
+                                    _call_card("append_text_block", prev_report_text)
+                                    _add_message({"role": "assistant", "content": prev_report_text})
+                                    _rec_assistant(prev_report_text)
+                                    self.call_from_thread(self._scroll_chat_to_end_if_enabled)
+                                    stop_after_subagent_repeat[0] = True
+                                    break
                             by_role: Dict[str, List[Any]] = {}
+                            by_sid: Dict[str, Any] = {}
                             for n, call_args in enumerate(batch, start=1):
                                 self.stats["tools_run"] += 1
                                 r_name = call_args.get("role") or "Subagent"
                                 g_text = call_args.get("goal") or ""
                                 sid = f"subagent_{turn}_{n}"
                                 call_args["_sid"] = sid
+                                if not call_args.get("workdir"):
+                                    call_args["workdir"] = self.workdir
                                 bg_mgr.register_subagent(sid, role=r_name, task=g_text, session_id=self.current_session_id)
                                 blk = self._new_subagent_block(
-                                    assistant_card,
+                                    _card(),
                                     role=r_name,
                                     goal=g_text,
                                     system=call_args.get("system") or "",
                                     index=n,
                                     total=len(batch),
+                                    subagent_id=sid,
                                 )
                                 if blk is not None:
                                     blk.subagent_id = sid
                                     by_role.setdefault(blk.subagent_role, []).append(blk)
+                                    by_sid[sid] = blk
 
                             def _on_sub_progress(prog: Any, _by_role: Dict[str, List[Any]] = by_role) -> None:
                                 t_name = getattr(prog, "current_tool", "") or ""
                                 t_arg = getattr(prog, "tool_arg", "") or ""
-                                for cand in _by_role.get(getattr(prog, "role", ""), []):
+                                p_role = str(getattr(prog, "role", "") or "")
+                                targets = []
+                                for cand in _by_role.get(p_role, []):
                                     if getattr(cand, "subagent_id", "") and t_name:
                                         bg_mgr.update_subagent_tool(cand.subagent_id, t_name, t_arg)
-                                    if getattr(cand, "tool_running", False):
-                                        try:
-                                            if getattr(cand, "is_mounted", False):
-                                                self.call_from_thread(cand.set_subagent_progress, prog)
-                                        except Exception:
-                                            pass
-                                        return
+                                    if cand not in targets and getattr(cand, "tool_running", False):
+                                        targets.append(cand)
+                                for tgt in targets:
+                                    try:
+                                        self.call_from_thread(tgt.set_subagent_progress, prog)
+                                    except Exception:
+                                        pass
 
                             def _sub_model_call(history: List[Dict[str, Any]], task: Any = None) -> str:
-                                if self.abort_requested:
+                                task_sid = (getattr(task, "context", {}) or {}).get("subagent_id", "") if task and isinstance(getattr(task, "context", None), dict) else ""
+                                is_aborted_check = lambda: (
+                                    self.abort_requested
+                                    or getattr(task, "abort_requested", False)
+                                    or (bool(task_sid) and bg_mgr.is_subagent_cancelled(task_sid))
+                                )
+                                if is_aborted_check():
                                     return ""
                                 sub_params = dict(gen_params)
                                 workdir_target = (
@@ -5195,7 +5671,7 @@ class CMDAICodeTUI(App):
                                 sub_thinking_chunks: List[str] = []
 
                                 def _on_sub_thinking(chunk: str) -> None:
-                                    if self.abort_requested:
+                                    if is_aborted_check():
                                         return
                                     sub_thinking_chunks.append(chunk)
                                     full_think = "".join(sub_thinking_chunks)
@@ -5226,7 +5702,7 @@ class CMDAICodeTUI(App):
                                             pass
 
                                 def _on_sub_token(chunk: str) -> None:
-                                    if self.abort_requested:
+                                    if is_aborted_check():
                                         return
                                     sub_chunks.append(chunk)
                                     now_t = time.time()
@@ -5335,7 +5811,7 @@ class CMDAICodeTUI(App):
                                         temperature=sub_params.get("temperature", 0.3),
                                         max_tokens=sub_params.get("max_tokens", 0),
                                         model_filename=sub_model,
-                                        is_aborted=lambda: self.abort_requested,
+                                        is_aborted=is_aborted_check,
                                         on_token=_on_sub_token,
                                         on_thinking=_on_sub_thinking,
                                     )
@@ -5348,7 +5824,7 @@ class CMDAICodeTUI(App):
                                         messages=history,
                                         api_key=sub_key,
                                         generation_params=sub_params,
-                                        is_aborted=lambda: self.abort_requested,
+                                        is_aborted=is_aborted_check,
                                         on_token=_on_sub_token,
                                         on_thinking=_on_sub_thinking,
                                         on_tool=_hook_server_tool,
@@ -5367,7 +5843,8 @@ class CMDAICodeTUI(App):
                                 return txt or ""
 
                             sub_res_box: List[Dict[str, Any]] = [{}]
-                            want_bg = any(
+                            is_local_sub = self._subagent_target()[0] in ("local_gguf", "local", "llama_cpp", "ollama")
+                            want_bg = (not is_local_sub) and any(
                                 str(c.get("background", "")).strip().lower() in ("true", "1", "yes")
                                 for c in batch
                             )
@@ -5377,7 +5854,7 @@ class CMDAICodeTUI(App):
                                     res_b = self.agent_runner.execute_subagents(
                                         batch,
                                         on_progress=_on_sub_progress,
-                                        is_local=self._subagent_target()[0] in ("local_gguf", "local", "llama_cpp", "ollama"),
+                                        is_local=is_local_sub,
                                         model_call=_sub_model_call,
                                     )
                                 except Exception as exc_b:
@@ -5386,20 +5863,55 @@ class CMDAICodeTUI(App):
                                 matched_agents = _match_agents_to_calls(batch, res_b.get("subagents", []))
                                 for call_args, agent in zip(batch, matched_agents):
                                     r_key = call_args.get("role") or agent.get("role", "")
-                                    cands = by_role.get(r_key, []) or by_role.get(agent.get("role", ""), [])
-                                    target_cand = next((c for c in cands if getattr(c, "tool_running", False)), cands[-1] if cands else None)
-                                    if target_cand is not None:
-                                        self.call_from_thread(target_cand.finish_subagent, agent)
-                                    sid = call_args.get("_sid")
+                                    sid = call_args.get("_sid") or agent.get("subagent_id")
+                                    res_sum = str(agent.get("summary", "") or "")
+                                    if r_key and res_sum:
+                                        completed_subagent_roles[str(r_key).lower()] = res_sum
+                                    st = str(agent.get("status", "finished") or "finished")
                                     if sid:
-                                        res_sum = str(agent.get("summary", "") or "")
-                                        st = str(agent.get("status", "finished") or "finished")
                                         bg_mgr.finish_subagent(
                                             sid,
                                             status="finished" if st in ("completed", "finished") else "failed",
                                             result=res_sum,
                                         )
-                                        if getattr(target_cand, "is_backgrounded", False) or want_bg:
+                                    finish_targets = []
+                                    if sid and sid in by_sid:
+                                        finish_targets.append(by_sid[sid])
+                                    for c in by_role.get(r_key, []):
+                                        if c not in finish_targets and (not sid or getattr(c, "subagent_id", "") == sid):
+                                            finish_targets.append(c)
+                                    if not finish_targets:
+                                        for cands in by_role.values():
+                                            for c in cands:
+                                                if c not in finish_targets and getattr(c, "tool_running", False):
+                                                    finish_targets.append(c)
+                                    target_cand = finish_targets[0] if finish_targets else None
+                                    was_bg = bool((target_cand and getattr(target_cand, "is_backgrounded", False)) or want_bg)
+                                    for item in worker_transcript:
+                                        if item.get("kind") == "subagent" and (
+                                            str(item.get("agent", {}).get("subagent_id", "")) == str(sid)
+                                            or (not sid and item.get("role") == r_key)
+                                        ):
+                                            item["agent"] = dict(agent)
+                                            if was_bg:
+                                                item["agent"]["is_backgrounded"] = True
+                                                item["is_backgrounded"] = True
+                                    if self.current_session_id == worker_session_id:
+                                        for item in self._transcript:
+                                            if item.get("kind") == "subagent" and (
+                                                str(item.get("agent", {}).get("subagent_id", "")) == str(sid)
+                                                or (not sid and item.get("role") == r_key)
+                                            ):
+                                                item["agent"] = dict(agent)
+                                                if was_bg:
+                                                    item["agent"]["is_backgrounded"] = True
+                                                    item["is_backgrounded"] = True
+                                    for tgt in finish_targets:
+                                        try:
+                                            self.call_from_thread(tgt.finish_subagent, agent)
+                                        except Exception:
+                                            pass
+                                    if was_bg:
                                             try:
                                                 self.call_from_thread(
                                                     self.notify,
@@ -5411,7 +5923,14 @@ class CMDAICodeTUI(App):
                                             except Exception:
                                                 pass
                                 try:
-                                    self.call_from_thread(self._save_current_session)
+                                    if self.current_session_id == worker_session_id:
+                                        self.call_from_thread(self._save_current_session)
+                                    else:
+                                        self._save_session_data(
+                                            session_id=worker_session_id,
+                                            messages=worker_messages,
+                                            transcript=worker_transcript,
+                                        )
                                 except Exception:
                                     pass
 
@@ -5443,6 +5962,7 @@ class CMDAICodeTUI(App):
                                 first_sid = sids[0] if sids else ""
                                 for b_list in by_role.values():
                                     for cand in b_list:
+                                        cand.is_backgrounded = True
                                         self.call_from_thread(cand.mark_backgrounded, first_sid)
                                 sub_res = {
                                     "success": True,
@@ -5456,7 +5976,7 @@ class CMDAICodeTUI(App):
                                 sub_res = sub_res_box[0] or {"success": False, "subagents": []}
                                 last_tool_failed[0] = not bool(sub_res.get("success", True))
 
-                            self.messages.append({
+                            _add_message({
                                 "role": "user",
                                 "content": self.agent_runner.format_tool_result_for_llm("subagent", sub_res),
                             })
@@ -5465,7 +5985,7 @@ class CMDAICodeTUI(App):
                                     r_lbl = str(call_args.get("name") or call_args.get("role") or "Subagent").strip()[:60] or "Subagent"
                                     g_lbl = str(call_args.get("goal") or call_args.get("task") or call_args.get("description") or "").strip()
                                     s_lbl = str(call_args.get("system") or call_args.get("system_prompt") or call_args.get("prompt") or "").strip()
-                                    self._transcript.append({
+                                    _add_transcript({
                                         "kind": "subagent",
                                         "role": r_lbl,
                                         "goal": g_lbl,
@@ -5475,25 +5995,48 @@ class CMDAICodeTUI(App):
                                             "role": r_lbl,
                                             "goal": g_lbl,
                                             "system_prompt": s_lbl,
-                                            "status": "completed",
+                                            "status": "running",
                                             "is_backgrounded": True,
                                         },
                                     })
                             else:
                                 for call_args, agent in zip(batch, _match_agents_to_calls(
                                         batch, sub_res.get("subagents", []))):
-                                    self._transcript.append({
+                                    _add_transcript({
                                         "kind": "subagent",
                                         "role": str(call_args.get("name") or call_args.get("role") or "Subagent").strip()[:60] or "Subagent",
                                         "goal": str(call_args.get("goal") or call_args.get("task") or call_args.get("description") or "").strip(),
                                         "system": str(call_args.get("system") or call_args.get("system_prompt") or call_args.get("prompt") or "").strip(),
                                         "agent": agent,
                                     })
-                            self.call_from_thread(assistant_card.clear_generating_tool)
+                            _call_card("clear_generating_tool")
                             self.call_from_thread(self.refresh)
                             idx = j
                             continue
                         else:
+                            call_sig = f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
+                            tool_call_counts[call_sig] = tool_call_counts.get(call_sig, 0) + 1
+                            if tool_call_counts[call_sig] >= 2:
+                                if tool_call_counts[call_sig] >= 4:
+                                    stop_after_subagent_repeat[0] = True
+                                    idx += 1
+                                    break
+                                if tool_call_counts[call_sig] == 3:
+                                    tool_feedback = (
+                                        f'<tool_response name="{tool_name}">'
+                                        f'STOP: Krok ({tool_name}) z tymi samymi parametrami został już powtórzony wielokrotnie. '
+                                        f'NIE wywołuj więcej żadnych narzędzi (<tool:...>). Przejdź natychmiast do napisania pełnej odpowiedzi tekstowej dla użytkownika na podstawie dotychczas zebranych informacji.'
+                                        f'</tool_response>'
+                                    )
+                                else:
+                                    tool_feedback = (
+                                        f'<tool_response name="{tool_name}">'
+                                        f'Ten sam krok ({tool_name}) został już wykonany. Nie powtarzaj go — wybierz inny istniejący plik z listy ls lub przejdź od razu do pełnej odpowiedzi końcowej.'
+                                        f'</tool_response>'
+                                    )
+                                _add_message({"role": "user", "content": tool_feedback})
+                                idx += 1
+                                continue
                             try:
                                 res = self.agent_runner.execute_tool(tool_name, args)
                                 last_tool_failed[0] = bool(res.get("error") or res.get("success") is False)
@@ -5502,32 +6045,113 @@ class CMDAICodeTUI(App):
                                 res = {"success": False, "error": f"Tool execution exception: {tool_exc}"}
                                 last_tool_failed[0] = True
                                 tool_feedback = f'<tool_response name="{tool_name}">ERROR: {tool_exc}</tool_response>'
-                            self.messages.append({"role": "user", "content": tool_feedback})
+                            if (
+                                self.current_provider == "local_gguf"
+                                and not completed_subagent_roles
+                                and turn <= 2
+                            ):
+                                _last_u = ""
+                                for _m in reversed(worker_messages):
+                                    if _m.get("role") == "user":
+                                        _cu = str(_m.get("content", "")).strip().lower()
+                                        if _cu and not _cu.startswith("<tool_response"):
+                                            _last_u = _cu
+                                            break
+                                if "subagent" in _last_u:
+                                    tool_feedback += (
+                                        "\n\nUżytkownik poprosił o wywołanie subagenta. Wywołaj teraz subagenta dokładnym tagiem XML:\n"
+                                        '<tool:subagent name="Code Reviewer" system="Inspect the project files using ls and read, and write a detailed evaluation report.">Oceń aplikację w obecnym katalogu</tool:subagent>'
+                                    )
+                            _add_message({"role": "user", "content": tool_feedback})
                             self.call_from_thread(self.refresh)
                             idx += 1
 
                 if self.abort_requested:
                     break
 
-                self.call_from_thread(assistant_card.prepare_for_next_turn)
+                _call_card("prepare_for_next_turn")
                 # Also without announcing "Thinking" here. This line ran at the
                 # top of every agent turn, including the ones where the model
                 # answers straight away, so the word appeared before any
                 # reasoning existed. The thinking block and the input-bar marker
                 # are both driven by what actually arrives now.
-                self.call_from_thread(assistant_card.clear_generating_tool)
+                _call_card("clear_generating_tool")
+
+        if (
+            turn > 1
+            and not is_worker_aborted()
+            and not had_api_err
+            and not completed_subagent_roles
+            and not str(getattr(_card(), "raw_text", "") or "").strip()
+        ):
+            try:
+                _call_card("prepare_for_next_turn")
+                synth_chunks: List[str] = []
+                synth_prompt = (
+                    "Na podstawie powyższych wyników wykonanych narzędzi napisz teraz bezpośrednią, wyczerpującą "
+                    "odpowiedź końcową dla użytkownika. NIE używaj żadnych tagów XML ani narzędzi (<tool:...>) — "
+                    "zwróć wyłącznie czysty tekst odpowiedzi (w formacie Markdown)."
+                )
+                synth_messages = [{"role": "system", "content": self.system_prompt}] + list(worker_messages) + [
+                    {"role": "user", "content": synth_prompt}
+                ]
+
+                def _on_synth_token(ch: str) -> None:
+                    if is_worker_aborted():
+                        return
+                    synth_chunks.append(ch)
+                    acc_s = "".join(synth_chunks)
+                    clean_s = self.agent_runner.strip_xml_tool_calls(acc_s) if self.agent_runner else acc_s
+                    clean_s = re.sub(r'</?(?:tool_response|tool_call|function_call|tool:\w+)[^>]*>', '', clean_s, flags=re.IGNORECASE)
+                    clean_s = re.sub(r'<[a-zA-Z0-9_:|/-]*$', '', clean_s)
+                    _call_card("update_content", clean_s)
+
+                s_t0 = time.time()
+                if self.current_provider == "local_gguf":
+                    s_resp, _ = self.gguf_loader.stream_chat(
+                        messages=synth_messages,
+                        temperature=gen_params.get("temperature", 0.3),
+                        max_tokens=gen_params.get("max_tokens", 0),
+                        on_token=_on_synth_token,
+                        model_filename=self.current_model_id,
+                        is_aborted=is_worker_aborted,
+                    )
+                else:
+                    s_resp, _ = stream_chat_completion(
+                        provider_id=self.current_provider,
+                        model_id=self.current_model_id,
+                        messages=synth_messages,
+                        api_key=api_key,
+                        generation_params=gen_params,
+                        tools=None,
+                        on_token=_on_synth_token,
+                        is_aborted=is_worker_aborted,
+                    )
+                s_dt = max(0.05, time.time() - s_t0)
+                final_s = "".join(synth_chunks) or s_resp or ""
+                final_s = (self.agent_runner.strip_xml_tool_calls(final_s) if self.agent_runner else final_s).strip()
+                final_s = re.sub(r'</?(?:tool_response|tool_call|function_call|tool:\w+)[^>]*>', '', final_s, flags=re.IGNORECASE).strip()
+                if final_s:
+                    _call_card("update_last_body", final_s)
+                    _add_message({"role": "assistant", "content": final_s})
+                    _rec_assistant(final_s)
+                    s_tok = estimate_token_count([{"content": final_s}])
+                    total_completion_tokens += s_tok
+                    total_gen_time += s_dt
+            except Exception:
+                pass
 
         elapsed = time.time() - start_time
         tok_s = (total_completion_tokens / total_gen_time) if total_gen_time > 0 else 0.0
         self.stats["tok_per_sec"] = tok_s
 
         if self.abort_requested:
-            self.call_from_thread(assistant_card.clear_generating_tool)
-            self.call_from_thread(assistant_card.abort)
-        else:
-            self.call_from_thread(assistant_card.clear_generating_tool)
-            self.call_from_thread(
-                assistant_card.finish,
+            _call_card("clear_generating_tool")
+            _call_card("abort")
+        elif not had_api_err:
+            _call_card("clear_generating_tool")
+            _call_card(
+                "finish",
                 elapsed,
                 total_completion_tokens,
                 tok_s,
@@ -5548,7 +6172,11 @@ class CMDAICodeTUI(App):
             if self.current_session_id == worker_session_id:
                 self._save_current_session()
             else:
-                self._save_current_session(session_id=worker_session_id)
+                self._save_session_data(
+                    session_id=worker_session_id,
+                    messages=worker_messages,
+                    transcript=worker_transcript,
+                )
         except Exception:
             pass
 

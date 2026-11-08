@@ -14,8 +14,18 @@ from .test_runner import run_project_tests
 
 class AgentContext:
     def __init__(self, workdir: str = "."):
-        self.workdir = os.path.abspath(workdir)
-        self.current_cwd = self.workdir
+        self._workdir = os.path.abspath(workdir)
+        self.current_cwd = self._workdir
+
+    @property
+    def workdir(self) -> str:
+        return self._workdir
+
+    @workdir.setter
+    def workdir(self, value: str) -> None:
+        new_w = os.path.abspath(value or ".")
+        self._workdir = new_w
+        self.current_cwd = new_w
         self.session_id: str = ""
         self.todo_list: List[str] = []
         self.mode: str = "auto"
@@ -123,7 +133,18 @@ def _smart_replace(content: str, old: str, new: str) -> Optional[Tuple[str, int,
 def tool_read(ctx: AgentContext, path: str, lines: Optional[str] = None) -> Dict[str, Any]:
     full_path = ctx.resolve_path(path)
     if not os.path.exists(full_path):
-        return {"success": False, "error": f"File not found: {path}"}
+        parent_dir = os.path.dirname(full_path)
+        if not parent_dir or not os.path.isdir(parent_dir):
+            parent_dir = ctx.workdir
+        hint = ""
+        try:
+            avail = [e for e in sorted(os.listdir(parent_dir)) if not e.startswith(".")][:15]
+            if avail:
+                rel_parent = ctx.rel_path(parent_dir)
+                hint = f" (Available in '{rel_parent}': {', '.join(avail)}. Do NOT retry '{path}'; read one of the existing files instead.)"
+        except Exception:
+            pass
+        return {"success": False, "error": f"File not found: {path}{hint}"}
 
     if os.path.isdir(full_path):
         try:
@@ -523,6 +544,9 @@ def tool_command(
                 if os.path.isdir(new_cwd):
                     active_cwd = new_cwd
                     ctx.current_cwd = new_cwd
+
+    if proc.returncode != 0 and "not a git repository" in (out or "").lower():
+        out = (out or "") + "\n[Workspace is not a git repository. Do not use git; inspect files directly with ls, read, or glob]"
 
     return {
         "success": proc.returncode == 0,

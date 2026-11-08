@@ -57,7 +57,7 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         key_url="",
         provider_type="local",
         default_models=[],
-        supports_remote_fetch=False,
+        supports_remote_fetch=True,
     ),
     "opencode": ProviderInfo(
         id="opencode",
@@ -539,8 +539,6 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
 
     if provider_id == "local_gguf":
         from .model_paths import list_gguf_files, resolve_models_dir
-        # Was six candidates, four of them hardcoded D:/E: paths under a
-        # "CMDAI CODE" name that no longer exists.
         models_dir = resolve_models_dir("")
         if not os.path.isdir(models_dir):
             return []
@@ -551,15 +549,16 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                 path = os.path.join(models_dir, f)
                 size_mb = os.path.getsize(path) / (1024 * 1024)
                 size_str = f"{size_mb / 1024:.1f}GB" if size_mb > 1024 else f"{size_mb:.0f}MB"
+                f_low = f.lower()
+                has_think = any(k in f_low for k in ["r1", "qwq", "reason", "think", "deepseek"])
                 found.append({
                     "id": f,
                     "name": f,
                     "badge": size_str,
+                    "thinking": has_think,
+                    "levels": ["low", "medium", "high"] if has_think else [],
                 })
-        # `thinking` was three substrings against the filename. It is now read
-        # out of the file's own chat template, which is the only thing that knows
-        # - and which was unreachable behind a hard-coded `gemma` refusal.
-        return _merge_catalog_facts(provider_id, found)
+        return found
 
     if not api_key and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
         # No key, so the provider will not tell us anything. The catalogue still
@@ -615,7 +614,10 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         continue
                     name = item.get("name", mid)
 
-                    ctx_len = item.get("context_length", 0)
+                    from .resource_limits import extract_model_context_length
+                    ctx_len = extract_model_context_length(item)
+                    if ctx_len <= 0 and getattr(cap, "context_limit", 0) > 0:
+                        ctx_len = int(cap.context_limit)
 
                     # The provider's own answer first. `supported_parameters`
                     # naming `reasoning` is better than anything we could look

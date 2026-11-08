@@ -1,3 +1,4 @@
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 from rich.text import Text
 from textual import events, on
@@ -10,6 +11,23 @@ from textual.widgets.option_list import Option
 
 from ...core.capabilities import clean_model_name
 from ...core.sessions import SessionManager
+
+
+def format_day_header(dt_str: str) -> str:
+    """Format date string YYYY-MM-DD into 'Friday, 11.11.2026'."""
+    try:
+        d = datetime.strptime(dt_str[:10], "%Y-%m-%d").date()
+        today = date.today()
+        day_name = d.strftime("%A")
+        formatted_date = d.strftime("%d.%m.%Y")
+        if d == today:
+            return f"{day_name}, {formatted_date} (Today)"
+        elif (today - d).days == 1:
+            return f"{day_name}, {formatted_date} (Yesterday)"
+        else:
+            return f"{day_name}, {formatted_date}"
+    except Exception:
+        return dt_str[:10] if dt_str else "Saved Sessions"
 
 
 class SessionSearchInput(Input):
@@ -73,6 +91,14 @@ class SessionsModal(ModalScreen[str]):
         inp.focus()
 
     def _tick_spinner(self) -> None:
+        app = getattr(self, "app", None)
+        active_gen = getattr(app, "_active_generation_sessions", set())
+        from ...agent.tasks import BackgroundTaskManager
+        bg_mgr = BackgroundTaskManager.get_instance()
+        has_bg = any(bool(s.get("background")) and s.get("status") == "running" for s in bg_mgr.list_subagents()) or any(t.get("running") for t in bg_mgr.list_tasks())
+        # If nothing is spinning, do not touch list or scroll position at all
+        if not active_gen and not has_bg:
+            return
         self._spin_idx = (self._spin_idx + 1) % len(self.SPINNER_FRAMES)
         self.refresh_list(preserve_highlight=True)
 
@@ -98,21 +124,30 @@ class SessionsModal(ModalScreen[str]):
 
     def refresh_list(self, preserve_highlight: bool = False) -> None:
         ol = self.query_one("#modal-list", OptionList)
-        curr_idx = ol.highlighted if preserve_highlight else 0
+        curr_sid = None
+        saved_scroll_y = getattr(ol, "scroll_y", 0) if preserve_highlight else 0
+        if preserve_highlight and ol.highlighted is not None:
+            try:
+                opt = ol.get_option_at_index(ol.highlighted)
+                curr_sid = getattr(opt, "id", None)
+            except Exception:
+                curr_sid = None
+
         ol.clear_options()
 
         if not self.filtered_sessions:
-            ol.add_option(Option("  [dim]No matching sessions found[/dim]"))
+            ol.add_option(Option("  [dim]No matching sessions found[/dim]", disabled=True))
             return
 
         app = getattr(self, "app", None)
         curr_id = str(getattr(app, "current_session_id", "") or "")
-        app_is_generating = bool(getattr(app, "is_generating", False))
 
         from ...agent.tasks import BackgroundTaskManager
         bg_mgr = BackgroundTaskManager.get_instance()
         all_subs = bg_mgr.list_subagents()
         all_tasks = bg_mgr.list_tasks()
+
+        last_day_key = None
 
         for s in self.filtered_sessions:
             try:
@@ -120,7 +155,7 @@ class SessionsModal(ModalScreen[str]):
                 is_active = bool(sid and sid == curr_id)
 
                 has_running_bg = any(
-                    sub.get("status") == "running" and str(sub.get("session_id") or "") == sid
+                    bool(sub.get("background")) and sub.get("status") == "running" and str(sub.get("session_id") or "") == sid
                     for sub in all_subs
                 ) or any(
                     tsk.get("running") and str(tsk.get("session_id") or "") == sid
@@ -129,49 +164,109 @@ class SessionsModal(ModalScreen[str]):
 
                 icon = self.SPINNER_FRAMES[self._spin_idx % len(self.SPINNER_FRAMES)]
                 if has_running_bg:
-                    # Constantly orange when running in background!
                     badge = f"[b #f0883e]{icon}  [/]"
-                elif is_active and app_is_generating:
-                    # Foreground generating is blue spinner
+                elif bool(sid and sid in getattr(app, '_active_generation_sessions', set())):
                     badge = f"[b #58a6ff]{icon}  [/]"
                 elif is_active:
-                    # Currently active session (idle): clean blue dot indicator
                     badge = "[b #58a6ff]●  [/]"
                 else:
                     badge = "   "
 
-                raw_title = str(s.get("title") or "Untitled").strip()
-                if len(raw_title) > 38:
-                    title_str = raw_title[:36] + ".."
+                disp_date = str(s.get("display_date") or s.get("last_written_at") or s.get("created_at") or "").strip()
+                day_key = disp_date[:10] if len(disp_date) >= 10 else ""
+                time_str = disp_date[11:16] if len(disp_date) >= 16 else (disp_date[-5:] if len(disp_date) >= 5 else "")
+
+                # Insert day header separator when day changes
+                if day_key and day_key != last_day_key:
+                    if last_day_key is not None:
+                        # Extra empty line between day groups as requested
+                        ol.add_option(Option(Text(""), disabled=True))
+                    header_title = format_day_header(day_key)
+                    # Dashes only on the left side
+                    sep_markup = f"[bold #58a6ff]  ── {header_title}[/]"
+                    t_sep = Text.from_markup(sep_markup)
+                    t_sep.no_wrap = True
+                    t_sep.overflow = "ellipsis"
+                    ol.add_option(Option(t_sep, disabled=True))
+                    last_day_key = day_key
+                elif not day_key and last_day_key is not None and last_day_key != "other":
+                    ol.add_option(Option(Text(""), disabled=True))
+                    t_sep = Text.from_markup("[bold #8b949e]  ── Other[/]")
+                    t_sep.no_wrap = True
+                    t_sep.overflow = "ellipsis"
+                    ol.add_option(Option(t_sep, disabled=True))
+                    last_day_key = "other"
+
+                tok_str = str(s.get("tokens_str") or "").strip()
+                dir_name = str(s.get("dir_name") or "").strip()
+
+                # Right metadata
+                parts_plain = []
+                parts_markup = []
+                if time_str:
+                    parts_plain.append(time_str)
+                    parts_markup.append(f"[dim]{time_str}[/]")
+                if tok_str:
+                    parts_plain.append(tok_str)
+                    parts_markup.append(f"[#7ee787]{tok_str}[/]")
+                if dir_name:
+                    if len(dir_name) > 18:
+                        d_disp = dir_name[:16] + ".."
+                    else:
+                        d_disp = dir_name
+                    parts_plain.append(f"({d_disp})")
+                    parts_markup.append(f"[dim]({d_disp})[/]")
+
+                right_plain = "  ".join(parts_plain)
+                right_markup = "  ".join(parts_markup)
+
+                # Total target width is 90 so rows reach the right edge of modal
+                badge_plain_len = 3
+                max_title_len = max(20, 90 - badge_plain_len - len(right_plain) - 2)
+                raw_title = str(s.get("title") or "Untitled").strip().replace("\n", " ")
+                if len(raw_title) > max_title_len:
+                    title_str = raw_title[:max_title_len - 2] + ".."
                 else:
                     title_str = raw_title
-                title_fmt = f"[bold white]{title_str:<38}[/]"
 
-                disp_date = str(s.get("display_date") or s.get("last_written_at") or "")
-                if len(disp_date) > 16:
-                    disp_date = disp_date[:16]
-                time_fmt = f"[dim]{disp_date:<16}[/]"
-
-                tok_str = str(s.get("tokens_str") or "")
-                tok_fmt = f"[#7ee787]{tok_str:<8}[/]" if tok_str else "        "
-
-                dir_name = s.get("dir_name") or ""
-                dir_fmt = f"[dim]({dir_name})[/]" if dir_name else ""
-
-                row = f"{badge}{title_fmt} {time_fmt} {tok_fmt} {dir_fmt}".rstrip()
-                ol.add_option(Option(row))
+                pad_len = max(2, 90 - badge_plain_len - len(title_str) - len(right_plain))
+                spaces = " " * pad_len
+                row = f"{badge}[bold white]{title_str}[/]{spaces}{right_markup}"
+                t_row = Text.from_markup(row)
+                t_row.no_wrap = True
+                t_row.overflow = "ellipsis"
+                ol.add_option(Option(t_row, id=sid))
             except Exception:
                 pass
-        if curr_idx is not None and curr_idx < len(self.filtered_sessions):
-            ol.highlighted = curr_idx
-        else:
-            ol.highlighted = 0
+
+        if curr_sid:
+            try:
+                ol.highlighted = ol.get_option_index(curr_sid)
+            except Exception:
+                pass
+
+        if ol.highlighted is None and ol.option_count > 0:
+            for i in range(ol.option_count):
+                opt = ol.get_option_at_index(i)
+                if not getattr(opt, "disabled", False):
+                    ol.highlighted = i
+                    break
+
+        if preserve_highlight and saved_scroll_y > 0:
+            try:
+                ol.scroll_to(y=saved_scroll_y, animate=False, immediate=True)
+            except Exception:
+                pass
 
     def action_focus_list(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
         ol.focus()
         if ol.option_count > 0 and ol.highlighted is None:
-            ol.highlighted = 0
+            for i in range(ol.option_count):
+                opt = ol.get_option_at_index(i)
+                if not getattr(opt, "disabled", False):
+                    ol.highlighted = i
+                    break
 
     def action_cancel(self) -> None:
         self.dismiss("")
@@ -179,18 +274,32 @@ class SessionsModal(ModalScreen[str]):
     def action_load_session(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
         idx = ol.highlighted
-        if idx is not None and idx < len(self.filtered_sessions):
-            self.dismiss(self.filtered_sessions[idx]["id"])
+        if idx is not None and 0 <= idx < ol.option_count:
+            try:
+                opt = ol.get_option_at_index(idx)
+                if opt and opt.id and not getattr(opt, "disabled", False):
+                    self.dismiss(str(opt.id))
+                    return
+            except Exception:
+                pass
+        # Fallback to first non-disabled session
+        if self.filtered_sessions:
+            self.dismiss(str(self.filtered_sessions[0]["id"]))
 
     def action_delete_session(self) -> None:
         ol = self.query_one("#modal-list", OptionList)
         idx = ol.highlighted
-        if idx is not None and idx < len(self.filtered_sessions):
-            s_id = self.filtered_sessions[idx]["id"]
-            self.session_manager.delete_session(s_id)
-            self.all_sessions = self.session_manager.list_sessions(current_dir=self.workdir)
-            inp = self.query_one("#modal-search", SessionSearchInput)
-            self.on_search_changed(Input.Changed(inp, inp.value))
+        if idx is not None and 0 <= idx < ol.option_count:
+            try:
+                opt = ol.get_option_at_index(idx)
+                if opt and opt.id and not getattr(opt, "disabled", False):
+                    s_id = str(opt.id)
+                    self.session_manager.delete_session(s_id)
+                    self.all_sessions = self.session_manager.list_sessions(current_dir=self.workdir)
+                    inp = self.query_one("#modal-search", SessionSearchInput)
+                    self.on_search_changed(Input.Changed(inp, inp.value))
+            except Exception:
+                pass
 
     def action_clear_all(self) -> None:
         self.session_manager.clear_all_sessions()
@@ -200,8 +309,9 @@ class SessionsModal(ModalScreen[str]):
 
     @on(OptionList.OptionSelected)
     def on_option_selected(self, event: OptionList.OptionSelected) -> None:
-        idx = getattr(event, "option_index", None)
-        if idx is not None and 0 <= idx < len(self.filtered_sessions):
-            self.dismiss(self.filtered_sessions[idx]["id"])
+        opt = getattr(event, "option", None)
+        opt_id = getattr(opt, "id", None) or getattr(event, "option_id", None)
+        if opt_id and not getattr(opt, "disabled", False):
+            self.dismiss(str(opt_id))
         else:
             self.action_load_session()

@@ -148,6 +148,7 @@ class SubagentChatModal(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close"),
         Binding("ctrl+q", "dismiss_modal", "Close"),
+        Binding("k", "kill_agent", "Stop subagent"),
         Binding("ctrl+b", "send_to_background", "Tło", show=False),
         Binding("left", "prev_agent", "Prev", show=False),
         Binding("right", "next_agent", "Next", show=False),
@@ -164,13 +165,20 @@ class SubagentChatModal(ModalScreen[None]):
         agent_total: int = 1,
         agents: Optional[List[Dict[str, Any]]] = None,
         live_agent: Optional[Any] = None,
+        thinking: str = "",
+        name: Optional[str] = None,
+        id: Optional[str] = None,
+        classes: Optional[str] = None,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        kwargs.pop("thinking", None)
+        super().__init__(name=name, id=id, classes=classes)
+        self.thinking = str(thinking or "")
         self.agents: List[Dict[str, Any]] = list(agents) if agents else [{
             "role": role, "goal": goal, "system_prompt": system_prompt,
             "history": history or [], "findings": findings or [],
             "status": "completed",
+            "thinking": thinking,
         }]
         self.agent_index = max(1, min(agent_index, len(self.agents)))
         self.agent_total = len(self.agents)
@@ -200,6 +208,7 @@ class SubagentChatModal(ModalScreen[None]):
                 "findings": list(getattr(b, "subagent_findings", []) or getattr(b, "findings", []) or []),
                 "notes": list(getattr(b, "subagent_notes", []) or []),
                 "events": list(getattr(b, "subagent_events", []) or []),
+                "thinking": str(getattr(b, "thinking", "") or getattr(b, "_live_thinking", "") or ""),
                 "elapsed": float(getattr(b, "subagent_elapsed", 0.0) or 0.0),
                 "tokens": int(getattr(b, "subagent_tokens", 0) or 0),
                 "error": getattr(b, "error_msg", "") if getattr(b, "has_error", False) else "",
@@ -221,7 +230,7 @@ class SubagentChatModal(ModalScreen[None]):
                 with Vertical(id="subagent-task-card"):
                     with Horizontal(id="subagent-task-header-row"):
                         yield Static("TASK", id="subagent-task-header")
-                        yield Static("[dim]esc[/dim]", id="subagent-task-meta")
+                        yield Static("[dim]k: Stop  ·  esc: Close[/dim]", id="subagent-task-meta")
                     yield Static("", id="subagent-task-body")
 
     def on_mount(self) -> None:
@@ -320,6 +329,10 @@ class SubagentChatModal(ModalScreen[None]):
                     t_str = str(ev.get("content", "") or "").strip()
                     if t_str:
                         items.append(("text", t_str))
+                elif ev.get("type") == "thinking":
+                    t_think = str(ev.get("content", "") or "").strip()
+                    if t_think:
+                        items.append(("thinking", t_think))
                 else:
                     items.append(("tool", ev))
             return items
@@ -441,6 +454,17 @@ class SubagentChatModal(ModalScreen[None]):
             if tb is not None:
                 if think_val:
                     tb.thinking_text = think_val
+                    if tb.is_expanded:
+                        tb._update_body()
+                elapsed_so_far = float(cur.get("elapsed", 0.0) or 0.0)
+                if self.live_agent and getattr(self.live_agent, "start_time", None):
+                    elapsed_so_far = max(elapsed_so_far, time.time() - self.live_agent.start_time)
+                elif self.live_agent and getattr(self.live_agent, "subagent_started", None):
+                    import time as _t
+                    elapsed_so_far = max(elapsed_so_far, _t.monotonic() - self.live_agent.subagent_started)
+                if elapsed_so_far > 0:
+                    tb.start_time = time.time() - elapsed_so_far
+                    tb.elapsed = elapsed_so_far
                 tb.update_header(live=live)
                 if not live:
                     tb.finish()
@@ -475,6 +499,8 @@ class SubagentChatModal(ModalScreen[None]):
             words = note.split(None, 1)
             t_cand = words[0].lower() if words else ""
             if t_cand in tool_kw:
+                if t_cand in ("shell", "terminal", "bash"):
+                    t_cand = "command"
                 t_arg = words[1].strip() if len(words) > 1 else ""
                 tb = card.add_tool(t_cand, t_arg)
                 if tb is not None:
@@ -500,6 +526,8 @@ class SubagentChatModal(ModalScreen[None]):
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
             if tool_and_target and tool_and_target.lower() not in ("starting", "working", "thinking", "processing…", "processing..."):
                 tool = tool_and_target.split(" ", 1)[0]
+                if tool.lower() in ("shell", "terminal", "bash", "sh", "cmd", "run_command", "exec"):
+                    tool = "command"
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
                 first_tgt = target.splitlines()[0].strip() if target else ""
                 if tool.lower() in ("thinking", "processing") or getattr(self, "_last_emitted_tool_sig", None) == (tool.lower(), first_tgt):
@@ -576,8 +604,19 @@ class SubagentChatModal(ModalScreen[None]):
         if running and is_thinking:
             tb = card.start_thinking()
             if tb is not None:
-                if live_think:
+                if live_think and tb.thinking_text != live_think:
                     tb.thinking_text = live_think
+                    if tb.is_expanded:
+                        tb._update_body()
+                elapsed_so_far = float(cur.get("elapsed", 0.0) or 0.0)
+                if self.live_agent and getattr(self.live_agent, "start_time", None):
+                    elapsed_so_far = max(elapsed_so_far, time.time() - self.live_agent.start_time)
+                elif self.live_agent and getattr(self.live_agent, "subagent_started", None):
+                    import time as _t
+                    elapsed_so_far = max(elapsed_so_far, _t.monotonic() - self.live_agent.subagent_started)
+                if elapsed_so_far > 0:
+                    tb.start_time = time.time() - elapsed_so_far
+                    tb.elapsed = elapsed_so_far
                 tb.update_header(live=True)
         elif not running and card.thinking_block is not None and not card.thinking_block.is_finished:
             card.finish_thinking()
@@ -630,6 +669,8 @@ class SubagentChatModal(ModalScreen[None]):
             tool_and_target = str(getattr(self.live_agent, "subagent_live_tool", "") or "").strip()
             if tool_and_target and tool_and_target.lower() not in ("starting", "working", "thinking", "processing…", "processing..."):
                 tool = tool_and_target.split(" ", 1)[0]
+                if tool.lower() in ("shell", "terminal", "bash", "sh", "cmd", "run_command", "exec"):
+                    tool = "command"
                 target = tool_and_target.split(" ", 1)[1] if " " in tool_and_target else ""
                 first_tgt = target.splitlines()[0].strip() if target else ""
                 # If this tool was already emitted and finished, do not show it as generating!
@@ -700,6 +741,26 @@ class SubagentChatModal(ModalScreen[None]):
             self.agent_index = self.agent_index % len(self.agents) + 1
             self._render_agent()
 
+    def action_kill_agent(self) -> None:
+        sid = ""
+        if self.live_agent is not None:
+            sid = str(getattr(self.live_agent, "subagent_id", "") or "")
+        if not sid:
+            cur = self._current()
+            sid = str(cur.get("subagent_id", "") or "")
+        if sid:
+            from ...agent.tasks import BackgroundTaskManager
+            BackgroundTaskManager.get_instance().cancel_subagent(sid)
+            if self.live_agent is not None:
+                self.live_agent.tool_running = False
+                self.live_agent._stop_spinner()
+                self.live_agent.subagent_status = "cancelled"
+                self.live_agent.subagent_live_tool = "Cancelled"
+                self.live_agent.update_header()
+            if hasattr(self.app, "notify"):
+                self.app.notify("Subagent stopped.", timeout=2.0)
+            self._refresh_live()
+
     def action_send_to_background(self) -> None:
         if self.live_agent is not None:
             try:
@@ -711,6 +772,7 @@ class SubagentChatModal(ModalScreen[None]):
         except Exception:
             pass
         self._advance_spinner()
+        self.dismiss(None)
 
     def _is_scroll_at_bottom(self) -> bool:
         try:

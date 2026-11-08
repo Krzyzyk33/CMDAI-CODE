@@ -129,6 +129,10 @@ class SubagentOrchestrator:
             f"You are {task.role}, a specialized autonomous subagent.\n"
             f"{task.system_prompt}\n\n"
             f"Workspace directory: {workdir}\n"
+            "CRITICAL WORKSPACE CONSTRAINT:\n"
+            f"- You MUST work exclusively within this workspace directory: {workdir}\n"
+            "- All file paths (reads, edits, writes, globs, searches) are strictly relative to this workspace directory.\n"
+            "- NEVER read, inspect, or reference files outside this workspace directory.\n\n"
             "You have full direct access to inspect the project and local filesystem using XML tags:\n"
             "- List Directory: <tool:ls path=\".\" />\n"
             "- Find Files: <tool:glob pattern=\"*.*\" dir=\".\" />\n"
@@ -183,7 +187,7 @@ class SubagentOrchestrator:
         _t0 = _time.monotonic()
         if model_call is None:
             _emit("failed", thought="No model backend wired.")
-            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False)
+            return SubagentResult(role=task.role, summary=f"{task.role}: no model backend available.", findings=[], history=history, system_prompt=task.system_prompt, notes=list(task.notes), success=False, status="failed")
 
         # One argument or two. The protocol carries the task so a backend with
         # server-side tools can attribute what ran; a backend from before that
@@ -198,7 +202,15 @@ class SubagentOrchestrator:
             except (TypeError, ValueError):
                 _takes_task = False
 
-        for _ in range(max(1, max_turns)):
+        was_aborted = False
+        failed_tool_counts = {}
+
+        for _turn_idx in range(max(1, max_turns)):
+            if getattr(task, "abort_requested", False):
+                was_aborted = True
+                last_text = "Subagent was cancelled."
+                break
+
             sub_history = list(history)
             if len(sub_history) > 20:
                 # Keep the system prompt, the task, and a longer tail of tool
@@ -217,6 +229,12 @@ class SubagentOrchestrator:
             except Exception as e:
                 last_text = f"Subagent {task.role} model error: {e}"
                 break
+
+            if getattr(task, "abort_requested", False):
+                was_aborted = True
+                last_text = "Subagent was cancelled."
+                break
+
             if not text.strip() or any(text.startswith(p) for p in ("⚠", "Connection error:", "API key required")):
                 last_text = f"Subagent {task.role} model error: {text or 'empty response'}"
                 break
@@ -224,9 +242,33 @@ class SubagentOrchestrator:
             calls = self._extract_calls(text)
             history.append({"role": "assistant", "content": last_text})
             if not calls:
+                if (
+                    _turn_idx == 0
+                    and max_turns > 1
+                    and not events
+                    and not any(
+                        isinstance(ev, dict)
+                        and bool(str(ev.get("tool", "") or "").strip())
+                        and ev.get("type") not in ("text", "thinking")
+                        for ev in (getattr(task, "events", None) or [])
+                    )
+                ):
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "Start by inspecting the workspace files immediately. Emit <tool:ls path=\".\" /> now."
+                        ),
+                    })
+                    continue
                 break
             done = False
             for cname, cargs in calls:
+                if getattr(task, "abort_requested", False):
+                    was_aborted = True
+                    last_text = "Subagent was cancelled."
+                    done = True
+                    break
+
                 if cname in ("subagent", "spawn_subagent", "task", "tasks", "bg_task", "background_task"):
                     history.append({"role": "user", "content": f"[ERROR: Tool '{cname}' is forbidden for subagents. You cannot spawn subagents or background tasks. Execute your task directly using read/edit/write/search.]"})
                     continue
@@ -278,9 +320,16 @@ class SubagentOrchestrator:
                     _emit("running", "agent_note", str(res.get("note", ""))[:80], note=str(res.get("note", "")))
                 snippet = _format_tool_snippet(cname, res)[:2000]
                 history.append({"role": "user", "content": f"[tool:{cname} result]\n{snippet}"})
-                if not ok and cname in ("write", "edit"):
-                    done = True
-                    break
+                if not ok:
+                    call_sig = f"{cname}:{arg_summary}"
+                    failed_tool_counts[call_sig] = failed_tool_counts.get(call_sig, 0) + 1
+                    if failed_tool_counts[call_sig] >= 2:
+                        history.append({"role": "user", "content": f"[tool:{cname} repeated error: '{arg_summary}' failed repeatedly. Do not retry this command. Provide your evaluation based on the available files.]"})
+                        done = True
+                        break
+                    if cname in ("write", "edit"):
+                        done = True
+                        break
             _emit("running", "thinking", "processing…")
             if done:
                 break
@@ -296,10 +345,20 @@ class SubagentOrchestrator:
             not last_text.strip()
             or any(last_text.startswith(p) for p in (f"Subagent {task.role} model error:", "Failed:", "Error:", "⚠", "Connection error:"))
         )
-        if is_model_err:
+
+        if was_aborted or getattr(task, "abort_requested", False):
+            _emit("cancelled", thought="Subagent was cancelled by user.")
+            res_status = "cancelled"
+            is_success = False
+        elif is_model_err:
             _emit("failed", thought=last_text or f"Subagent {task.role} failed.")
+            res_status = "failed"
+            is_success = False
         else:
             _emit("completed", "", "", f"Subagent {task.role} finished.")
+            res_status = "completed"
+            is_success = True
+
         return SubagentResult(
             role=task.role,
             summary=last_text[:8000] if last_text else f"{task.role} produced no output.",
@@ -315,7 +374,8 @@ class SubagentOrchestrator:
             # on the task trail behind, and render as their own blocks.
             events=list(events) + list(task.events),
             elapsed=max(0.0, _time.monotonic() - _t0),
-            success=not is_model_err,
+            success=is_success,
+            status=res_status,
         )
 
     def _extract_calls(self, text: str) -> List[Any]:
@@ -412,5 +472,6 @@ class SubagentOrchestrator:
                         history=[],
                         system_prompt=task.system_prompt,
                         success=False,
+                        status="failed",
                     ))
         return results

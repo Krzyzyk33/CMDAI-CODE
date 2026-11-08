@@ -479,7 +479,28 @@ def find_mmproj_sidecar(gguf_path: str) -> Optional[str]:
 
 
 def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
-    if not GGUFReader or not os.path.exists(gguf_path):
+    if not os.path.exists(gguf_path):
+        return None
+    if not GGUFReader:
+        try:
+            from .resource_limits import read_gguf_metadata
+            meta = read_gguf_metadata(gguf_path)
+            ctx_lim = int(meta.get("n_ctx_train") or 0) if not meta.get("estimated", True) else 0
+            if ctx_lim > 0:
+                mid_low = os.path.basename(gguf_path).lower()
+                has_t = any(k in mid_low for k in ("r1", "qwq", "reason", "think"))
+                return _build_capability(
+                    os.path.basename(gguf_path),
+                    thinking=has_t,
+                    param_style="chat_template_kwargs" if has_t else "none",
+                    levels=(local_levels(ctx_lim) or list(DEFAULT_LEVELS)) if has_t else [],
+                    default_level="medium" if has_t else "",
+                    confidence="high",
+                    source="gguf",
+                    context_limit=ctx_lim,
+                )
+        except Exception:
+            pass
         return None
     try:
         reader = GGUFReader(gguf_path)
@@ -867,6 +888,8 @@ def _capability_from_catalog(model_id: str, provider_id: str) -> Optional[ModelC
     try:
         from . import model_catalog
         facts = model_catalog.lookup(provider_id, model_id)
+        if facts is None and provider_id not in model_catalog.PROVIDER_ALIASES:
+            facts = model_catalog.lookup_any_provider(model_id, preferred_provider_id=provider_id)
     except Exception:
         return None
     if facts is None:

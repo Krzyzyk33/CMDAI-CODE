@@ -450,26 +450,12 @@ def _short(model_id: str) -> str:
     return model_id.split("/")[-1].lower() if model_id else ""
 
 
-def lookup(provider_id: str, model_id: str) -> Optional[ModelFacts]:
-    """Find one model. Five tries, first hit wins.
-
-    The first four are exact, including the dated-suffix step that matches
-    `claude-sonnet-4-5-20250929` against a catalog entry stored as
-    `claude-sonnet-4-5`. Only the last guesses, and it guesses within an edit
-    budget of two, because a user who typed `cloude-3-7` still meant Claude and
-    a wrong answer about a model costs more than a missing one.
-    """
-    if not model_id:
-        return None
-    catalog = load()
-    their_id = catalog_provider_id(provider_id)
-    if not their_id:
-        return None
-    provider = catalog.get(their_id)
-    if not isinstance(provider, dict):
-        return None
-    models = provider.get("models")
-    if not isinstance(models, dict):
+def _lookup_in_models(
+    models: Dict[str, Any],
+    model_id: str,
+    allow_fuzzy: bool = True,
+) -> Optional[ModelFacts]:
+    if not isinstance(models, dict) or not model_id:
         return None
 
     # 1. exactly as written
@@ -510,10 +496,76 @@ def lookup(provider_id: str, model_id: str) -> Optional[ModelFacts]:
     exact = [m for m in models if _normalize(m) == wanted]
     if len(exact) == 1:
         return _facts_from(exact[0], models[exact[0]], "normalized")
-    for candidate in models:
-        if _within_edit_budget(_normalize(candidate), wanted):
-            return _facts_from(candidate, models[candidate], "fuzzy")
+    if allow_fuzzy:
+        for candidate in models:
+            if _within_edit_budget(_normalize(candidate), wanted):
+                return _facts_from(candidate, models[candidate], "fuzzy")
 
+    return None
+
+
+def lookup(provider_id: str, model_id: str) -> Optional[ModelFacts]:
+    """Find one model. Five tries, first hit wins."""
+    if not model_id:
+        return None
+    catalog = load()
+    their_id = catalog_provider_id(provider_id)
+    if not their_id:
+        return None
+    provider = catalog.get(their_id)
+    if not isinstance(provider, dict):
+        return None
+    models = provider.get("models")
+    return _lookup_in_models(models, model_id, allow_fuzzy=True)
+
+
+_CROSS_PROVIDER_SEARCH_ORDER = (
+    "openrouter",
+    "openai",
+    "anthropic",
+    "google",
+    "deepseek",
+    "mistral",
+    "xai",
+    "groq",
+    "together",
+    "fireworks",
+    "deepinfra",
+    "cohere",
+    "moonshotai",
+    "zhipuai",
+    "minimax",
+    "cerebras",
+    "sambanova",
+    "nvidia",
+    "nebius",
+)
+
+
+def lookup_any_provider(model_id: str, preferred_provider_id: str = "") -> Optional[ModelFacts]:
+    """Find a model across providers in models.dev (used for custom providers & relays)."""
+    if not model_id:
+        return None
+    if preferred_provider_id:
+        direct = lookup(preferred_provider_id, model_id)
+        if direct is not None and direct.context_limit > 0:
+            return direct
+    catalog = load()
+    if not catalog:
+        return None
+    seen = set()
+    search_keys = list(_CROSS_PROVIDER_SEARCH_ORDER) + [k for k in catalog.keys() if k not in _CROSS_PROVIDER_SEARCH_ORDER]
+    for pid in search_keys:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        prov = catalog.get(pid)
+        if not isinstance(prov, dict):
+            continue
+        models = prov.get("models")
+        facts = _lookup_in_models(models, model_id, allow_fuzzy=False)
+        if facts is not None and facts.context_limit > 0:
+            return facts
     return None
 
 

@@ -2,7 +2,7 @@ import os
 import time
 import subprocess
 import tempfile
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 
 
 class BackgroundTask:
@@ -181,12 +181,20 @@ class BackgroundTaskManager:
                 if not sid_str or str(getattr(t, "session_id", "") or "") == sid_str:
                     return True
         for s in self.subagents.values():
-            if s.get("background") and s.get("status") == "running":
+            if bool(s.get("background")) and s.get("status") == "running":
                 if not sid_str or str(s.get("session_id") or "") == sid_str:
                     return True
         return False
 
-    def register_subagent(self, sid: str, role: str, task: str, background: bool = False, session_id: str = "") -> None:
+    def register_subagent(
+        self,
+        sid: str,
+        role: str,
+        task: str,
+        background: bool = False,
+        session_id: str = "",
+        cancel_cb: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.subagents[sid] = {
             "subagent_id": sid,
             "session_id": session_id,
@@ -196,6 +204,8 @@ class BackgroundTaskManager:
             "status": "running",
             "result": None,
             "background": background,
+            "abort_requested": False,
+            "cancel_cb": cancel_cb,
         }
 
     def mark_subagent_background(self, sid: str) -> None:
@@ -211,6 +221,43 @@ class BackgroundTaskManager:
         if sid in self.subagents:
             self.subagents[sid]["status"] = status
             self.subagents[sid]["result"] = result
+
+    def cancel_subagent(self, sid: str) -> bool:
+        """Cancel a running subagent immediately."""
+        s = self.subagents.get(sid)
+        if s:
+            s["status"] = "cancelled"
+            s["abort_requested"] = True
+            cb = s.get("cancel_cb")
+            if callable(cb):
+                try:
+                    cb()
+                except Exception:
+                    pass
+            return True
+        return False
+
+    def is_subagent_cancelled(self, sid: str) -> bool:
+        s = self.subagents.get(sid)
+        if s:
+            return bool(s.get("abort_requested") or s.get("status") in ("cancelled", "stopped"))
+        return False
+
+    def cancel_all_for_session(self, session_id: str) -> int:
+        """Cancel all running subagents and tasks for a given session."""
+        cancelled_count = 0
+        sid_str = str(session_id or "").strip()
+        for sid, s in list(self.subagents.items()):
+            if not sid_str or str(s.get("session_id") or "") == sid_str:
+                if s.get("status") == "running":
+                    self.cancel_subagent(sid)
+                    cancelled_count += 1
+        for tid, t in list(self.tasks.items()):
+            if not sid_str or str(getattr(t, "session_id", "") or "") == sid_str:
+                if t.is_running():
+                    t.kill()
+                    cancelled_count += 1
+        return cancelled_count
 
     def list_subagents(self) -> List[Dict[str, Any]]:
         res = []

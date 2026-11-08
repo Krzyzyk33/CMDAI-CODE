@@ -850,4 +850,16 @@ def reconcile_transcript(transcript: Optional[List[Dict[str, Any]]], messages: O
                 repaired = repaired[:last_t_u_idx]
                 repaired.extend(transcript_from_messages(m_after))
 
+    # Ensure chronological order: if an assistant text announcing a background subagent
+    # was placed before the subagent block, swap them so the subagent sits above the commentary.
+    for i in range(len(repaired) - 1):
+        item_a = repaired[i]
+        item_b = repaired[i + 1]
+        if isinstance(item_a, dict) and isinstance(item_b, dict):
+            if item_a.get("kind") == "assistant" and item_b.get("kind") in ("subagent", "tool"):
+                text_low = str(item_a.get("text", "")).lower()
+                is_announcement = any(k in text_low for k in ("subagent", "subagenta", "uruchomiłem w tle", "uruchomilem w tle", "w tle"))
+                if is_announcement or item_b.get("is_backgrounded"):
+                    repaired[i], repaired[i + 1] = item_b, item_a
+
     return repaired

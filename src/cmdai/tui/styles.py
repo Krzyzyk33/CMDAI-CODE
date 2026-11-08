@@ -800,8 +800,8 @@ Input .input--cursor {
 
 /* Sessions dialog: wide enough for title, relative time, token badge, model and dir */
 #modal-dialog.sessions-dialog {
-    width: 95;
-    max-width: 95%;
+    width: 98;
+    max-width: 96%;
     height: auto;
     max-height: 85%;
 }
@@ -809,6 +809,7 @@ Input .input--cursor {
 #modal-dialog.sessions-dialog #modal-list {
     height: auto;
     max-height: 16;
+    overflow-x: hidden;
 }
 
 /* MCP servers: rows stay one line, prose goes in the line at the bottom. */

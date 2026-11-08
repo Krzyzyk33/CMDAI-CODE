@@ -118,14 +118,14 @@ class BackgroundTasksModal(ModalScreen[None]):
     def refresh_list(self, preserve_highlight: bool = False) -> None:
         ol = self.query_one("#modal-list", OptionList)
         prev_idx = ol.highlighted if preserve_highlight else 0
+        saved_scroll_y = getattr(ol, "scroll_y", 0) if preserve_highlight else 0
 
-        # Collect raw active background items only
+        # Collect active or background items
         self._all_items = []
         for t in self.mgr.list_tasks():
-            if t.get("running"):
-                self._all_items.append({"type": "process", "data": t})
+            self._all_items.append({"type": "process", "data": t})
         for s in self.mgr.list_subagents():
-            if s.get("status") == "running":
+            if s.get("status") == "running" or s.get("background"):
                 self._all_items.append({"type": "subagent", "data": s})
 
         # Apply search filter
@@ -161,8 +161,13 @@ class BackgroundTasksModal(ModalScreen[None]):
                     cmd_snip = cmd_snip[:16] + ".."
                 title_fmt = f"[bold white]Task: {cmd_snip:<18}[/]"
                 time_fmt = f"[dim]{elapsed:<7}[/]"
-                badge = f"[b #f0883e]{icon}  [/]"
-                status_fmt = f"[#8b949e]running ({t.get('task_id', '')})[/]"
+                is_p_run = bool(t.get("running", False))
+                if is_p_run:
+                    badge = f"[b #f0883e]{icon}  [/]"
+                    status_fmt = f"[#8b949e]running ({t.get('task_id', '')})[/]"
+                else:
+                    badge = "[b #7ee787]✓  [/]"
+                    status_fmt = f"[#7ee787]completed ({t.get('task_id', '')})[/]"
                 row = f"{badge}{title_fmt} {time_fmt} {status_fmt}".rstrip()
                 t_row = Text.from_markup(row)
                 t_row.no_wrap = True
@@ -180,17 +185,25 @@ class BackgroundTasksModal(ModalScreen[None]):
                 task_snip = str(s.get("task", "") or "").strip().replace("\n", " ")
                 cur_t = s.get("current_tool")
                 cur_tgt = str(s.get("tool_target") or "").strip().replace("\n", " ")
+                st = str(s.get("status", "running")).lower()
 
-                badge = f"[b #f0883e]{icon}  [/]"
-                if cur_t:
-                    tool_desc = f"{cur_t} {cur_tgt}".strip()
-                    if len(tool_desc) > 20:
-                        tool_desc = tool_desc[:18] + ".."
-                    status_fmt = f"[#58a6ff]{tool_desc}[/]"
+                if st == "running":
+                    badge = f"[b #f0883e]{icon}  [/]"
+                    if cur_t:
+                        tool_desc = f"{cur_t} {cur_tgt}".strip()
+                        if len(tool_desc) > 20:
+                            tool_desc = tool_desc[:18] + ".."
+                        status_fmt = f"[#58a6ff]{tool_desc}[/]"
+                    else:
+                        if len(task_snip) > 20:
+                            task_snip = task_snip[:18] + ".."
+                        status_fmt = f"[#8b949e]{task_snip}[/]"
+                elif st in ("finished", "completed"):
+                    badge = "[b #7ee787]✓  [/]"
+                    status_fmt = "[#7ee787]completed[/]"
                 else:
-                    if len(task_snip) > 20:
-                        task_snip = task_snip[:18] + ".."
-                    status_fmt = f"[#8b949e]{task_snip}[/]"
+                    badge = "[b #f85149]✗  [/]"
+                    status_fmt = f"[#f85149]{st}[/]"
 
                 row = f"{badge}{title_fmt} {time_fmt} {status_fmt}".rstrip()
                 t_row = Text.from_markup(row)
@@ -202,6 +215,12 @@ class BackgroundTasksModal(ModalScreen[None]):
             ol.highlighted = prev_idx
         elif len(self._filtered_items) > 0:
             ol.highlighted = 0
+
+        if preserve_highlight and saved_scroll_y > 0:
+            try:
+                ol.scroll_to(y=saved_scroll_y, animate=False, immediate=True)
+            except Exception:
+                pass
 
     def _selected_item(self) -> Optional[Dict[str, Any]]:
         ol = self.query_one("#modal-list", OptionList)
@@ -306,7 +325,18 @@ class BackgroundTasksModal(ModalScreen[None]):
             self.refresh_list(preserve_highlight=True)
         else:
             sid = item["data"]["subagent_id"]
-            self.mgr.finish_subagent(sid, status="cancelled")
+            self.mgr.cancel_subagent(sid)
+            try:
+                cs = self.app.query_one("#chat-scroll")
+                for b in cs.query("ToolBlock"):
+                    if getattr(b, "subagent_id", "") == sid:
+                        b.tool_running = False
+                        b._stop_spinner()
+                        b.subagent_status = "cancelled"
+                        b.subagent_live_tool = "Cancelled"
+                        b.update_header()
+            except Exception:
+                pass
             self.refresh_list(preserve_highlight=True)
 
     def action_dismiss_modal(self) -> None:

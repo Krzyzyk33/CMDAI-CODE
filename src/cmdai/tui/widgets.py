@@ -472,8 +472,12 @@ class AssistantTurnCard(Vertical):
         self.flow_container = Vertical(classes="card-flow")
         self.tools_container = self.flow_container
         self.body_widget = Static("", classes="card-body")
-        self.current_body_widget: Static = self.body_widget
-        self.body_widgets: List[Static] = [self.body_widget]
+        if str(initial_text or "").strip():
+            self.current_body_widget: Optional[Static] = self.body_widget
+            self.body_widgets: List[Static] = [self.body_widget]
+        else:
+            self.current_body_widget = None
+            self.body_widgets = []
         self.footer_widget = Static("", classes="card-footer")
         # Textual's default Vertical sizing can claim all remaining space in a
         # scroll view.  Keep each turn content-sized so tool rows never get
@@ -514,8 +518,8 @@ class AssistantTurnCard(Vertical):
         with self.flow_container:
             # A card can start with no text yet (the subagent window builds one
             # from tool events), so the body widget is optional. Only yield in compose
-            # if no pending mounts were already queued (which preserves chronological order on replay).
-            if not self._pending_mounts and self.current_body_widget is not None:
+            # if initial text was provided and no pending mounts were already queued.
+            if not self._pending_mounts and self.current_body_widget is not None and getattr(self, "raw_text", "").strip():
                 yield self.current_body_widget
         yield self.live_tool_widget
         yield self.footer_widget
@@ -710,6 +714,8 @@ class AssistantTurnCard(Vertical):
                 b_name = (getattr(b, "tool_name", "") or "").lower()
                 if getattr(b, "is_backgrounded", False) or "background" in str(getattr(b, "target", "")).lower():
                     continue
+                if getattr(b, "subagent_role", "") or b_name in ("subagent", "task"):
+                    continue
                 if b_name in ("read", "file_read", "web", "fetch", "webfetch", "ls", "grep", "search", "glob") or b_name == tool_name.lower():
                     b.finish({"result": "completed"})
 
@@ -760,6 +766,10 @@ class AssistantTurnCard(Vertical):
         if self.current_body_widget is not None and not getattr(self, "raw_text", "").strip():
             if self.current_body_widget in self.body_widgets:
                 self.body_widgets.remove(self.current_body_widget)
+            try:
+                self.current_body_widget.remove()
+            except Exception:
+                pass
             try:
                 self.current_body_widget.styles.display = "none"
             except Exception:
@@ -826,6 +836,8 @@ class AssistantTurnCard(Vertical):
             self.loading_block.finish()
 
         name = str(tool_name or "tool")
+        if name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command"):
+            name = "command"
         phase = str(phase or "running")
         detail = str(detail or "")
 
@@ -846,7 +858,7 @@ class AssistantTurnCard(Vertical):
                 name = "webfetch"
                 detail = url_m.group(0)
             elif any(k in raw_d.lower() for k in ("child_process", "exec(", "spawn(", "execsync", "bash", "cmd")):
-                name = "terminal"
+                name = "command"
                 cmd_m = re.search(r"(?:exec|spawn|execSync)\(\s*['\"]([^'\"]+)['\"]", raw_d)
                 detail = cmd_m.group(1) if cmd_m else "command"
             else:
@@ -1002,10 +1014,14 @@ class AssistantTurnCard(Vertical):
                     sev = data.get("sub_event")
                     if sev == "tool_called":
                         t_name = str(data.get("tool") or "").strip()
+                        if t_name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                            t_name = "command"
                         t_tgt = str(data.get("target") or "").strip()
                         detail = f"{t_name} {t_tgt}".strip() if t_tgt else t_name
                     elif sev == "tool_done":
                         t_name = str(data.get("tool") or "").strip()
+                        if t_name.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                            t_name = "command"
                         t_tgt = str(data.get("target") or "").strip()
                         t_out = str(data.get("output") or "").strip()
                         detail = f"{t_name} {t_tgt}".strip() if t_tgt else t_name
@@ -1118,17 +1134,36 @@ class AssistantTurnCard(Vertical):
         except Exception:
             pass
 
+    def append_summary_chunk(self, chunk: str) -> None:
+        blocks = list(self.flow_container.query(ToolBlock)) or self.tool_blocks
+        for b in reversed(blocks):
+            if getattr(b, "tool_running", False) and (getattr(b, "tool_name", "") or "").lower() in ("summarizing", "summarize", "compact", "context_compact"):
+                if hasattr(b, "append_summary_chunk"):
+                    b.append_summary_chunk(chunk)
+                break
+
     def finish_tool(self, result: Dict[str, Any]) -> None:
         self.clear_generating_tool()
         blocks = list(self.flow_container.query(ToolBlock)) or self.tool_blocks
+        want_sum = isinstance(result, dict) and "summary" in result
         for b in reversed(blocks):
             if getattr(b, "tool_running", False) and not getattr(b, "is_backgrounded", False):
+                if want_sum and (getattr(b, "tool_name", "") or "").lower() not in ("summarizing", "summarize", "compact", "context_compact"):
+                    continue
                 b.finish(result)
                 break
         else:
-            non_bg = [b for b in blocks if not getattr(b, "is_backgrounded", False)]
-            if non_bg and getattr(non_bg[-1], "tool_running", False):
-                non_bg[-1].finish(result)
+            if want_sum:
+                sum_blocks = [
+                    b for b in blocks
+                    if (getattr(b, "tool_name", "") or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+                ]
+                if sum_blocks:
+                    sum_blocks[-1].finish(result)
+            else:
+                non_bg = [b for b in blocks if not getattr(b, "is_backgrounded", False)]
+                if non_bg and getattr(non_bg[-1], "tool_running", False):
+                    non_bg[-1].finish(result)
 
         try:
             self.flow_container.refresh(layout=True)
@@ -1145,6 +1180,20 @@ class AssistantTurnCard(Vertical):
             if getattr(b, "tool_running", False):
                 b_name = (getattr(b, "tool_name", "") or "").lower()
                 if getattr(b, "is_backgrounded", False) or "background" in str(getattr(b, "target", "")).lower():
+                    continue
+                if getattr(b, "subagent_role", "") or b_name in ("subagent", "task"):
+                    if not self.is_generating:
+                        is_cancelled = bool(default_result and str(default_result.get("error", "")).lower() == "cancelled")
+                        b.finish_subagent({
+                            "role": getattr(b, "subagent_role", "") or "Subagent",
+                            "goal": getattr(b, "subagent_goal", "") or "",
+                            "status": "cancelled" if is_cancelled else "completed",
+                            "summary": str(getattr(b, "thinking", "") or ""),
+                            "history": list(getattr(b, "subagent_history", []) or []),
+                            "events": list(getattr(b, "subagent_events", []) or []),
+                            "findings": list(getattr(b, "subagent_findings", []) or []),
+                            "notes": list(getattr(b, "subagent_notes", []) or []),
+                        })
                     continue
                 b.finish(default_result or {"result": "completed"})
 
@@ -1266,6 +1315,7 @@ class AssistantTurnCard(Vertical):
     def resume_turn(self) -> None:
         """Resumes the active card after a background task finishes so the model continues seamlessly."""
         self.is_generating = True
+        self._replay_finished_done = False
         try:
             self.footer_widget.update("")
             self.footer_widget.styles.display = "none"
@@ -1279,6 +1329,11 @@ class AssistantTurnCard(Vertical):
         self.finish_thinking()
         self.clear_generating_tool()
         self.finish_running_tools()
+        if self.is_generating:
+            try:
+                self.footer_widget.update("")
+            except Exception:
+                pass
         if getattr(self, "raw_text", "").strip():
             self._last_finalized_text = getattr(self, "raw_text", "").strip()
         self.current_body_widget = None
@@ -1321,10 +1376,17 @@ class AssistantTurnCard(Vertical):
             self.current_body_widget = new_body
             self.body_widgets.append(new_body)
 
+        if (
+            self.current_body_widget.parent is None
+            and not self.current_body_widget.is_mounted
+            and self.current_body_widget not in getattr(self, "_pending_mounts", [])
+        ):
+            body_to_mount = self.current_body_widget
+
             def _mount_body():
                 try:
-                    if self.flow_container.is_mounted:
-                        self.flow_container.mount(new_body)
+                    if self.flow_container.is_mounted and body_to_mount.parent is None:
+                        self.flow_container.mount(body_to_mount)
                     self.flow_container.refresh(layout=True)
                     self.refresh(layout=True)
                     if self.app:
@@ -1337,7 +1399,7 @@ class AssistantTurnCard(Vertical):
             else:
                 if not hasattr(self, "_pending_mounts"):
                     self._pending_mounts = []
-                self._pending_mounts.append(new_body)
+                self._pending_mounts.append(body_to_mount)
                 self.call_after_refresh(_mount_body)
                 try:
                     self.refresh(layout=True)
@@ -1405,10 +1467,15 @@ class AssistantTurnCard(Vertical):
             t.append(f"  ·  {tokens_in} tokens in", style="#8b949e")
         if tok_s > 0:
             t.append(f"  ({tok_s:.1f} tok/s)", style="dim #8b949e")
+        try:
+            self.footer_widget.styles.display = "block"
+        except Exception:
+            pass
         self.footer_widget.update(t)
 
     def abort(self) -> None:
         self.is_generating = False
+        self.abort_requested = True
         self._stop_spinner()
         self.clear_generating_tool()
         self.finish_running_tools({"error": "cancelled"})
@@ -1421,8 +1488,12 @@ class AssistantTurnCard(Vertical):
         self.update_header()
         t = Text()
         t.append("⌬  ", style="bold #8b949e")
-        t.append("Cancelled (Esc Esc)", style="#8b949e")
+        t.append("Cancelled (Esc)", style="#8b949e")
         t.append(f"  ·  {self.elapsed:.1f}s", style="dim #8b949e")
+        try:
+            self.footer_widget.styles.display = "block"
+        except Exception:
+            pass
         self.footer_widget.update(t)
 
 
@@ -1754,12 +1825,20 @@ class ToolBlock(Vertical):
         self.subagent_elapsed: float = 0.0
         self.subagent_events: List[Dict[str, Any]] = []
 
+        self.summary_live_text: str = ""
         self.header_widget = Static("", classes="tool-header")
-        self.details_widget = Static("", classes="tool-details")
+        is_sum_init = self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact")
+        self.details_widget = Static("", classes="thinking-body" if is_sum_init else "tool-details")
         self.details_widget.styles.display = "none"
-        self.details_widget.styles.text_wrap = "nowrap"
-        self.details_widget.styles.text_overflow = "clip"
-        self.details_widget.styles.overflow_x = "hidden"
+        if is_sum_init:
+            self.details_widget.styles.text_wrap = "wrap"
+            init_txt = Text("Summarizing conversation history…", style="dim #8b949e")
+            self._original_details = init_txt
+            self.details_text = init_txt.plain
+        else:
+            self.details_widget.styles.text_wrap = "nowrap"
+            self.details_widget.styles.text_overflow = "clip"
+            self.details_widget.styles.overflow_x = "hidden"
         self.bg_hint_widget = Static("", classes="tool-bg-hint")
         self.bg_hint_widget.styles.display = "none"
 
@@ -1770,8 +1849,29 @@ class ToolBlock(Vertical):
 
     def on_mount(self) -> None:
         self.update_header()
+        if self._original_details is not None:
+            try:
+                self.details_widget.update(self._original_details)
+            except Exception:
+                pass
         if self.tool_running:
             self._start_spinner()
+
+    def append_summary_chunk(self, chunk: str) -> None:
+        if not chunk or not self.tool_running:
+            return
+        self.summary_live_text += str(chunk)
+        self.details_text = self.summary_live_text
+        try:
+            md = Markdown(self.summary_live_text)
+            self._original_details = md
+            if self.is_expanded:
+                self.details_widget.update(md)
+        except Exception:
+            txt = Text(self.summary_live_text, style="#8b949e")
+            self._original_details = txt
+            if self.is_expanded:
+                self.details_widget.update(txt)
 
     def on_enter(self, event: events.Enter) -> None:
         self._is_mouse_hovered = True
@@ -1815,7 +1915,8 @@ class ToolBlock(Vertical):
                     self.bg_hint_widget.styles.display = "none"
 
             self.update_header()
-        self._spinner_timer = self.set_interval(0.18, _tick)
+        is_sum = (self.tool_name or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+        self._spinner_timer = self.set_interval(0.10 if is_sum else 0.18, _tick)
 
     def _stop_spinner(self) -> None:
         if self._spinner_timer:
@@ -1865,7 +1966,12 @@ class ToolBlock(Vertical):
         self.update_header()
 
     def update_header(self) -> None:
-        frame = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)] if self.tool_running else ""
+        is_sum = (self.tool_name or "").lower() in ("summarizing", "summarize", "compact", "context_compact")
+        if is_sum and self.tool_running:
+            elapsed = max(0.0, time.time() - self.start_time)
+            frame = ["⌬", "✻"][int(elapsed / 0.35) % 2]
+        else:
+            frame = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)] if self.tool_running else ""
         display_name = self.subagent_role if self.subagent_role else ""
         target = self.target
         if self.subagent_role:
@@ -1932,6 +2038,8 @@ class ToolBlock(Vertical):
                 if getattr(self, "subagent_events", None):
                     last_ev = self.subagent_events[-1]
                     l_tool = str(last_ev.get("tool", "") or "")
+                    if l_tool.lower() in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                        l_tool = "command"
                     l_tgt = str(last_ev.get("target", "") or "")
                     self.subagent_live_tool = f"{l_tool} {l_tgt}".strip() if l_tool else ""
                 else:
@@ -1939,6 +2047,9 @@ class ToolBlock(Vertical):
             elif tool and tool not in ("loading model", "agent_note"):
                 clean_arg = arg.strip()
                 tl = tool.lower()
+                if tl in ("shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "command"):
+                    tool = "command"
+                    tl = "command"
                 if tl == "read":
                     for prefix in ("read file ", "reading file ", "read ", "reading "):
                         if clean_arg.lower().startswith(prefix):
@@ -1984,7 +2095,8 @@ class ToolBlock(Vertical):
             self.result_data = agent
             if agent.get("is_backgrounded") or agent.get("background"):
                 self.is_backgrounded = True
-            self.subagent_status = str(agent.get("status", "completed"))
+            st = str(agent.get("status", "completed")).lower()
+            self.subagent_status = st
             self.subagent_goal = str(agent.get("goal", "") or self.subagent_goal)
             self.subagent_system = str(agent.get("system_prompt", "") or self.subagent_system)
             hist = agent.get("history") or []
@@ -1995,10 +2107,13 @@ class ToolBlock(Vertical):
             self.subagent_tool_count = int(agent.get("tool_count", 0) or 0)
             self.subagent_live_tool = ""
             self.subagent_events = list(agent.get("events") or [])
-            self.has_error = str(agent.get("status", "")) == "failed"
+            self.has_error = (st == "failed")
 
             summary = str(agent.get("summary", "")).strip()
-            if self.has_error:
+            if st in ("cancelled", "stopped"):
+                self.target = "cancelled"
+                self.subagent_live_tool = "Cancelled"
+            elif self.has_error:
                 # Keep the reason visible; render_tool_header adds "[failed]".
                 first = (str(agent.get("error", "") or summary).splitlines() or ["error"])[0]
                 self.target = first.strip()[:70] or "error"
@@ -2033,6 +2148,9 @@ class ToolBlock(Vertical):
             elif isinstance(content, Syntax):
                 self._original_details = content
                 self.details_text = getattr(content, "code", "")
+            elif isinstance(content, Markdown):
+                self._original_details = content
+                self.details_text = getattr(content, "markup", "")
             elif hasattr(content, "plain"):
                 self._original_details = Text(str(content.plain), no_wrap=True)
                 self.details_text = content.plain
@@ -2074,7 +2192,7 @@ class ToolBlock(Vertical):
             return
         try:
             from rich.syntax import Syntax
-            if isinstance(self._original_details, Syntax) or self.h_offset <= 0:
+            if isinstance(self._original_details, (Syntax, Markdown)) or self.h_offset <= 0:
                 self.details_widget.update(self._original_details)
                 return
 
@@ -2099,14 +2217,13 @@ class ToolBlock(Vertical):
         elapsed = time.time() - self.start_time
         self.elapsed_text = f"{elapsed:.1f}s"
         if self.tool_name.lower() in ("execute", "eval", "evaluate") or str(self.target).strip().startswith('{"code":'):
-            import re
             raw_t = str(self.target)
             url_m = re.search(r"https?://[^\s'\"`\\]+", raw_t)
             if ("fetch" in raw_t.lower() or "http" in raw_t.lower()) and url_m:
                 self.tool_name = "webfetch"
                 self.target = url_m.group(0)
             elif any(k in raw_t.lower() for k in ("child_process", "exec(", "spawn(", "execsync", "bash", "cmd")):
-                self.tool_name = "terminal"
+                self.tool_name = "command"
                 cmd_m = re.search(r"(?:exec|spawn|execSync)\(\s*['\"]([^'\"]+)['\"]", raw_t)
                 self.target = cmd_m.group(1) if cmd_m else "command"
             else:
@@ -2484,22 +2601,38 @@ class ToolBlock(Vertical):
                 else:
                     txt.append("  ●  Task completed successfully\n", style="bold #7ee787")
             self._safe_update_details(txt)
-        elif self.tool_name in ("summarizing", "summarize", "compact", "context_compact"):
-            txt = Text(no_wrap=False)
-            summary_content = result.get("summary") or result.get("content") or self.target or ""
+        elif self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact"):
+            self.details_widget.styles.text_wrap = "wrap"
+            summary_content = (
+                result.get("summary")
+                or result.get("content")
+                or (result.get("result") if result.get("result") not in ("completed", "done", "ok") else "")
+                or self.summary_live_text
+                or self.target
+                or ""
+            )
+            if not str(summary_content).strip():
+                try:
+                    app_msgs = getattr(self.app, "messages", None) or []
+                    for m in app_msgs:
+                        mc = str(m.get("content", "") or "")
+                        if "CONTEXT COMPACTION" in mc.upper() or (m.get("role") == "assistant" and app_msgs.index(m) == 1 and len(app_msgs) <= 4):
+                            summary_content = mc
+                            break
+                except Exception:
+                    pass
             clean_summary = str(summary_content).strip()
             clean_summary = re.sub(r"^#+\s*CONTEXT COMPACTION STATE HANDOFF\s*", "", clean_summary, flags=re.IGNORECASE).strip()
             clean_summary = re.sub(r"^●?\s*Context Compaction[^\n]*\n*", "", clean_summary, flags=re.IGNORECASE).strip()
             clean_summary = re.sub(r"^●?\s*CONTEXT COMPACTION[^\n]*\n*", "", clean_summary, flags=re.IGNORECASE).strip()
 
-            txt.append("  ● Conversation Summary:\n\n", style="bold #58a6ff")
-            for l in clean_summary.splitlines():
-                line = l.rstrip()
-                if not line:
-                    txt.append("\n")
-                else:
-                    txt.append(f"  {line}\n", style="#e6edf3")
-            self._safe_update_details(txt)
+            if clean_summary:
+                try:
+                    self._safe_update_details(Markdown(clean_summary))
+                except Exception:
+                    self._safe_update_details(Text(clean_summary, style="#8b949e", no_wrap=False))
+            else:
+                self._safe_update_details(Text("Conversation history compacted.", style="dim #8b949e", no_wrap=False))
 
         elif self.tool_name == "ask":
             txt = Text()
@@ -2518,7 +2651,12 @@ class ToolBlock(Vertical):
                     txt.append(f"  ↳  {ans}\n", style="bold #7ee787")
             self._safe_update_details(txt)
 
-        if self.is_tool_expandable():
+        is_sum_done = self.tool_name.lower() in ("summarizing", "summarize", "compact", "context_compact")
+        if is_sum_done:
+            self.update_header()
+            if self.is_expanded:
+                self.details_widget.styles.display = "block"
+        elif self.is_tool_expandable():
             self.set_expanded(False)
 
         try:
@@ -2572,11 +2710,7 @@ class ToolBlock(Vertical):
                 return
         if not self.is_tool_expandable():
             return
-        if self.tool_running:
-            # Expanding while the tool is still running used to be refused. That
-            # is the moment the arguments matter most - a long command is
-            # exactly what you want to read before it has finished, not after.
-            # The details are already there; only the spinner is still going.
+        if tl in ("summarizing", "summarize", "compact", "context_compact") or self.tool_running:
             self.set_expanded(not self.is_expanded)
             return
         if self.tool_name == "screenshot" and self.result_data and self.result_data.get("path"):

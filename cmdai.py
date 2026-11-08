@@ -14,11 +14,12 @@ from cmdai.core.settings import get_settings
 if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
-try:
-    import cmdai_opencode.patch
-    cmdai_opencode.patch.install(APP_ROOT)
-except Exception:
-    pass
+if "dev" in os.path.basename(APP_ROOT).lower() or os.environ.get("CMDAI_DEV") == "1":
+    try:
+        import cmdai_opencode.patch
+        cmdai_opencode.patch.install(APP_ROOT)
+    except Exception:
+        pass
 
 from cmdai.tui.app import CMDAICodeTUI
 
@@ -384,7 +385,9 @@ def main():
         pass
 
     if args.help or args.command in ("help", "-h", "--help"):
-        args.command = ""
+        print_usage = True
+    else:
+        print_usage = False
 
     if args.command in ("update", "code-update") or "code update" in args_joined:
         sys.exit(handle_update())
@@ -408,7 +411,13 @@ def main():
         app.run()
         return
 
-    if args.command != "code":
+    # Check if a directory or file was passed as first argument instead of 'code'
+    if args.command and args.command not in ("code", "app") and not print_usage:
+        if os.path.exists(args.command) and not args.path:
+            args.path = args.command
+            args.command = "code"
+
+    if print_usage or (args.command and args.command not in ("code", "app", "")):
         print("""
   \x1b[36m██████╗███╗   ███╗██████╗  █████╗ ██╗   \x1b[97m██████╗ ██████╗ ██████╗ ███████╗\x1b[0m
  \x1b[36m██╔════╝████╗ ████║██╔══██╗██╔══██╗██║  \x1b[97m██╔════╝██╔═══██╗██╔══██╗██╔════╝\x1b[0m
@@ -445,7 +454,7 @@ def main():
     except Exception:
         pass
     try:
-        sys.stdout.write("\x1b]11;#0a0a0a\x07")
+        sys.stdout.write("\x1b[2J\x1b[3J\x1b[H\x1b]11;#000000\x07")
         sys.stdout.flush()
     except Exception:
         pass

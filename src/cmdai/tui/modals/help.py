@@ -25,6 +25,7 @@ COMMANDS_DOC: Dict[str, str] = {
     "/git": "Open the git window in a new terminal",
     "/commit": "Write a commit message and commit staged changes in a modal",
     "/summarize": "Summarize conversation history into compact context handoff",
+    "/ctx": "Inspect context token usage and manage pinned files",
     "/stats": "Session statistics: tokens, response speeds, tool counts",
     "/params": "View or set generation parameters: temp, top_p, max_tokens",
     "/loader": "Select GGUF backend loader (CPU / CUDA / Vulkan)",
@@ -53,12 +54,12 @@ SHORTCUTS_DOC: Dict[str, Dict[str, str]] = {
     },
     "Escape": {
         "title": "Cancel / Abort / Close",
-        "desc": "Abort generation (press twice), dismiss modal dialog, or unfocus",
+        "desc": "Abort generation, dismiss modal dialog, or unfocus",
         "detail": (
-            "[bold white]Shortcut:[/] [b #58a6ff]Escape[/] (or [b #58a6ff]Esc Esc[/])\n\n"
+            "[bold white]Shortcut:[/] [b #58a6ff]Escape[/] \n\n"
             "[bold white]Action:[/] [bold #e6edf3]Abort Generation / Dismiss Modal[/]\n\n"
             "[bold white]Description:[/] Press Escape to dismiss the current modal dialog or cancel autocomplete suggestions. "
-            "Pressing Escape twice during generation stops the current turn safely without losing history."
+            "Pressing Escape during generation stops the current turn safely without losing history."
         ),
     },
     "Shift+Tab": {

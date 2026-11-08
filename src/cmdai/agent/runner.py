@@ -69,12 +69,18 @@ def _all_tools_failed(events: List[Any]) -> bool:
     non-bookkeeping event keeps that case out of the "everything broke" verdict
     while still catching a run where the workspace was never actually read.
     """
-    real = [e for e in (events or [])
-            if isinstance(e, dict)
-            and str(e.get("tool", "")) not in ("agent_note", "scratch", "todo", "tasks")]
+    real = [
+        e for e in (events or [])
+        if isinstance(e, dict)
+        and bool(str(e.get("tool", "") or "").strip())
+        and e.get("type") not in ("text", "thinking")
+        and str(e.get("tool", "")).strip().lower() not in ("agent_note", "scratch", "todo", "tasks")
+    ]
     if not real:
         return False
     return all(not e.get("ok", False) for e in real)
+
+    # ---- end of _all_tools_failed ----
 
 
 def _parse_only(text: str) -> List[Tuple[str, Any]]:
@@ -688,7 +694,7 @@ class AgentRunner:
                     a_dict["new"] = _strip_code_fence(new_m.group(1), a_dict.get("path", ""))
                 elif not old_m and "new" not in a_dict and b_text:
                     a_dict["new"] = _strip_code_fence(b_text, a_dict.get("path", ""))
-            elif t_name == "command":
+            elif t_name in ("command", "shell", "bash", "terminal", "sh", "cmd", "run_command", "exec", "powershell", "pwsh", "execute_command", "run_shell_command", "shell_command"):
                 if b_text and "cmd" not in a_dict:
                     a_dict["cmd"] = _strip_code_fence(b_text, "")
             elif t_name in ("scratch", "todo", "tasks"):
@@ -704,6 +710,16 @@ class AgentRunner:
                 if not a_dict.get("goal") and not a_dict.get("task") and b_text:
                     a_dict["goal"] = b_text
 
+        _NORM_NAMES = {
+            "create_file": "write", "write_file": "write", "write_to_file": "write", "save_file": "write",
+            "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
+            "read_file": "read", "view_file": "read", "cat": "read",
+            "list_directory": "ls", "list_dir": "ls",
+            "run_command": "command", "execute_command": "command", "bash": "command", "sh": "command", "terminal": "command", "cmd": "command",
+            "shell": "command", "exec": "command", "powershell": "command", "pwsh": "command", "run_shell_command": "command", "shell_command": "command",
+            "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch", "read_browser_page": "webfetch",
+        }
+
         raw_matches = []
 
         gemma_pattern = re.compile(
@@ -711,7 +727,7 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in gemma_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             body = (match.group(3) or "").strip()
             attrs = _parse_attrs(attrs_str)
@@ -723,7 +739,7 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in body_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
             attrs = _parse_attrs(attrs_str)
@@ -733,11 +749,11 @@ class AgentRunner:
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
 
         unclosed_body_pattern = re.compile(
-            r'<tool:(write|edit|command|subagent)\b(?:\s+([^>]*?))?\s*/?>\s*((?:(?!</?(?:tool:|tool_call|\|tool_call)).)+)$',
+            r'<tool:(write|edit|command|shell|bash|terminal|cmd|sh|run_command|subagent)\b(?:\s+([^>]*?))?\s*/?>\s*((?:(?!</?(?:tool:|tool_call|\|tool_call)).)+)$',
             re.DOTALL | re.IGNORECASE,
         )
         for match in unclosed_body_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
             if body:
@@ -747,7 +763,7 @@ class AgentRunner:
 
         single_tag_pattern = re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*/?>', re.DOTALL | re.IGNORECASE)
         for match in single_tag_pattern.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             attrs = _parse_attrs(attrs_str)
             _normalize_attrs(tool_name, attrs, "")
@@ -758,21 +774,12 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in tool_call_block.finditer(text):
-            tool_name = match.group(1).lower()
+            tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             body = (match.group(3) or "").strip()
             attrs = _parse_attrs(attrs_str)
             _normalize_attrs(tool_name, attrs, body)
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
-
-        _NORM_NAMES = {
-            "create_file": "write", "write_file": "write", "write_to_file": "write", "save_file": "write",
-            "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
-            "read_file": "read", "view_file": "read", "cat": "read",
-            "list_directory": "ls", "list_dir": "ls",
-            "run_command": "command", "execute_command": "command", "bash": "command", "sh": "command", "terminal": "command", "cmd": "command",
-            "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch", "read_browser_page": "webfetch",
-        }
         dec = json.JSONDecoder()
         scan_pos = 0
         while scan_pos < len(text):
@@ -1481,6 +1488,8 @@ class AgentRunner:
         if not calls:
             return {"success": False, "error": "subagent was called without a task", "subagents": []}
 
+        if getattr(self.ctx, "workdir", None):
+            self.workdir = self.ctx.workdir
         mode = getattr(self.ctx, "mode", "auto")
         orch = SubagentOrchestrator(engine=None)
         tasks: List[SubagentTask] = []
@@ -1489,6 +1498,7 @@ class AgentRunner:
             role = raw["role"]
             goal = raw["goal"]
             system = raw["system"]
+            call_workdir = (raw.get("workdir") or self.workdir)
             task = SubagentTask(
                 role=role,
                 goal=goal,
@@ -1497,7 +1507,7 @@ class AgentRunner:
                 # defaults to a 4-item read-only list, and run_subagent only
                 # falls back to SUBAGENT_AVAILABLE_TOOLS when tools is empty.
                 tools=list(SUBAGENT_AVAILABLE_TOOLS),
-                context={"workdir": self.workdir},
+                context={"workdir": call_workdir, "subagent_id": raw.get("_sid", "")},
             )
             if mode == "ask":
                 # Ask mode needs a human OK for write/edit/command, and a
@@ -1518,7 +1528,8 @@ class AgentRunner:
             task = queue.pop(0) if queue else None
             # Per-subagent context so scratch/todo entries and queued images do
             # not bleed into the lead agent's context.
-            sub_ctx = AgentContext(workdir=self.workdir)
+            sub_w = (task.context.get("workdir") if task and isinstance(task.context, dict) else None) or self.workdir
+            sub_ctx = AgentContext(workdir=sub_w)
             sub_ctx.mode = mode
             sub_ctx.is_subagent = True
 
@@ -1564,6 +1575,9 @@ class AgentRunner:
             provider = getattr(self, "provider_id", "local_gguf") or "local_gguf"
             is_local = provider in ("local_gguf", "local", "llama_cpp", "ollama")
 
+        if is_local and (max_turns is None or max_turns > 6):
+            max_turns = 6
+
         results = orch.execute_tasks(
             tasks,
             on_progress=on_progress,
@@ -1583,7 +1597,12 @@ class AgentRunner:
                 1 for m in history
                 if m.get("role") == "user" and str(m.get("content", "")).startswith("[tool:")
             )
-            server_tools_count = sum(1 for ev in (r.events or []) if isinstance(ev, dict) and ev.get("type") != "text")
+            server_tools_count = sum(
+                1 for ev in (r.events or [])
+                if isinstance(ev, dict)
+                and bool(str(ev.get("tool", "") or "").strip())
+                and ev.get("type") not in ("text", "thinking")
+            )
             tool_count = max(tool_count, server_tools_count)
             all_failed = _all_tools_failed(r.events or [])
             # A subagent whose every tool errored did not do its task, whatever
@@ -1869,9 +1888,8 @@ class AgentRunner:
                     if not any(str(a.get("summary", "") or "").strip() for a in agents):
                         lines.append("None of them wrote a report. Their work is not in your context: "
                                      "do not assume what they found, check the files yourself.")
-                    lines.append("Review before telling the user it is done: "
-                                 "<tool:command cmd=\"git diff --stat\" />, then <tool:read> the files that matter, "
-                                 "verify with <tool:bugs />, and describe the result in your own words.")
+                    lines.append("Present the subagent findings clearly to the user in your own words now. "
+                                 "Do NOT spawn the same subagent again and do NOT call any more tools unless a file edit is needed.")
         elif name == "mcp":
             if res.get("error"):
                 lines.append(f"Error: {res.get('error')}")
@@ -1937,20 +1955,19 @@ _PLAN_TOOLS_BLOCK = (
     "7. Plan/Todo Tracker: <tool:todo action=\"set\" todos=\"step one|step two|step three\" /> - "
     "that is how you record the plan. 'set' replaces the checklist, 'add' appends one "
     "step, 'done' marks a finished step.\n"
+    "8. Spawn Subagent: <tool:subagent name=\"Role\" system=\"instructions for the subagent\">the task it must do</tool:subagent>\n"
     "\n"
     "NOT AVAILABLE IN PLAN MODE: Write File, Edit File and Run Command. Calling them does "
     "not work - the app answers with an error and the step is wasted. Never call "
-    "<tool:write>, <tool:edit> or <tool:command> in this mode. MCP servers and subagents "
-    "are not used in PLAN mode either.\n"
+    "<tool:write>, <tool:edit> or <tool:command> in this mode.\n"
 )
 
 _PLAN_DIRECTIVES_BLOCK = (
     "\nEXECUTION DIRECTIVES:\n"
-    "- CRITICAL (ANTI-STALLING): You are an autonomous agent, NOT a chatbot. NEVER output only a statement of intent or announcement (e.g. 'Zakładam listę zadań...', 'Let me inspect...') without immediately invoking the tool in the same turn.\n"
+    "- CRITICAL (ANTI-STALLING): You are an autonomous agent, NOT a chatbot. Never output only a statement of intent without immediately invoking the required tool in the same response.\n"
     "- INTERLEAVED EXPLANATIONS & ACTIONS: say in one sentence what you are looking at "
     "before each tool call, so the user can follow the investigation.\n"
-    "- STRUCTURE: [what you checked] -> <tool:...> -> [what you found] -> <tool:...> -> "
-    "[the plan]. Do NOT dump a wall of tools without explanations.\n"
+    "- STRUCTURE: Explain briefly what you are checking before each <tool:...>, then summarize what you found and present the plan. Do NOT dump a wall of tools without explanations, and never output literal bracket placeholders.\n"
     "- ONE CHECKLIST CALL: record the plan with a single <tool:todo action=\"set\" ... /> "
     "call, after the investigation and before your summary.\n"
     "- STOP AFTER THE PLAN: no tool call after the checklist, and no second checklist.\n"
@@ -1992,13 +2009,13 @@ def _full_tools_block(vision: bool) -> str:
 
 _FULL_DIRECTIVES_BLOCK = (
     "\nEXECUTION DIRECTIVES:\n"
-    "- CRITICAL (ANTI-STALLING): You are an autonomous execution engine, NOT a conversational chatbot. NEVER emit only announcements of what you plan to do (such as 'Zakładam listę zadań...', 'Sprawdzę najpierw...', 'I will now check...'). Every explanation MUST be immediately accompanied by the corresponding tool call in the exact same response.\n"
-    "- INTERLEAVED EXPLANATIONS & ACTIONS: Always include a brief 1-2 sentence explanation before and between your tool actions (e.g. state what you are inspecting, what you found, or why you are making a change), followed by the tool call. This allows the user to follow your step-by-step progress chronologically.\n"
-    "- STRUCTURE: Write naturally as: [Brief reasoning/finding] -> <tool:...> -> [Next finding/decision] -> <tool:...> -> [Final outcome]. Do NOT dump a wall of tools without explanations.\n"
-    "- SUBAGENTS: When a task is large, split it and delegate with <tool:subagent>. You may emit several in one turn — they run one after another on a local model, or all at once on an API model.\n"
-    "- BACKGROUND EXECUTION (`background=\"true\"`): When the user asks to run a command or subagent in the background, or when launching a long-running command/build/server/test, add `background=\"true\"` to `<tool:command cmd=\"...\" background=\"true\" />` or `<tool:subagent name=\"...\" background=\"true\">...</tool:subagent>`. Tell the user what command/subagent you launched in the background. When it finishes, you will automatically receive a `<tool_response name=\"background_task\">` or `<tool_response name=\"background_subagent\">` notification with its output — immediately summarize and present that output to the user.\n"
-    "- SUBAGENT CONTRACT: `name` is the short role shown in the UI (e.g. \"Code Architect\"). `system` is the prompt you generate for it, so spell out what it must and must not do. The element body is the task itself, and it is the only text the user sees under TASK. Subagents can use every tool you have except spawning more subagents. They cannot ask the user anything, so never give them a task that needs a decision.\n"
-    "- AGENT NOTES: a subagent works in its own context. It cannot spawn more subagents and cannot ask the user anything. Its transcript, its tool calls and their raw output never reach you. What reaches you is its final report, plus any notes it chose to send with <tool:agent_note text=\"...\" />, all arriving when the batch finishes. Treat that report as the subagent's answer and build on it, but do not present it as verified: after the batch, review before reporting — run <tool:command cmd=\"git diff --stat\" />, check the files that matter, verify with <tool:bugs />, and describe the result in your own words.\n"
+    "- CRITICAL (ANTI-STALLING): You are an autonomous execution engine, NOT a conversational chatbot. Never output only an announcement of what you plan to do without immediately emitting the corresponding <tool:...> call in the exact same response.\n"
+    "- INTERLEAVED EXPLANATIONS & ACTIONS: Always include a brief 1-2 sentence explanation before and between your tool actions, followed by the tool call.\n"
+    "- STRUCTURE: Write natural prose before each <tool:...> call, then explain the next finding or final outcome. Do NOT dump a wall of tools without explanations, and never output literal bracket placeholders.\n"
+    "- SUBAGENTS: When the user asks to use or invoke a subagent (e.g. 'wywołaj subagenta', 'use a subagent') or when delegating a review/analysis task, immediately emit `<tool:subagent name=\"Code Reviewer\" system=\"Inspect the project files with ls and read, then provide a detailed evaluation.\">task description</tool:subagent>`. You may emit several in one turn — they run one after another on a local model, or all at once on an API model.\n"
+    "- BACKGROUND EXECUTION (`background=\"true\"`): Only when the user explicitly asks to run a command or subagent in the background, add `background=\"true\"` to `<tool:command cmd=\"...\" background=\"true\" />` or `<tool:subagent name=\"...\" background=\"true\">...</tool:subagent>`.\n"
+    "- SUBAGENT CONTRACT: `name` is the short role shown in the UI (e.g. \"Code Reviewer\"). `system` is the prompt you generate for it, so spell out what it must and must not do. The element body is the task itself, and it is the only text the user sees under TASK. Subagents can use every tool you have except spawning more subagents. They cannot ask the user anything, so never give them a task that needs a decision.\n"
+    "- AGENT NOTES: a subagent works in its own context. It cannot spawn more subagents and cannot ask the user anything. What reaches you is its final report, plus any notes it chose to send with <tool:agent_note text=\"...\" />, all arriving when the batch finishes. Treat that report as the subagent's answer, synthesize its findings clearly for the user in your own words, and if files were modified, verify with <tool:bugs />.\n"
     "- Be fast, direct, and proactive: execute the necessary reads, edits, writes, and commands to complete the user request.\n"
     "- Always verify your work with `<tool:bugs />` or `<tool:command>` to ensure zero errors.\n"
 )
