@@ -101,8 +101,54 @@ CODE_PARTS = _CODE_PARTS
 get_hero_logo = _get_hero_logo
 LOGO_HERO = _LOGO_HERO
 
+from textual.screen import Screen
+from textual.widget import Widget
+from textual.widgets._tooltip import Tooltip
+from textual.geometry import Offset
+
+_orig_screen_handle_tooltip_timer = getattr(Screen, "_handle_tooltip_timer", None)
+if _orig_screen_handle_tooltip_timer is not None:
+    def _patched_screen_handle_tooltip_timer(self, widget: Widget) -> None:
+        _orig_screen_handle_tooltip_timer(self, widget)
+        try:
+            tooltip = self.get_child_by_type(Tooltip)
+            if tooltip.display:
+                is_timeline = False
+                for node in widget.ancestors_with_self:
+                    if getattr(node, "id", None) == "chat-timeline-rail" or "timeline-dot" in getattr(node, "classes", set()):
+                        is_timeline = True
+                        break
+                if is_timeline:
+                    tooltip.add_class("-timeline-tooltip")
+                    dot_y = widget.region.y if getattr(widget, "region", None) else self.app.mouse_position.y
+                    tooltip.absolute_offset = Offset(3, dot_y)
+                else:
+                    tooltip.remove_class("-timeline-tooltip")
+        except Exception:
+            pass
+
+    Screen._handle_tooltip_timer = _patched_screen_handle_tooltip_timer
+
+_orig_screen_clear_tooltip = getattr(Screen, "_clear_tooltip", None)
+if _orig_screen_clear_tooltip is not None:
+    def _patched_screen_clear_tooltip(self) -> None:
+        _orig_screen_clear_tooltip(self)
+        try:
+            tooltip = self.get_child_by_type(Tooltip)
+            tooltip.remove_class("-timeline-tooltip")
+        except Exception:
+            pass
+
+    Screen._clear_tooltip = _patched_screen_clear_tooltip
+
 
 class ChatScroll(VerticalScroll):
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        app = getattr(self, "app", None)
+        if app is not None and hasattr(app, "_update_timeline_active_on_scroll"):
+            app._update_timeline_active_on_scroll(self)
 
     def _scroll_target_y(self) -> float:
         try:
@@ -130,6 +176,7 @@ class ChatScroll(VerticalScroll):
         if app is not None:
             app.auto_scroll_enabled = False
             app._last_user_scroll_time = time.time()
+            app._timeline_nav_target_idx = None
         try:
             target = max(0.0, self._scroll_target_y() - 3)
             self.scroll_to(y=target, animate=False, immediate=True)
@@ -161,6 +208,7 @@ class ChatScroll(VerticalScroll):
                 self.scroll_relative(y=3, animate=False)
         app = getattr(self, "app", None)
         if app is not None:
+            app._timeline_nav_target_idx = None
             try:
                 if self._is_at_bottom():
                     app.auto_scroll_enabled = True
@@ -312,30 +360,7 @@ class CMDAICodeTUI(App):
         self._pending_approval_details: Optional[Dict[str, Any]] = None
         self._meta_spinner_timer = None
 
-        self.system_prompt: str = (
-            "You are CMDAI CODE, an autonomous terminal AI programming agent running on Windows.\n"
-            f"Current working directory: {self.workdir}\n\n"
-            "CRITICAL INSTRUCTIONS FOR CODE AGENT BEHAVIOR:\n"
-            "1. You are an AUTONOMOUS CODE AGENT. NEVER tell the user to inspect files, run commands, or check directory structure themselves. YOU MUST DO IT YOURSELF using the XML tools immediately.\n"
-            "2. When the user asks you to check, build, edit, or debug a project, DO NOT ask permission or tell the user to prepare the project — immediately run <tool:ls path=\".\" /> or <tool:read path=\"file\" /> to inspect it.\n"
-            "3. Answer in the same language as the user (if the user asks in Polish, respond in Polish).\n"
-            "4. When you emit a tool call, the system will execute it and return the result inside <tool_response name=\"...\">...</tool_response>. You will then see the output and continue working until the task is complete.\n"
-            "5. If a tool call fails (e.g. <tool:edit> fails with \"don't match\"), DO NOT GIVE UP or stop! You MUST immediately inspect the file using <tool:read>, locate the exact content, and retry <tool:edit> or use <tool:write>. The turn is only complete when all changes are properly applied.\n\n"
-            "AVAILABLE XML TOOLS:\n"
-            "- <tool:ls path=\".\" /> : List files in directory\n"
-            "- <tool:read path=\"file.py\" lines=\"1-50\" /> : Read file contents\n"
-            "- <tool:glob pattern=\"*.py\" dir=\".\" /> : Find files matching glob\n"
-            "- <tool:search query=\"text\" path=\".\" /> : Search text across files\n"
-            "- <tool:write path=\"file.py\">content</tool:write> : Create or overwrite file\n"
-            "- <tool:edit path=\"file.py\"><old>exact_code</old><new>replacement_code</new></tool:edit> : Edit code\n"
-            "- <tool:command>shell_command</tool:command> : Run terminal command\n"
-            "- <tool:web>url_or_query</tool:web> : Web fetch or search\n"
-            "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue\n"
-            "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation\n"
-            "- <tool:subagent name=\"Code Reviewer\" system=\"Inspect project files using ls and read, then provide a detailed evaluation.\">task description</tool:subagent> : Spawn an autonomous subagent to review, analyze, or execute a task\n"
-            "- <tool:mcp /> : List MCP servers. Then <tool:mcp open server=\"NAME\" /> reveals that server's tools; call them as <tool:mcp__NAME__TOOL>{\"arg\":\"v\"}</tool:mcp__NAME__TOOL>\n"
-            "- <tool:screenshot target=\"active_window\" /> + <tool:vision image_path=\"file.png\" question=\"...\" /> : Only listed in the agent section below when the loaded model supports vision\n"
-        )
+        self.system_prompt: str = self._build_base_system_prompt()
 
         self.messages: List[Dict[str, Any]] = []
         self._turn_counter: int = 0
@@ -457,7 +482,15 @@ class CMDAICodeTUI(App):
 
         try:
             import signal
-            signal.signal(signal.SIGINT, lambda s, f: self.call_from_thread(self.action_handle_interrupt))
+            def _sigint_handler(s, f):
+                try:
+                    self.call_soon(self.action_handle_interrupt)
+                except Exception:
+                    try:
+                        self.call_from_thread(self.action_handle_interrupt)
+                    except Exception:
+                        pass
+            signal.signal(signal.SIGINT, _sigint_handler)
         except Exception:
             pass
 
@@ -621,11 +654,8 @@ class CMDAICodeTUI(App):
                         pass
             if self.in_chat_mode and has_notifs:
                 if getattr(self, "_post_turn_approval_active", False):
-                    self._post_turn_approval_active = False
-                    try:
-                        self.query_one("#approval-bar", ApprovalBar).hide()
-                    except Exception:
-                        pass
+                    # Do not auto-dismiss approval bar or start generation while user has pending file approval!
+                    return
                 self.start_generation("", resume_existing=True)
 
     # The pair used in all three places: the thinking block, the marker beside the
@@ -739,16 +769,24 @@ class CMDAICodeTUI(App):
             self.cycle_mode()
 
     def _get_editor_main_path(self) -> str:
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        upgraded_main = os.path.join(repo_root, "editor", "main.py")
-        if os.path.isfile(upgraded_main):
-            return upgraded_main
-        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "editor", "editor_app.py")
+        cmdai_pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pkg_editor = os.path.join(cmdai_pkg, "editor", "main.py")
+        if os.path.isfile(pkg_editor):
+            return os.path.abspath(pkg_editor)
+        repo_root = os.path.dirname(os.path.dirname(cmdai_pkg))
+        root_editor = os.path.join(repo_root, "src", "cmdai", "editor", "main.py")
+        if os.path.isfile(root_editor):
+            return os.path.abspath(root_editor)
+        return os.path.abspath(pkg_editor)
 
     def _open_diff_window(self, arg: str = "") -> None:
         try:
             from ..core.project_scope import is_unsafe_global_dir, resolve_diff_target_file
             recent_files = list(getattr(self, "_last_modified_files", None) or [])
+            if not recent_files and getattr(self, "_pending_approval_details", None):
+                pend_files = self._pending_approval_details.get("files", [])
+                if pend_files:
+                    recent_files = list(pend_files)
             target_file = resolve_diff_target_file(self.workdir, arg=arg, recent_files=recent_files)
             if not target_file:
                 if is_unsafe_global_dir(self.workdir):
@@ -837,6 +875,50 @@ class CMDAICodeTUI(App):
             self._open_diff_window()
 
 
+    def _update_timeline_active_on_scroll(self, scroll: VerticalScroll) -> None:
+        try:
+            # If user explicitly clicked a dot, hold that active selection during animation and settling
+            if getattr(self, "_timeline_nav_target_idx", None) is not None:
+                if (time.time() - getattr(self, "_timeline_nav_time", 0.0) < 1.5) or getattr(scroll, "is_scrolling", False):
+                    return
+                self._timeline_nav_target_idx = None
+
+            rail = self.query_one("#chat-timeline-rail", TimelineRail)
+            if not rail or "hidden" in rail.classes or not rail._turns:
+                return
+
+            user_cards = [
+                c for c in scroll.children
+                if isinstance(c, UserMessageCard) and not getattr(c, "_pruning", False)
+            ]
+            if not user_cards:
+                return
+
+            total = len(user_cards)
+            max_y = float(getattr(scroll, "max_scroll_y", 0) or 0)
+            cur_y = float(getattr(scroll, "scroll_y", 0) or 0)
+
+            if cur_y <= 1:
+                active_idx = 0
+            elif max_y > 5 and cur_y >= max_y - 1:
+                active_idx = total - 1
+            else:
+                active_idx = 0
+                best_dist = float("inf")
+                for idx, c in enumerate(user_cards):
+                    reg_y = getattr(getattr(c, "region", None), "y", None)
+                    if reg_y is not None:
+                        dist = abs(reg_y - cur_y)
+                        if dist < best_dist:
+                            best_dist = dist
+                            active_idx = idx
+
+            if getattr(self, "_active_view_turn_idx", None) != active_idx:
+                self._active_view_turn_idx = active_idx
+                rail.set_active_turn_idx(active_idx)
+        except Exception:
+            pass
+
     @on(TimelineRail.TurnSelected)
     def on_timeline_turn_selected(self, msg: TimelineRail.TurnSelected) -> None:
         try:
@@ -851,9 +933,16 @@ class CMDAICodeTUI(App):
                         target = child
                         break
             if target is not None:
-                chat_scroll.scroll_to_widget(target, animate=True)
                 self._active_view_turn_idx = msg.turn_idx
                 self._active_view_turn_id = getattr(target, "turn_id", msg.turn_id)
+                self._timeline_nav_target_idx = msg.turn_idx
+                self._timeline_nav_time = time.time()
+                try:
+                    rail = self.query_one("#chat-timeline-rail", TimelineRail)
+                    rail.set_active_turn_idx(msg.turn_idx)
+                except Exception:
+                    pass
+                chat_scroll.scroll_to_widget(target, top=True, animate=True)
         except Exception:
             pass
 
@@ -890,11 +979,19 @@ class CMDAICodeTUI(App):
             return
 
         turns = []
+        nudge_prefixes = (
+            "Kontynuuj na podstawie",
+            "Nie zatrzymuj się na samej",
+            "Wywołaj teraz subagenta",
+            "oraz przedstawić zwięzłe",
+        )
         if hasattr(self, "_transcript") and self._transcript:
             for item in self._transcript:
                 if isinstance(item, dict) and item.get("kind") == "user":
-                    tid = int(item.get("turn_id", 0) or 0)
                     prompt = str(item.get("text", "") or "")
+                    if any(prompt.startswith(p) for p in nudge_prefixes):
+                        continue
+                    tid = int(item.get("turn_id", 0) or 0)
                     t_str = str(item.get("time") or "")
                     if not t_str and item.get("timestamp"):
                         try:
@@ -908,8 +1005,10 @@ class CMDAICodeTUI(App):
         if not turns:
             for child in chat_scroll.children:
                 if isinstance(child, UserMessageCard) and not getattr(child, "_pruning", False):
-                    tid = int(getattr(child, "turn_id", 0) or 0)
                     prompt = str(getattr(child, "prompt", "") or "")
+                    if any(prompt.startswith(p) for p in nudge_prefixes):
+                        continue
+                    tid = int(getattr(child, "turn_id", 0) or 0)
                     t_str = str(getattr(child, "time_str", "") or "")
                     turns.append({"turn_id": tid, "text": prompt, "time": t_str})
 
@@ -2565,6 +2664,8 @@ class CMDAICodeTUI(App):
                 workdir=s_workdir,
                 agent_mode=s_mode,
                 named_by_model=bool(existing.get("named_by_model", False)),
+                todo_list=existing.get("todo_list"),
+                pending_approval=existing.get("pending_approval"),
             )
         except Exception:
             pass
@@ -2596,6 +2697,8 @@ class CMDAICodeTUI(App):
                 workdir=self.workdir,
                 agent_mode=self.agent_mode,
                 named_by_model=getattr(self, "_session_named_by_model", False),
+                todo_list=getattr(self.agent_ctx, "todo_list", None),
+                pending_approval=getattr(self, "_pending_approval_details", None) if getattr(self, "_post_turn_approval_active", False) else None,
             )
         except Exception:
             pass
@@ -3285,6 +3388,44 @@ class CMDAICodeTUI(App):
         except Exception:
             pass
 
+    def _build_base_system_prompt(self, vision: Optional[bool] = None) -> str:
+        if vision is None:
+            vision = self._model_supports_vision()
+        tools_list = [
+            "- <tool:ls path=\".\" /> : List files in directory",
+            "- <tool:read path=\"file.py\" lines=\"1-50\" /> : Read file contents",
+            "- <tool:glob pattern=\"*.py\" dir=\".\" /> : Find files matching glob",
+            "- <tool:search query=\"text\" path=\".\" /> : Search text across files",
+            "- <tool:write path=\"file.py\">content</tool:write> : Create or overwrite file",
+            "- <tool:edit path=\"file.py\"><old>exact_code</old><new>replacement_code</new></tool:edit> : Edit code",
+            "- <tool:command>shell_command</tool:command> : Run terminal command. To run in background: <tool:command background=\"true\">cmd</tool:command>",
+            "- <tool:web query=\"...\" /> or <tool:web url=\"...\" /> : Web search or page fetch",
+            "- <tool:scratch action=\"add|done|clear\">step note</tool:scratch> : Update TODO queue",
+            "- <tool:ask question=\"Question to user\" options=\"Option 1|Option 2|Option 3\" /> : Prompt user for choice/confirmation",
+            "- <tool:subagent name=\"Code Reviewer\" system=\"Inspect project files...\">task</tool:subagent> : Spawn subagent. To run in background: <tool:subagent background=\"true\" name=\"...\">task</tool:subagent>",
+            "- <tool:mcp /> : List MCP servers. Then <tool:mcp open server=\"NAME\" /> reveals that server's tools; call them as <tool:mcp__NAME__TOOL>{\"arg\":\"v\"}</tool:mcp__NAME__TOOL>",
+        ]
+        if vision:
+            tools_list.append("- <tool:screenshot target=\"active_window\" /> : Capture screen or active window to PNG")
+            tools_list.append("- <tool:vision image_path=\"file.png\" question=\"what to inspect\" /> : Inspect and analyze an image using vision")
+
+        tools_str = "\n".join(tools_list)
+
+        workdir_val = getattr(self, "workdir", ".")
+        return (
+            "You are CMDAI CODE, an autonomous terminal AI programming agent running on Windows.\n"
+            f"Current working directory: {workdir_val}\n\n"
+            "CRITICAL INSTRUCTIONS FOR CODE AGENT BEHAVIOR:\n"
+            "1. You are an AUTONOMOUS CODE AGENT. NEVER tell the user to inspect files, run commands, or check directory structure themselves. YOU MUST DO IT YOURSELF using the XML tools immediately.\n"
+            "2. When the user asks you to check, build, edit, or debug a project, DO NOT ask permission or tell the user to prepare the project — immediately run <tool:ls path=\".\" /> or <tool:read path=\"file\" /> to inspect it.\n"
+            "3. Answer in the same language as the user.\n"
+            "4. When you emit a tool call, the system will execute it and return the result inside <tool_response name=\"...\">...</tool_response>. You will then see the output and continue working until the task is complete.\n"
+            "5. If a tool call fails (e.g. <tool:edit> fails with \"don't match\"), DO NOT GIVE UP or stop! You MUST immediately inspect the file using <tool:read>, locate the exact content, and retry <tool:edit> or use <tool:write>. The turn is only complete when all changes are properly applied.\n"
+            "6. STRICT TOOL WHITELIST: You may ONLY use the tools listed below. NEVER invent or hallucinate non-existent tools (e.g. <tool:Experimental_image_generate>, <tool:download>, <tool:fetch>). To generate graphics, write SVG files directly with <tool:write>. To download images/files, execute curl or PowerShell via <tool:command>.\n\n"
+            "AVAILABLE XML TOOLS:\n"
+            f"{tools_str}\n"
+        )
+
     def _model_supports_vision(self) -> bool:
         """Whether the model currently loaded can accept images."""
         try:
@@ -3955,6 +4096,7 @@ class CMDAICodeTUI(App):
                 max_context=max_ctx,
                 provider=self.current_provider,
                 workdir=self.workdir,
+                session_stats=dict(self.stats or {}),
             ),
             _on_context_close,
         )
@@ -4349,6 +4491,14 @@ class CMDAICodeTUI(App):
             kind = item.get("kind")
 
             if kind == "user":
+                p_text = str(item.get("text", "") or "")
+                if any(p_text.startswith(p) for p in (
+                    "Kontynuuj na podstawie",
+                    "Nie zatrzymuj się na samej",
+                    "Wywołaj teraz subagenta",
+                    "oraz przedstawić zwięzłe",
+                )):
+                    continue
                 if card is not None and not getattr(card, "_replay_finished_done", False):
                     card.finish(getattr(card, "elapsed", None))
                 card = None
@@ -4602,6 +4752,72 @@ class CMDAICodeTUI(App):
             block.subagent_total = total
             block.update_header()
 
+        # Reconstruct todo list from transcript if present and not yet set
+        if not getattr(getattr(self, "agent_ctx", None), "todo_list", None):
+            restored_todos = []
+            for item in transcript or []:
+                if isinstance(item, dict) and item.get("kind") == "tool" and str(item.get("tool", "")).lower() in ("todo", "scratch", "tasks"):
+                    tgt = str(item.get("target", "")).strip()
+                    if tgt.lower().startswith("set:"):
+                        raw = tgt[4:].strip()
+                        parts = [p.strip() for p in raw.split("|") if p.strip()]
+                        restored_todos = [{"text": p, "done": False} for p in parts]
+                    elif tgt.lower().startswith("done:"):
+                        idx_str = tgt[5:].strip()
+                        try:
+                            d_idx = int(idx_str) - 1
+                            if 0 <= d_idx < len(restored_todos):
+                                restored_todos[d_idx]["done"] = True
+                        except Exception:
+                            pass
+            if restored_todos and hasattr(self, "agent_ctx"):
+                self.agent_ctx.todo_list = restored_todos
+                try:
+                    self.query_one("#todo-preview-bar", TodoPreviewBar).update_steps([
+                        t["text"] for t in restored_todos if not t.get("done")
+                    ])
+                except Exception:
+                    pass
+
+        # If in code mode and not active generating, check whether the last turn ended with file modifications
+        if getattr(self, "agent_mode", "") == "code" and not is_active_generating and not getattr(self, "_post_turn_approval_active", False):
+            last_turn_files = []
+            for item in reversed(transcript or []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("kind") == "user":
+                    break
+                if item.get("kind") == "tool" and str(item.get("tool", "")).lower() in ("write", "edit", "patch"):
+                    fpath = str(item.get("target", "") or "")
+                    res = item.get("result", {})
+                    if not fpath and isinstance(res, dict):
+                        fpath = str(res.get("path") or res.get("file") or "")
+                    if fpath:
+                        fclean = fpath.split("(")[0].strip()
+                        if fclean and fclean not in last_turn_files:
+                            last_turn_files.append(fclean)
+
+            if last_turn_files:
+                cnt = len(last_turn_files)
+                summary_target = last_turn_files[0] if cnt == 1 else f"{cnt} files"
+                details = {
+                    "action": "edit",
+                    "path": summary_target,
+                    "file_count": cnt,
+                    "diff_info": "",
+                    "files": list(last_turn_files),
+                    "lines_added": 0,
+                    "lines_deleted": 0,
+                }
+                self._pending_approval_details = details
+                self._post_turn_approval_active = True
+                self._last_modified_files = list(last_turn_files)
+                try:
+                    bar = self.query_one("#approval-bar", ApprovalBar)
+                    bar.show_request(details)
+                except Exception:
+                    pass
+
         chat_scroll.scroll_end(animate=False)
         self._refresh_timeline_rail()
 
@@ -4667,6 +4883,21 @@ class CMDAICodeTUI(App):
                     pass
         except Exception:
             pass
+
+        try:
+            self.query_one("#approval-bar", ApprovalBar).hide_request()
+            self.query_one("#approval-diff-preview", ApprovalDiffPreview).hide_diff()
+        except Exception:
+            pass
+        self._post_turn_approval_active = False
+        self._pending_approval_details = None
+        self._last_modified_files.clear()
+        try:
+            self.query_one("#todo-preview-bar", TodoPreviewBar).update_steps([])
+        except Exception:
+            pass
+        if hasattr(self, "agent_ctx"):
+            self.agent_ctx.todo_list = []
 
         self.current_session_id = session_id
         self._session_flushed_on_exit = False
@@ -4751,6 +4982,27 @@ class CMDAICodeTUI(App):
             except Exception as ex:
                 import logging
                 logging.exception("Error replaying transcript: %s", ex)
+            if data.get("todo_list") and hasattr(self, "agent_ctx"):
+                self.agent_ctx.todo_list = list(data["todo_list"])
+                try:
+                    self.query_one("#todo-preview-bar", TodoPreviewBar).update_steps([
+                        t["text"] if isinstance(t, dict) else str(t)
+                        for t in self.agent_ctx.todo_list
+                        if not (isinstance(t, dict) and t.get("done"))
+                    ])
+                except Exception:
+                    pass
+            pend = data.get("pending_approval")
+            if pend and isinstance(pend, dict) and not is_active_gen:
+                self._pending_approval_details = pend
+                self._post_turn_approval_active = True
+                if pend.get("files"):
+                    self._last_modified_files = list(pend.get("files"))
+                try:
+                    bar = self.query_one("#approval-bar", ApprovalBar)
+                    bar.show_request(pend)
+                except Exception:
+                    pass
         else:
             self._switch_to_hero()
         if is_active_gen:
@@ -4783,7 +5035,7 @@ class CMDAICodeTUI(App):
                     "CRITICAL INSTRUCTIONS FOR CODE AGENT BEHAVIOR:\n"
                     "1. You are an AUTONOMOUS CODE AGENT. NEVER tell the user to inspect files, run commands, or check directory structure themselves. YOU MUST DO IT YOURSELF using the XML tools immediately.\n"
                     "2. When the user asks you to check, build, edit, or debug a project, DO NOT ask permission or tell the user to prepare the project — immediately run <tool:ls path=\".\" /> or <tool:read path=\"file\" /> to inspect it.\n"
-                    "3. Answer in the same language as the user (if the user asks in Polish, respond in Polish).\n"
+                    "3. Answer in the same language as the user.\n"
                     "4. When you emit a tool call, the system will execute it and return the result inside <tool_response name=\"...\">...</tool_response>. You will then see the output and continue working until the task is complete.\n"
                     "5. If a tool call fails (e.g. <tool:edit> fails with \"don't match\"), DO NOT GIVE UP or stop! You MUST immediately inspect the file using <tool:read>, locate the exact content, and retry <tool:edit> or use <tool:write>. The turn is only complete when all changes are properly applied.\n\n"
                     "AVAILABLE XML TOOLS:\n"
@@ -5262,14 +5514,18 @@ class CMDAICodeTUI(App):
                     last_thinking_render[0] = now
                     self.call_from_thread(self._scroll_chat_to_end_if_enabled)
 
-            sys_content = self.system_prompt
+            try:
+                has_vision = self._model_supports_vision()
+            except Exception:
+                has_vision = False
+            p_name = self.settings.config.get("active_system_prompt", "default")
+            if p_name == "default":
+                sys_content = self._build_base_system_prompt(vision=has_vision)
+            else:
+                sys_content = self.system_prompt
             agent_on = self.settings.config.get("agent", {}).get("enabled", True)
             if agent_on:
                 from ..agent.runner import get_agent_system_prompt
-                try:
-                    has_vision = self._model_supports_vision()
-                except Exception:
-                    has_vision = False
                 sys_content += get_agent_system_prompt(self.workdir, self.agent_mode, vision=has_vision)
 
             if getattr(self, "pinned_files", None):
@@ -5747,6 +6003,8 @@ class CMDAICodeTUI(App):
                     _add_message({
                         "role": "user",
                         "content": nudge_content,
+                        "internal": True,
+                        "autonomous_nudge": True,
                     })
                     _call_card("prepare_for_next_turn")
                     continue

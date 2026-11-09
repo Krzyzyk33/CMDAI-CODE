@@ -416,7 +416,7 @@ def _facts_from(model_id: str, model: Dict[str, Any], matched_by: str) -> ModelF
         param_style=param_style_for(options),
         context_limit=int(limits.get("context") or 0),
         output_limit=int(limits.get("output") or 0),
-        vision="image" in inputs,
+        vision=("image" in inputs) or bool(model.get("attachment")),
         tool_call=bool(model.get("tool_call")),
         reasoning_field=reasoning_field,
         cost_per_mtok_reasoning=reasoning_cost,

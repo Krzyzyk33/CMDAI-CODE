@@ -487,7 +487,7 @@ CLI_HELP = """
     /editor              code editor in a new window
     /update              pull the latest code (same as this command)
     /updatesettings      automatic updates on / off / check interval
-    /changelog           GitHub releases (>= v3.0-alpha)
+    /changelog           GitHub releases (>= v1.0.0)
 
   [dim]{repo}[/]
 """

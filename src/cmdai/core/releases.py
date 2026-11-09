@@ -17,43 +17,33 @@ BUNDLED_RELEASE = {
     "name": "CMDAI CODE v1.0.0",
     "published_at": "2026-11-08",
     "url": "https://github.com/Krzyzyk33/CMDAI-CODE/releases/tag/v1.0.0",
-    "body": """### Highlights & Core Fixes
-
-#### 1. Subagents Unlocked
-
-- **One-Call Pack Spawning** : The main agent can now spawn a pack of subagents in a single tool call. Each subagent appears in the chat as a single marker showing its role, the currently active tool + path, and finally `complete`.
-- **Real Chat Window** : Clicking a marker opens a full-screen subagent chat window built on the exact same chat code as the main agent — same turn cards, same tool blocks, same footer. No custom renderer.
-- **Full-Screen, No Scrollbar** : Window is fullscreen (scrolling still works). A TASK dock shows the raw original task from the start. Arrow keys ← → switch between subagents.
-- **True Context Isolation** : Every subagent has its own context and its own todo list. Only the final report + notes return to the main agent. Transcript and raw tool output stay private to the subagent. The report is the single data channel — it must carry concrete paths, line numbers and values, not a narrative of what the subagent “did”.
-- **Notes via Tool** : Notes are sent with `<tool:agent_note text="..." />` and arrive at the main agent verbatim. In the subagent window they look and behave like any other tool (clickable, same color).
-- **Tool Restrictions** : Subagents get every tool except `subagent` (no nesting) and `ask` (nobody can answer mid-turn — they receive a clear error with the correct alternative).
-- **Execution Order** : Local models run subagents sequentially; API models run them in parallel.
-
-#### 2. Technical Improvements
-
-- **Clean Main Chat** : Subagent tool calls use `notify=False`, so the main chat only shows one marker per subagent and the TODO bar does not light up for their work.
-- **Fixed `resolve_path` Crash** : `ctx` was defaulting to `None` on tool calls, breaking `ls`, `read`, `glob` and `search` with `'NoneType' object has no attribute 'resolve_path'`. This also affected the main agent.
-- **Unified Tool-Tag Parser** : One parser instead of three separate copies. Correctly handles `<tool:…>`, Gemma’s `<|tool_call>call:…>` and `<tool_call>`. Previously a local-model subagent executed zero tools and dumped raw protocol into the window as text.
-- **Incremental Window Growth** : Subagent window grows incrementally instead of rebuilding the card 5 times per second (no more full-window flicker).
-- **Honest Failure Status** : A subagent whose tools all failed now reports failure instead of `completed` (its report could never be based on the workspace if it never read anything).
-- **Cleaner Subagent UI** : Removed the Thinking row and stopped pointing at tools that had already finished.
-
-#### 3. Bug Fixes
-
-- Path tools (`ls`, `read`, `glob`, `search`) crashed across the entire application, not only inside subagents (`resolve_path` with `ctx=None`).
-- Subagent window flickered while working and displayed already-finished tools as active.
-- Local-model subagents using Gemma syntax never executed any tools; raw tags appeared as plain text in the window.
-- Raw `<|tool_call>` / `." />` syntax could leak into the main chat as prose.
+    "body": """### Autonomous coding assistant. Combines local GGUF models (llama.cpp) with multi-provider cloud AI and the MCP protocol.
 
 ---
 
-### Experimental & In-Progress Features (`--alpha`)
+### Highlights
 
-- **Subagents** : Now unlocked and usable. Multi-agent orchestration, context isolation and dedicated windows are live. `--alpha`
-- **Direct CLI Execution** : Terminal-first commands to run tasks and updates without launching the full TUI. `--alpha`
-- **In-App Changelog** : Dynamic GitHub release list (≥ v3.0-alpha) with post-update notifications. `--alpha`
-- **MCP (Model Context Protocol)** : External tool-server support via `mcp_config.example.json` with autostart and live status. `--alpha`
-- **Vision & Screenshot Tools** : Available only for multimodal / vision-capable models. `--alpha`""",
+#### 1. ⚡ Advanced Local GGUF (llama.cpp) Handling
+- Full tool-calling loop parity with API models: eliminated the premature “Done” with empty responses on retries or failed tool steps. Local models now receive consistent feedback and continue until the task is fully resolved.
+- Automatic **Synthesis Pass**: after tool execution the model always produces a clean, complete Markdown final answer for the user.
+- Smart path suggestions: when `read` is called on a non-existent file it automatically suggests real files present in the working directory.
+- Dynamic context limits in `/modelinfo`: accurate detection of context windows (e.g. 32k for Qwen2.5-Coder family) and safe RAM budgeting (70 % headroom rule).
+
+#### 2. 🎨 Unified TUI & New Animations
+- **Command** tool: all terminal commands now surface under a single clean name (`Command`) instead of mixed `shell` / `terminal` / `bash` labels.
+- **Summarizing fixed**: new two-phase context-compression animation (`⌬ ↔ ✻`) with a live timer and full expand/collapse support (same as the Thinking block).
+- New `/ctx` alias for quick context info (alongside `/context`).
+- Working-directory sync: 100 % consistency between `workdir` and `current_cwd` — `ls`, `read`, `write` and `edit` always operate on the correct directory.
+
+#### 3. 🌐 New AI Providers & Background Subagents
+- Custom OpenAI-compatible endpoints in `/models` (Ctrl+A): easily add any compatible provider (e.g. Groq, Together AI, vLLM, DeepInfra).
+- Background subagents (`/bg` / Ctrl+B): delegate research or verification tasks to subagents that run in the background with live progress view.
+
+#### 4. 📦 One-Command Installation
+- All installation methods work
+- More in `README.md`
+
+And more under the hood improvements, polish and stability fixes.""",
 }
 # --- BUNDLED_RELEASE_END ---
 
@@ -80,61 +70,28 @@ def is_newer(tag_a: str, tag_b: str) -> bool:
 
 
 def resolve_newest(fetched: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """The newest release to show, bundled or freshly fetched.
-
-    The bundled entry is the floor: it is what the notice and the top of
-    /changelog render when there is no network, so the app can always say what
-    changed. When a fetch succeeds and brings something newer - a release
-    published after this build shipped - that wins, so the notice is never
-    stale just because the checkout has not been regenerated yet.
-
-    `fetched` is a list as returned by get_releases(), already newest-first.
-    An empty or missing list means "no network": the bundled entry is used and
-    nothing raises.
-    """
     bundled = get_bundled_release()
     newest_fetched = None
     for r in (fetched or []):
         if isinstance(r, dict) and r.get("tag"):
             newest_fetched = r
             break
-    if newest_fetched is None:
-        return bundled
-    if not bundled:
-        return dict(newest_fetched)
-    if is_newer(str(newest_fetched.get("tag", "")), str(bundled.get("tag", ""))):
-        return dict(newest_fetched)
-    return bundled
+    if newest_fetched is not None:
+        # Fetched from GitHub wins if it is same version or newer
+        if not bundled or not is_newer(str(bundled.get("tag", "")), str(newest_fetched.get("tag", ""))):
+            return dict(newest_fetched)
+    return bundled if bundled else (dict(newest_fetched) if newest_fetched else {})
 
 
 def get_release_list(fetched: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-    """Every release the changelog should offer, newest first.
-
-    The bundled release always leads the list, whether or not there is a
-    network, because that is the entry a user is most likely to be looking for
-    right after an update. Anything older comes from the fetch, or from the
-    on-disk cache when the fetch failed.
-
-    Each entry carries `has_notes`. An entry without one can still be listed -
-    the tag and the date are known - but opening it has nothing to show, which
-    is the case the changelog window reports as an offline condition rather
-    than rendering an empty page.
-    """
     entries: List[Dict[str, Any]] = []
     seen = set()
 
-    bundled = get_bundled_release()
-    if bundled:
-        entry = dict(bundled)
-        entry["has_notes"] = bool(str(entry.get("body") or "").strip())
-        entry["bundled"] = True
-        entries.append(entry)
-        seen.add(str(entry.get("tag", "")))
-
+    # GitHub releases (or cache) come first and have precedence
     for r in (fetched or []):
         if not isinstance(r, dict):
             continue
-        tag = str(r.get("tag", ""))
+        tag = str(r.get("tag", "")).strip()
         if not tag or tag in seen:
             continue
         seen.add(tag)
@@ -142,6 +99,15 @@ def get_release_list(fetched: Optional[List[Dict[str, Any]]] = None) -> List[Dic
         entry["has_notes"] = bool(str(entry.get("body") or "").strip())
         entry["bundled"] = False
         entries.append(entry)
+
+    # Only fall back to bundled for tags not already fetched from GitHub
+    bundled = get_bundled_release()
+    if bundled and str(bundled.get("tag", "")).strip() not in seen:
+        entry = dict(bundled)
+        entry["has_notes"] = bool(str(entry.get("body") or "").strip())
+        entry["bundled"] = True
+        entries.append(entry)
+        seen.add(str(entry.get("tag", "")).strip())
 
     entries.sort(key=lambda e: _tag_sort_key(str(e.get("tag", ""))), reverse=True)
     return entries
@@ -363,7 +329,7 @@ def _tag_sort_key(tag: str) -> Tuple[int, int, int, int, str]:
 
 
 def get_local_git_version(root: str = "") -> str:
-    """Newest local git tag (e.g. v3.0.1-alpha). Empty string when unavailable.
+    """Newest local git tag (e.g. v1.0.0). Empty string when unavailable.
 
     `root` overrides which checkout is inspected. Without it the root is derived
     from this file's location, which is wrong whenever the caller is working on
@@ -443,7 +409,7 @@ def _generated_changelog_path() -> str:
 
 
 def render_changelog_md(releases: List[Dict[str, Any]]) -> str:
-    lines = ["# CHANGELOG", "", "Generowane z GitHub Releases (>= v3.0-alpha).", ""]
+    lines = ["# CHANGELOG", "", "Generowane z GitHub Releases (>= v1.0.0).", ""]
     for r in releases:
         lines.append(f"## [{r['tag']}] - {r.get('published_at', '')}")
         lines.append(f"### {r.get('name', '')}")

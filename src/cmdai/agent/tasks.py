@@ -86,8 +86,15 @@ class BackgroundTaskManager:
                     f"[Background command '{t.cmd}' ({tid}) has finished with exit code {code}]\n"
                 )
                 if logs.strip():
-                    msg += f"Output:\n{logs.strip()}\n"
-                msg += "Please report this background command result to the user.\n</tool_response>"
+                    out_text = logs.strip()
+                    if len(out_text) > 2000:
+                        out_text = "... [older logs truncated]\n" + out_text[-2000:]
+                    msg += f"Output (tail):\n{out_text}\n"
+                msg += (
+                    "Instructions: Give the user a brief, concise 1-2 sentence summary of what this background task accomplished. "
+                    "DO NOT dump or repeat raw logs verbatim unless the user specifically asked for them. "
+                    "If follow-up steps are required, proceed with them directly.\n</tool_response>"
+                )
                 notifications.append(msg)
         for sid, s in list(self.subagents.items()):
             if session_id and str(s.get("session_id") or "") != session_id:
@@ -103,7 +110,10 @@ class BackgroundTaskManager:
                 )
                 if str(res).strip():
                     msg += f"Report:\n{str(res).strip()}\n"
-                msg += "Please summarize and report this background subagent result to the user.\n</tool_response>"
+                msg += (
+                    "Instructions: Give the user a concise summary in your own words of the subagent's findings. "
+                    "DO NOT dump raw walls of text.\n</tool_response>"
+                )
                 notifications.append(msg)
         return notifications
 

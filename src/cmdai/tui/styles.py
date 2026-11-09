@@ -284,6 +284,12 @@ Tooltip {
     height: auto;
 }
 
+Tooltip.-timeline-tooltip {
+    offset-x: 0%;
+    margin: 0;
+    max-width: 48;
+}
+
 #chat-view {
     width: 100%;
     height: 100%;
@@ -965,6 +971,7 @@ Input .input--cursor {
     width: 100%;
     height: auto;
     color: #e6edf3;
+    padding-bottom: 2;
 }
 
 /* Sessions dialog: wide enough for title, relative time, token badge, model and dir */
@@ -1193,7 +1200,7 @@ Input .input--cursor {
 }
 
 #releases-preview {
-    height: auto;
+    height: 1fr;
     max-height: 100%;
     background: #0d1117;
     border: none;

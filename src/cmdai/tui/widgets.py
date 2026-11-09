@@ -1460,8 +1460,22 @@ class AssistantTurnCard(Vertical):
         if self.elapsed > 0.05:
             t.append(f"  ·  {self.elapsed:.1f}s", style="#8b949e")
         out_cnt = tokens_out if tokens_out > 0 else tokens
+        is_estimated = False
+        if out_cnt <= 0 and tokens_in <= 0:
+            gen_text = ""
+            for b in getattr(self, "body_widgets", []):
+                gen_text += getattr(b, "_raw_markdown", "") or ""
+            if self.thinking_block:
+                gen_text += getattr(self.thinking_block, "thinking_text", "") or ""
+            if gen_text.strip():
+                out_cnt = max(1, len(gen_text) // 4)
+                is_estimated = True
+                if tok_s <= 0 and self.elapsed > 0:
+                    tok_s = out_cnt / self.elapsed
+
         if out_cnt > 0:
-            t.append(f"  ·  {out_cnt} tokens", style="#8b949e")
+            approx = "~" if is_estimated else ""
+            t.append(f"  ·  {approx}{out_cnt} tokens", style="#8b949e")
             if tokens_in > 0:
                 t.append(f" ({tokens_in} in / {out_cnt} out)", style="dim #8b949e")
         elif tokens_in > 0:
@@ -3811,8 +3825,9 @@ class TimelineRail(Vertical):
         self._active_turn_idx = turn_idx
         try:
             container = self.query_one("#timeline-dots-container", VerticalScroll)
-            for dot in container.query(TimelineDot):
-                dot.set_active(dot.turn_idx == turn_idx)
+            for dot in container.children:
+                if isinstance(dot, TimelineDot) and not getattr(dot, "_pruning", False):
+                    dot.set_active(dot.turn_idx == turn_idx)
         except Exception:
             pass
 
@@ -3825,26 +3840,32 @@ class TimelineRail(Vertical):
         total = len(self._turns)
         active_idx = self._active_turn_idx if self._active_turn_idx is not None else (total - 1 if total > 0 else None)
 
-        existing_dots = [d for d in container.children if isinstance(d, TimelineDot) and not getattr(d, "_pruning", False)]
-        if len(existing_dots) == total:
-            for idx, (dot, t) in enumerate(zip(existing_dots, self._turns)):
-                dot.turn_idx = idx
-                dot.turn_id = int(t.get("turn_id", idx + 1))
-                dot.prompt_text = str(t.get("text", "") or t.get("prompt", "") or "")
-                dot.time_str = str(t.get("time", "") or dot.time_str or "")
-                dot.index = idx + 1
-                dot.total = total
-                dot.set_active(idx == active_idx)
-                dot._build_tooltip()
-            return
+        dots = [d for d in container.children if isinstance(d, TimelineDot) and not getattr(d, "_pruning", False)]
 
-        container.remove_children()
-        for idx, t in enumerate(self._turns):
+        while len(dots) > total:
+            excess = dots.pop()
+            excess.remove()
+
+        for idx in range(min(len(dots), total)):
+            dot = dots[idx]
+            t = self._turns[idx]
+            dot.turn_idx = idx
+            dot.turn_id = int(t.get("turn_id", idx + 1))
+            dot.prompt_text = str(t.get("text", "") or t.get("prompt", "") or "")
+            dot.time_str = str(t.get("time", "") or "")
+            dot.index = idx + 1
+            dot.total = total
+            dot.set_active(idx == active_idx)
+            dot._build_tooltip()
+
+        new_dots = []
+        for idx in range(len(dots), total):
+            t = self._turns[idx]
             tid = int(t.get("turn_id", idx + 1))
             prompt = str(t.get("text", "") or t.get("prompt", "") or "")
             t_str = str(t.get("time", "") or "")
             is_active = (idx == active_idx)
-            container.mount(TimelineDot(
+            new_dots.append(TimelineDot(
                 turn_idx=idx,
                 turn_id=tid,
                 prompt_text=prompt,
@@ -3853,6 +3874,8 @@ class TimelineRail(Vertical):
                 time_str=t_str,
                 is_active=is_active
             ))
+        if new_dots:
+            container.mount(*new_dots)
 
     @on(TimelineDot.Selected)
     def _on_dot_selected(self, msg: TimelineDot.Selected) -> None:

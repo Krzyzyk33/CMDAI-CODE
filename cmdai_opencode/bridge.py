@@ -947,6 +947,16 @@ class OpenCodeBridge:
         variants = [v for v in variants if v]
         can_reason = bool(variants)
 
+        modalities = m.get("modalities") or {}
+        mod_inputs = [str(x).lower() for x in (modalities.get("input") or [])] if isinstance(modalities, dict) else []
+        cap_input = caps.get("input") if isinstance(caps, dict) else {}
+        can_vision = bool(
+            "image" in mod_inputs
+            or m.get("attachment")
+            or (isinstance(caps, dict) and (caps.get("attachment") or caps.get("vision") or caps.get("image")))
+            or (isinstance(cap_input, dict) and cap_input.get("image"))
+        )
+
         parts = ["FREE"]
         if ctx >= 1_000_000:
             parts.append(f"{ctx // 1_000_000}M")
@@ -954,6 +964,8 @@ class OpenCodeBridge:
             parts.append(f"{ctx // 1_000}k")
         if can_reason:
             parts.append("reasoning")
+        if can_vision:
+            parts.append("vision")
 
         if note.get("bad"):
             # Say why up front. A model that cannot drive the agent loop is not
@@ -977,6 +989,7 @@ class OpenCodeBridge:
             "name": m.get("name") or mid,
             "badge": " · ".join(parts),
             "thinking": can_reason,
+            "vision": can_vision,
             "levels": variants,
             "context_length": ctx,
             "usable": not note.get("bad"),

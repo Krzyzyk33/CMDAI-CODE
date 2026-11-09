@@ -23,27 +23,31 @@ try:
 except Exception:
     pass
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+editor_dir = os.path.dirname(os.path.abspath(__file__))
+cmdai_dir = os.path.dirname(editor_dir)
+src_dir = os.path.dirname(cmdai_dir)
+repo_root = os.path.dirname(src_dir)
 
-src_dir = os.path.join(project_root, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
-
-editor_dir = os.path.dirname(os.path.abspath(__file__))
-if editor_dir not in sys.path:
-    sys.path.insert(0, editor_dir)
+if repo_root not in sys.path:
+    sys.path.append(repo_root)
 
 try:
-    from editor.ui.app import CMDAIEditorApp
+    from cmdai.editor.ui.app import CMDAIEditorApp
+    from cmdai.editor.core.workspace import projects_root
+    from cmdai.editor.ui.project_picker import ProjectPicker
 except Exception:
-    from ui.app import CMDAIEditorApp
+    try:
+        from editor.ui.app import CMDAIEditorApp
+        from editor.core.workspace import projects_root
+        from editor.ui.project_picker import ProjectPicker
+    except Exception:
+        from ui.app import CMDAIEditorApp
+        from core.workspace import projects_root
+        from ui.project_picker import ProjectPicker
 
 def main():
-
-    from editor.core.workspace import projects_root
-    from editor.ui.project_picker import ProjectPicker
 
     flagi, pozycyjne = set(), []
     for arg in sys.argv[1:]:

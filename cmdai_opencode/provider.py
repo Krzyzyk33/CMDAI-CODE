@@ -177,18 +177,22 @@ def publish_capabilities(models: List[Dict[str, Any]]) -> int:
     registered = 0
     for m in models or []:
         mid = str(m.get("id", ""))
-        if not mid or not m.get("thinking"):
+        has_thinking = bool(m.get("thinking"))
+        has_vision = m.get("vision") if "vision" in m else None
+        ctx_len = int(m.get("context_length") or 0)
+        if not mid or (not has_thinking and not has_vision and ctx_len <= 0):
             continue
         levels = list(m.get("levels") or [])
         register_model_capability(
             mid,
             provider_id="opencode_local",
-            thinking=True,
+            thinking=has_thinking,
             levels=levels,
-            param_style="variant" if levels else "stream_only",
+            param_style=("variant" if levels else "stream_only") if has_thinking else "none",
             # Left unset on purpose: the app picks the middle of the ladder,
             # and hardcoding it here is how "medium" ended up meaning two things.
             default_level="",
+            vision=has_vision,
             # The window, which the server publishes per model as
             # `limit.context` and `_to_model` already carries as
             # `context_length`. Without handing it over, nothing in the app could
@@ -197,7 +201,7 @@ def publish_capabilities(models: List[Dict[str, Any]]) -> int:
             # That number was not only what `/modelinfo` and `/context` showed;
             # it was what `should_summarize` multiplied by 0.97, so a 1M model
             # was being compacted at 3% of its window.
-            context_limit=int(m.get("context_length") or 0),
+            context_limit=ctx_len,
             # Declared rather than inferred from the id. The server runs on this
             # machine, which is a fact about this plugin and not about a string.
             local=True,

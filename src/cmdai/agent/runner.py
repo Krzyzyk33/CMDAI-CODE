@@ -1308,14 +1308,14 @@ class AgentRunner:
                 return res
 
 
-            elif name == "web":
+            elif name in ("web", "webfetch", "fetch", "web_fetch"):
                 target = args.get("query") or args.get("url") or args.get("q") or ""
                 if not target:
                     err_res = {
                         "success": False,
-                        "error": "missing required attribute 'query'",
+                        "error": "missing required attribute 'query' or 'url'",
                         "missing": "query",
-                        "example": '<tool:web query="search query" />',
+                        "example": '<tool:web query="search query" /> or <tool:webfetch url="https://example.com" />',
                     }
                     if notify and self.on_tool_start:
                         self.on_tool_start("web", "")
@@ -1410,6 +1410,17 @@ class AgentRunner:
                 return res
 
             elif name == "screenshot":
+                if not (self.vision_capable and self.vision_capable()):
+                    err_res = {
+                        "success": False,
+                        "error": "The active model does not support vision or image analysis. Screenshot tool is disabled.",
+                        "note": "Switch to a vision-capable multimodal model (e.g. Gemini, GPT-4o, Claude) to capture and inspect screenshots.",
+                    }
+                    if notify and self.on_tool_start:
+                        self.on_tool_start("screenshot", str(args.get("target", "")))
+                    if notify and self.on_tool_finish:
+                        self.on_tool_finish("screenshot", str(args.get("target", "")), err_res)
+                    return err_res
                 target = args.get("target", "active_window")
                 if notify and self.on_tool_start:
                     self.on_tool_start("screenshot", target)
@@ -1419,6 +1430,17 @@ class AgentRunner:
                 return res
 
             elif name == "vision":
+                if not (self.vision_capable and self.vision_capable()):
+                    err_res = {
+                        "success": False,
+                        "error": "The active model does not support vision or image analysis. Vision tool is disabled.",
+                        "note": "Switch to a vision-capable multimodal model (e.g. Gemini, GPT-4o, Claude) to use vision.",
+                    }
+                    if notify and self.on_tool_start:
+                        self.on_tool_start("vision", str(args.get("image_path") or args.get("path", "")))
+                    if notify and self.on_tool_finish:
+                        self.on_tool_finish("vision", str(args.get("image_path") or args.get("path", "")), err_res)
+                    return err_res
                 image_path = args.get("image_path") or args.get("path", "")
                 question = args.get("question", "")
                 if notify and self.on_tool_start:
@@ -1459,7 +1481,25 @@ class AgentRunner:
             elif name.startswith(TOOL_NAME_PREFIX):
                 return self._execute_mcp_tool(name, args, notify)
 
-            return {"success": False, "error": f"Unknown tool: {name}"}
+            display_name = tool_name or name
+            target_str = str(args.get("path") or args.get("prompt") or args.get("cmd") or args.get("target") or args.get("url") or "")
+            has_vis = bool(self.vision_capable and self.vision_capable())
+            allowed_tools = "read, write, edit, ls, glob, search, command, web, todo, ask, subagent, mcp"
+            if has_vis:
+                allowed_tools += ", screenshot, vision"
+            err_res = {
+                "success": False,
+                "error": f"Tool '{display_name}' does not exist and cannot be executed.",
+                "note": (
+                    f"This tool is not available in CMDAI CODE. You must only use the officially available tools: {allowed_tools}. "
+                    "To generate graphics, write SVG directly using 'write' or download files using 'command' (curl / powershell)."
+                ),
+            }
+            if notify and self.on_tool_start:
+                self.on_tool_start(display_name, target_str)
+            if notify and self.on_tool_finish:
+                self.on_tool_finish(display_name, target_str, err_res)
+            return err_res
         except Exception as e:
             err_res = {"success": False, "error": str(e)}
             if notify and self.on_tool_finish:

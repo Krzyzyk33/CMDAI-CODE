@@ -478,23 +478,51 @@ def find_mmproj_sidecar(gguf_path: str) -> Optional[str]:
     return None
 
 
+_VLM_ARCHITECTURES = frozenset({
+    "clip", "mllama", "qwen2vl", "qwen2_5_vl", "qwen3vl", "llava",
+    "minicpmv", "internvl", "pixtral", "florence", "paligemma", "chameleon",
+})
+
+_VISION_TEMPLATE_MARKERS = (
+    "<image>",
+    "<|vision_start|>",
+    "<|image_pad|>",
+    "<start_of_image>",
+    "<|image|>",
+    "[img]",
+    "<image_soft_token>",
+)
+
+
 def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
     if not os.path.exists(gguf_path):
         return None
     if not GGUFReader:
         try:
-            from .resource_limits import read_gguf_metadata
+            from .resource_limits import read_gguf_metadata, _read_gguf_header_binary
             meta = read_gguf_metadata(gguf_path)
+            raw_hdr = _read_gguf_header_binary(gguf_path)
             ctx_lim = int(meta.get("n_ctx_train") or 0) if not meta.get("estimated", True) else 0
-            if ctx_lim > 0:
-                mid_low = os.path.basename(gguf_path).lower()
-                has_t = any(k in mid_low for k in ("r1", "qwq", "reason", "think"))
+            arch = str(meta.get("arch") or raw_hdr.get("general.architecture") or "").strip().lower()
+            has_v_keys = bool(raw_hdr.get("__has_vision_keys__")) or (arch in _VLM_ARCHITECTURES)
+            mmproj_path = find_mmproj_sidecar(gguf_path)
+            vision = bool(has_v_keys or (mmproj_path and os.path.exists(mmproj_path)))
+            tpl_str = str(raw_hdr.get("tokenizer.chat_template") or "")
+            tpl_low = tpl_str.lower()
+            has_t = any(
+                kw in tpl_low
+                for kw in ("enable_thinking", "<think>", "thinking_mode", "reasoning_content", "think_budget", "<|channel|>thought", "<|think|>")
+            ) or _infer_thinking_from_id(os.path.basename(gguf_path))
+            if ctx_lim > 0 or vision or has_t:
                 return _build_capability(
                     os.path.basename(gguf_path),
                     thinking=has_t,
                     param_style="chat_template_kwargs" if has_t else "none",
                     levels=(local_levels(ctx_lim) or list(DEFAULT_LEVELS)) if has_t else [],
                     default_level="medium" if has_t else "",
+                    vision=vision,
+                    image_param_style="mmproj" if vision else "none",
+                    mmproj_path=mmproj_path if vision else None,
                     confidence="high",
                     source="gguf",
                     context_limit=ctx_lim,
@@ -506,8 +534,20 @@ def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
         reader = GGUFReader(gguf_path)
         fields = reader.fields
 
-                                            
-        vision = any(n.startswith("clip.") or "vision" in n.lower() for n in fields)
+        arch_f = fields.get("general.architecture")
+        arch = _field_text(arch_f).strip().lower() if arch_f is not None else ""
+
+        vision = (
+            any(
+                n.startswith("clip.")
+                or "vision" in n.lower()
+                or "mmproj" in n.lower()
+                or "image_newline" in n.lower()
+                or "patch_embd" in n.lower()
+                for n in fields
+            )
+            or (arch in _VLM_ARCHITECTURES)
+        )
 
         # The window the model was trained for, read out of the file itself. It
         # was here all along and nobody read it, so every local thinking level
@@ -515,8 +555,6 @@ def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
         # asked a 32k Qwen to spend 128k of thinking, which it can only answer by
         # ignoring the request. A percentage of what the model actually has is
         # the same number of choices, all of them reachable.
-        arch_f = fields.get("general.architecture")
-        arch = _field_text(arch_f).strip().lower() if arch_f is not None else ""
         context_limit = _field_number(fields.get(f"{arch}.context_length")) if arch else 0
         if context_limit <= 0:
             context_limit = _field_number(fields.get("context_length"))
@@ -527,9 +565,9 @@ def inspect_gguf_metadata(gguf_path: str) -> Optional[ModelCapability]:
             if mmproj_path and os.path.exists(mmproj_path):
                 try:
                     mr = GGUFReader(mmproj_path)
-                    arch_f = mr.fields.get("general.architecture")
-                    arch = _field_text(arch_f).strip().lower() if arch_f else ""
-                    if arch == "clip" or any(n.startswith("clip.") for n in mr.fields):
+                    m_arch_f = mr.fields.get("general.architecture")
+                    m_arch = _field_text(m_arch_f).strip().lower() if m_arch_f else ""
+                    if m_arch == "clip" or any(n.startswith("clip.") or "vision" in n.lower() for n in mr.fields):
                         vision = True
                     else:
                         mmproj_path = None
@@ -665,6 +703,107 @@ def stronger_source(a: str, b: str) -> bool:
     return source_rank(a) < source_rank(b)
 
 
+def _infer_thinking_from_id(model_id: str) -> bool:
+    """Structural token check for reasoning models when metadata is unavailable."""
+    mid = (model_id or "").lower()
+    if not mid:
+        return False
+    tokens = set(re.split(r"[-_/:.\s]+", mid))
+    if tokens & {"r1", "qwq", "reason", "reasoner", "reasoning", "think", "thinking", "o1", "o3", "o4"}:
+        return True
+    return any(k in mid for k in ("deepseek-r1", "qwq", "reasoning", "thinking"))
+
+
+def _infer_vision_from_id(model_id: str) -> bool:
+    """Dynamic structural token check for vision/multimodal architectures (VLM)."""
+    mid = (model_id or "").lower()
+    if not mid:
+        return False
+    tokens = set(re.split(r"[-_/:.\s]+", mid))
+    # Explicit modality & VLM architecture tokens
+    vlm_tokens = {
+        "vl", "vlm", "vision", "multimodal", "omni", "mmproj",
+        "pixtral", "llava", "molmo", "internvl", "minicpmv",
+        "paligemma", "florence", "qwen2vl", "qwen25vl", "qwen3vl",
+    }
+    if tokens & vlm_tokens:
+        return True
+    if re.search(r"(?:qwen[\d.]*vl|internvl\d*|llava|pixtral|minicpm-?v|\d+b-vl|vl-\d+b)", mid):
+        return True
+    return False
+
+
+def extract_vision_from_payload(item: Dict[str, Any]) -> Optional[bool]:
+    """Dynamically inspect a model metadata dict from any server/API for vision support."""
+    if not isinstance(item, dict):
+        return None
+
+    # 1. Explicit boolean flags
+    if isinstance(item.get("vision"), bool):
+        return item["vision"]
+    if item.get("attachment") is True:
+        return True
+    if item.get("projector_info"):
+        return True
+
+    # 2. Model type (e.g. LM Studio / vLLM reports "type": "vlm" or "multimodal")
+    mtype = str(item.get("type") or item.get("model_type") or "").strip().lower()
+    if mtype in ("vlm", "multimodal", "vision"):
+        return True
+
+    # 3. Architecture & input modalities (OpenRouter, OpenAI, models.dev, OpenCode)
+    arch = item.get("architecture")
+    if isinstance(arch, dict):
+        in_mods = arch.get("input_modalities")
+        if isinstance(in_mods, list):
+            return any(str(x).lower() in ("image", "vision", "video", "multimodal") for x in in_mods)
+        modality_str = str(arch.get("modality") or "").lower()
+        if "image" in modality_str or "vision" in modality_str:
+            return True
+
+    modalities = item.get("modalities")
+    if isinstance(modalities, dict):
+        in_mods = modalities.get("input")
+        if isinstance(in_mods, list):
+            return any(str(x).lower() in ("image", "vision", "video", "multimodal") for x in in_mods)
+    elif isinstance(modalities, list):
+        return any(str(x).lower() in ("image", "vision", "video", "multimodal") for x in modalities)
+
+    in_mods_top = item.get("input_modalities")
+    if isinstance(in_mods_top, list):
+        return any(str(x).lower() in ("image", "vision", "video", "multimodal") for x in in_mods_top)
+
+    # 4. Capabilities object or list (Ollama /api/show returns list; OpenCode returns dict)
+    caps = item.get("capabilities")
+    if isinstance(caps, list):
+        return any(str(x).lower() in ("vision", "image", "multimodal") for x in caps)
+    elif isinstance(caps, dict):
+        if any(caps.get(k) is True for k in ("vision", "attachment", "image", "multimodal")):
+            return True
+        cap_in = caps.get("input")
+        if isinstance(cap_in, dict) and isinstance(cap_in.get("image"), bool):
+            return cap_in["image"]
+
+    # 5. Ollama details.families and model_info keys
+    details = item.get("details")
+    if isinstance(details, dict):
+        fams = [str(f).lower() for f in (details.get("families") or [])]
+        if any(f in _VLM_ARCHITECTURES or "clip" in f or "vl" in f or "vision" in f for f in fams):
+            return True
+
+    model_info = item.get("model_info")
+    if isinstance(model_info, dict):
+        if any(str(k).lower().startswith("clip.") or "vision" in str(k).lower() for k in model_info):
+            return True
+
+    # 6. Chat template inspection
+    tpl = str(item.get("template") or item.get("chat_template") or "").lower()
+    if tpl and any(m in tpl for m in (".images", *_VISION_TEMPLATE_MARKERS)):
+        return True
+
+    return None
+
+
 def register_model_capability(
     model_id: str,
     provider_id: str = "",
@@ -674,6 +813,7 @@ def register_model_capability(
     default_level: str = "",
     max_budget: int = 32768,
     thinking_tags: Tuple[str, str] = ("<think>", "</think>"),
+    vision: Optional[bool] = None,
     confidence: str = "high",
     context_limit: int = 0,
     local: bool = False,
@@ -702,6 +842,12 @@ def register_model_capability(
     if local and provider_id:
         declare_local_provider(provider_id)
 
+    if vision is None:
+        cat_vis = _catalog_vision_hint(model_id, provider_id)
+        has_vis = cat_vis if cat_vis is not None else _infer_vision_from_id(model_id)
+    else:
+        has_vis = bool(vision)
+
     cache_key = f"{provider_id}:{model_id}" if provider_id else model_id
     cap = _build_capability(
         model_id,
@@ -711,6 +857,8 @@ def register_model_capability(
         default_level=default_level,
         max_budget=max_budget,
         thinking_tags=thinking_tags,
+        vision=has_vis,
+        image_param_style="inline_base64" if has_vis else "none",
         confidence=confidence,
         source="registered",
         context_limit=context_limit,
@@ -876,6 +1024,20 @@ def catalog_levels(facts: Any) -> List[str]:
     return fitting if len(fitting) >= 2 else []
 
 
+def _catalog_vision_hint(model_id: str, provider_id: str = "") -> Optional[bool]:
+    """Query models.dev across providers for a model's input modality."""
+    try:
+        from . import model_catalog
+        facts = model_catalog.lookup(provider_id, model_id)
+        if facts is None:
+            facts = model_catalog.lookup_any_provider(model_id, preferred_provider_id=provider_id)
+        if facts is not None:
+            return bool(facts.vision)
+    except Exception:
+        pass
+    return None
+
+
 def _capability_from_catalog(model_id: str, provider_id: str) -> Optional[ModelCapability]:
     """Build a capability from models.dev, or None when it has nothing.
 
@@ -998,8 +1160,8 @@ def get_model_capability(
                 _persist(cache_key, cap)
                 return cap
 
-        mid_low = model_id.lower()
-        has_thinking = any(k in mid_low for k in ["r1", "qwq", "reason", "think"])
+        has_thinking = _infer_thinking_from_id(model_id)
+        has_vis = _infer_vision_from_id(model_id)
         if has_thinking:
             cap = _build_capability(
                 model_id,
@@ -1008,12 +1170,16 @@ def get_model_capability(
                 levels=DEFAULT_LEVELS,
                 default_level="medium",
                 thinking_tags=("<think>", "</think>"),
+                vision=has_vis,
+                image_param_style="mmproj" if has_vis else "none",
                 source="name_heuristic",
             )
         else:
             cap = _build_capability(
                 model_id,
                 thinking=False,
+                vision=has_vis,
+                image_param_style="mmproj" if has_vis else "none",
                 source="name_heuristic",
             )
         _persist(cache_key, cap)
@@ -1031,9 +1197,7 @@ def get_model_capability(
                 for m in data.get("data", []):
                     if m.get("id") == model_id:
                         params = m.get("supported_parameters", [])
-                        arch = m.get("architecture") or {}
-                        modalities = arch.get("input_modalities") or []
-                        has_vision = "image" in [str(x).lower() for x in modalities]
+                        has_vision = bool(extract_vision_from_payload(m))
                         if "reasoning" in params or "include_reasoning" in params:
                             # The provider confirmed the model reasons. It did
                             # not publish effort values - `supported_parameters`
@@ -1128,20 +1292,52 @@ def get_model_capability(
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                template = resp.json().get("template", "").lower()
-                if "<think>" in template or "enable_thinking" in template:
+                data = resp.json() if isinstance(resp.json(), dict) else {}
+                template = str(data.get("template") or "").lower()
+                caps_list = [str(x).lower() for x in (data.get("capabilities") or [])]
+                has_thinking = ("<think>" in template or "enable_thinking" in template or "thinking" in caps_list)
+                has_vision = bool(extract_vision_from_payload(data))
+                if has_thinking or has_vision:
                     cap = _build_capability(
                         model_id,
-                        thinking=True,
-                        param_style=("chat_template_kwargs"
-                                     if "enable_thinking" in template else "tag_based"),
-                        levels=DEFAULT_LEVELS,
-                        default_level="medium",
+                        thinking=has_thinking,
+                        param_style=(("chat_template_kwargs"
+                                     if "enable_thinking" in template else "tag_based") if has_thinking else "none"),
+                        levels=DEFAULT_LEVELS if has_thinking else [],
+                        default_level="medium" if has_thinking else "",
+                        vision=has_vision,
+                        image_param_style="inline_base64" if has_vision else "none",
                         confidence="high",
                         source="provider_metadata",
                     )
                     _persist(cache_key, cap)
                     return cap
+        except Exception:
+            pass
+
+    if provider_id in ("lmstudio", "vllm") and requests:
+        try:
+            base = "http://localhost:1234/v1/models" if provider_id == "lmstudio" else "http://localhost:8000/v1/models"
+            resp = requests.get(base, timeout=timeout)
+            if resp.status_code == 200:
+                for m in (resp.json() or {}).get("data", []):
+                    if isinstance(m, dict) and m.get("id") == model_id:
+                        vis_flag = extract_vision_from_payload(m)
+                        if vis_flag is not None:
+                            has_t = _infer_thinking_from_id(model_id)
+                            cap = _build_capability(
+                                model_id,
+                                thinking=has_t,
+                                param_style="chat_template_kwargs" if has_t else "none",
+                                levels=DEFAULT_LEVELS if has_t else [],
+                                default_level="medium" if has_t else "",
+                                vision=vis_flag,
+                                image_param_style="inline_base64" if vis_flag else "none",
+                                confidence="high",
+                                source="provider_metadata",
+                            )
+                            _persist(cache_key, cap)
+                            return cap
         except Exception:
             pass
 
@@ -1154,6 +1350,8 @@ def get_model_capability(
         return cap
 
     mid = model_id.lower()
+    cat_vis = _catalog_vision_hint(model_id, provider_id)
+    has_vision = cat_vis if cat_vis is not None else _infer_vision_from_id(model_id)
 
     # Name heuristics. Weak evidence, so they are never written to disk: a
     # guess must be free to be wrong today and replaced tomorrow.
@@ -1165,6 +1363,8 @@ def get_model_capability(
             levels=["low", "medium", "high", "extra", "max"],
             default_level="medium",
             max_budget=64000,
+            vision=has_vision,
+            image_param_style="inline_base64" if has_vision else "none",
         )
         _persist(cache_key, cap)
         return cap
@@ -1177,6 +1377,8 @@ def get_model_capability(
             levels=(["low", "medium", "high", "extra"]
                     if ("xhigh" in mid or "pro" in mid) else ["low", "medium", "high"]),
             default_level="medium",
+            vision=has_vision,
+            image_param_style="inline_base64" if has_vision else "none",
         )
         _persist(cache_key, cap)
         return cap
@@ -1188,6 +1390,8 @@ def get_model_capability(
             param_style="reasoning_effort" if provider_id == "deepseek" else "tag_based",
             levels=["low", "medium", "high", "extra", "max"],
             default_level="medium",
+            vision=has_vision,
+            image_param_style="inline_base64" if has_vision else "none",
         )
         _persist(cache_key, cap)
         return cap
@@ -1195,6 +1399,8 @@ def get_model_capability(
     cap = _build_capability(
         model_id,
         thinking=False,
+        vision=has_vision,
+        image_param_style="inline_base64" if has_vision else "none",
     )
     _persist(cache_key, cap)
     return cap

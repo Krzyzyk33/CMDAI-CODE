@@ -1,6 +1,6 @@
 import os
 import pathlib
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from rich.style import Style
 from rich.text import Text
 from textual import on
@@ -102,6 +102,7 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
         max_context: int = 8192,
         provider: str = "",
         workdir: str = ".",
+        session_stats: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -112,6 +113,7 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
         self.pinned_files = dict(pinned_files or {})
         self.max_context = max_context
         self.workdir = os.path.abspath(workdir)
+        self.session_stats = dict(session_stats or {})
         self.settings = get_settings()
 
     def _estimate_tokens(self, text: str) -> int:
@@ -136,15 +138,20 @@ class ContextInspectorModal(ModalScreen[Optional[Dict[str, str]]]):
             cap.default_level if cap else ""
         )
 
+        session_tokens = 0
+        if self.session_stats:
+            session_tokens = int(self.session_stats.get("tokens_in", 0) or 0) + int(self.session_stats.get("tokens_out", 0) or 0)
+
         lines = [
-            f"[dim]Model:[/]  [bold white]{self.model_id}[/] [dim]({self.provider or 'active'})[/dim]",
-            f"[dim]Budget:[/] [bold #58a6ff]{total_used:,}[/] [dim]/ {self.max_context:,} tokens ({pct}%)[/dim]",
-            f"{bar}\n",
-            "[bold white]Token Breakdown[/]",
+            f"[dim]Model:[/]          [bold white]{self.model_id}[/] [dim]({self.provider or 'active'})[/dim]",
+            f"[dim]Active Window:[/]  [bold #58a6ff]{total_used:,}[/] [dim]/ {self.max_context:,} tokens ({pct}%)[/dim] [dim](for Summarizing)[/dim]",
+            f"{bar}",
+            f"[dim]Session Usage:[/]  [bold #bc8cff]{session_tokens:,}[/] [dim]tokens cumulative (API total)[/dim]\n",
+            "[bold white]Active Context Breakdown[/]",
             f"  [b #58a6ff]•[/] System Prompt:    {sys_tokens:>6,} tokens",
             f"  [b #58a6ff]•[/] Pinned Files ({len(self.pinned_files)}): {pinned_tokens:>6,} tokens",
             f"  [b #58a6ff]•[/] Chat Turns ({len(self.messages)}):   {msg_tokens:>6,} tokens",
-            f"  [b #58a6ff]•[/] Remaining:        {max(0, self.max_context - total_used):>6,} tokens\n",
+            f"  [b #58a6ff]•[/] Free Headroom:     {max(0, self.max_context - total_used):>6,} tokens\n",
             "[bold white]Thinking & Reasoning[/]",
         ]
 

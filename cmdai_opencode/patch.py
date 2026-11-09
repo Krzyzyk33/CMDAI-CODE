@@ -283,7 +283,9 @@ def install(app_root: str = "") -> List[str]:
     """
     if app_root:
         src = os.path.join(app_root, "src")
-        if os.path.isdir(src) and src not in sys.path:
+        if os.path.isdir(src):
+            while src in sys.path:
+                sys.path.remove(src)
             sys.path.insert(0, src)
 
     applied: List[str] = []

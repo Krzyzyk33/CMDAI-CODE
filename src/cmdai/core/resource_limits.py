@@ -174,9 +174,19 @@ def _read_gguf_header_binary(gguf_path: str) -> Dict[str, Any]:
 
             for _ in range(min(int(kv_count), 512)):
                 key = _read_str()
+                key_low = key.lower()
+                if (
+                    key_low.startswith("clip.")
+                    or "vision" in key_low
+                    or "mmproj" in key_low
+                    or "image_newline" in key_low
+                    or "patch_embd" in key_low
+                ):
+                    out["__has_vision_keys__"] = True
                 vtype = struct.unpack("<I", f.read(4))[0]
                 want = (
                     key == "general.architecture"
+                    or key == "tokenizer.chat_template"
                     or key.endswith(".context_length")
                     or key.endswith(".block_count")
                     or key.endswith(".attention.head_count_kv")

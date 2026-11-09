@@ -16,6 +16,10 @@ class ReleaseNoteModal(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Back", priority=True),
         Binding("enter", "close", "Back", show=False),
+        Binding("up", "scroll_up", "Up", show=False),
+        Binding("down", "scroll_down", "Down", show=False),
+        Binding("pageup", "scroll_page_up", "Page Up", show=False),
+        Binding("pagedown", "scroll_page_down", "Page Down", show=False),
     ]
 
     def __init__(self, release: Dict[str, Any], **kwargs):
@@ -29,8 +33,6 @@ class ReleaseNoteModal(ModalScreen[None]):
         pre = " [pre-release]" if self.release.get("prerelease") else ""
         body = (self.release.get("body") or "").strip()
         if not body:
-            # The entry is listed but its notes were never fetched, so there is
-            # nothing to render. Say why instead of showing a blank page.
             body = offline_notice_text(str(tag))
         with Vertical(id="modal-dialog"):
             with Horizontal(id="modal-header"):
@@ -43,6 +45,36 @@ class ReleaseNoteModal(ModalScreen[None]):
                     yield Static(Markdown(body), id="releases-body")
                 except Exception:
                     yield Static(body, id="releases-body")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#releases-preview", VerticalScroll).focus()
+        except Exception:
+            pass
+
+    def action_scroll_up(self) -> None:
+        try:
+            self.query_one("#releases-preview", VerticalScroll).scroll_relative(y=-2, animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_down(self) -> None:
+        try:
+            self.query_one("#releases-preview", VerticalScroll).scroll_relative(y=2, animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_page_up(self) -> None:
+        try:
+            self.query_one("#releases-preview", VerticalScroll).scroll_page_up(animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_page_down(self) -> None:
+        try:
+            self.query_one("#releases-preview", VerticalScroll).scroll_page_down(animate=False)
+        except Exception:
+            pass
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -85,7 +117,7 @@ class ReleasesModal(ModalScreen[None]):
         ol = self.query_one("#modal-list", OptionList)
         ol.clear_options()
         if not self.releases:
-            ol.add_option(Option("[dim](No releases >= v3.0-alpha found)[/dim]"))
+            ol.add_option(Option("[dim](No releases >= v1.0.0 found)[/dim]"))
             return
         for r in self.releases:
             pre = " [pre-release]" if r.get("prerelease") else ""

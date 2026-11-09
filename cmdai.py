@@ -5,14 +5,16 @@ import traceback
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC_PATH = os.path.join(APP_ROOT, "src")
+if APP_ROOT not in sys.path:
+    sys.path.append(APP_ROOT)
 if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
+else:
+    sys.path.remove(SRC_PATH)
     sys.path.insert(0, SRC_PATH)
 
 from cmdai.core.launcher import install_global_launcher
 from cmdai.core.settings import get_settings
-
-if APP_ROOT not in sys.path:
-    sys.path.insert(0, APP_ROOT)
 
 if "dev" in os.path.basename(APP_ROOT).lower() or os.environ.get("CMDAI_DEV") == "1":
     try:

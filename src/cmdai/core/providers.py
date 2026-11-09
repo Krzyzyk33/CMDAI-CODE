@@ -631,11 +631,16 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         or "include_reasoning" in params
                         or bool(item.get("reasoning"))
                     )
-                    if reported:
-                        from .capabilities import register_model_capability
+                    from .capabilities import extract_vision_from_payload, register_model_capability
+                    vis_flag = extract_vision_from_payload(item)
+                    if reported or vis_flag is not None:
                         register_model_capability(
-                            mid, provider_id=provider_id, thinking=True,
-                            param_style="reasoning_effort",
+                            mid,
+                            provider_id=provider_id,
+                            thinking=reported,
+                            param_style="reasoning_effort" if reported else "none",
+                            vision=vis_flag,
+                            context_limit=ctx_len,
                         )
                     cap = get_model_capability(mid, provider_id=provider_id)
 

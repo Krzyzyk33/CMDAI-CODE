@@ -185,6 +185,8 @@ class SessionManager:
         workdir: Optional[str] = None,
         agent_mode: Optional[str] = None,
         named_by_model: Optional[bool] = None,
+        todo_list: Optional[List[Any]] = None,
+        pending_approval: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if not session_id:
             session_id = f"session_{int(time.time())}"
@@ -287,6 +289,14 @@ class SessionManager:
         }
         if transcript:
             data["transcript"] = transcript
+        if todo_list is not None:
+            data["todo_list"] = todo_list
+        elif existing and existing.get("todo_list") is not None:
+            data["todo_list"] = existing.get("todo_list")
+        if pending_approval is not None:
+            data["pending_approval"] = pending_approval
+        elif existing and existing.get("pending_approval") is not None:
+            data["pending_approval"] = existing.get("pending_approval")
 
         try:
             os.makedirs(target_dir, exist_ok=True)
@@ -815,10 +825,21 @@ def _subagent_event(call: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, A
     }
 
 
+AUTONOMOUS_NUDGE_PREFIXES = (
+    "Kontynuuj na podstawie wykonanych narzędzi",
+    "Nie zatrzymuj się na samej zapowiedzi",
+    "Wywołaj teraz subagenta",
+    "oraz przedstawić zwięzłe podsumowanie",
+)
+
 def is_user_prompt_message(m: Dict[str, Any]) -> bool:
     if not isinstance(m, dict) or m.get("role") != "user":
         return False
+    if m.get("internal") or m.get("autonomous_nudge"):
+        return False
     c = str(m.get("content", "") or "")
+    if any(c.startswith(prefix) for prefix in AUTONOMOUS_NUDGE_PREFIXES):
+        return False
     return not bool(_TOOL_RESPONSE_RE.match(c))
 
 
