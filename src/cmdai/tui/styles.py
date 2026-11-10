@@ -1160,43 +1160,46 @@ Input .input--cursor {
     color: #e6edf3;
 }
 
-#update-actions {
+#update-actions-list {
     width: 100%;
     height: auto;
-    align: right middle;
+    max-height: 4;
+    background: transparent;
+    border: none !important;
     margin: 1 0 0 0;
+    padding: 0;
     display: none;
+    scrollbar-size-vertical: 0;
 }
 
-#update-actions.visible {
+#update-actions-list.visible {
     display: block;
 }
 
-#update-actions Button {
-    margin-left: 1;
-    height: 3;
-    min-width: 15;
-    border: none;
+#update-actions-list:focus {
+    border: none !important;
+    background-tint: transparent 0%;
 }
 
-#btn-restart-now {
-    background: #238636;
-    color: #ffffff;
+#update-actions-list > .option-list--option {
+    height: 1;
+    color: #8b949e;
+    background: transparent;
+    padding: 0 1;
+}
+
+#update-actions-list > .option-list--option-hover {
+    background: #21262d !important;
+    color: #ffffff !important;
+}
+
+#update-actions-list > .option-list--option-highlighted,
+#update-actions-list > .option-list--option-selected,
+#update-actions-list:focus > .option-list--option-highlighted,
+#update-actions-list:focus > .option-list--option-selected {
+    background: #21262d !important;
+    color: #ffffff !important;
     text-style: bold;
-}
-
-#btn-restart-now:hover, #btn-restart-now:focus {
-    background: #2ea043;
-}
-
-#btn-restart-later {
-    background: #21262d;
-    color: #c9d1d9;
-}
-
-#btn-restart-later:hover, #btn-restart-later:focus {
-    background: #30363d;
-    color: #ffffff;
 }
 
 /* Agent tools: flat list like /help, click opens a stacked window. */

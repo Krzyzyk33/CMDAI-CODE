@@ -11,11 +11,14 @@ escape codes into the rendered frame.
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center
 from textual.screen import ModalScreen
-from textual.widgets import Static, Button
+from textual.widgets import Static, OptionList
+from textual.widgets.option_list import Option
+from rich.text import Text
 
 GLYPHS = ["⌬", "✻"]
 FLIP = 0.35
@@ -47,6 +50,9 @@ class UpdateProgressModal(ModalScreen[bool]):
 
     BINDINGS = [
         Binding("escape", "close", "Close", priority=True),
+        Binding("enter", "select_action", "Select", priority=True),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
     ]
 
     def __init__(self, **kwargs):
@@ -67,9 +73,7 @@ class UpdateProgressModal(ModalScreen[bool]):
             yield Static("Preparing...", id="update-step")
             with VerticalScroll(id="update-log"):
                 yield Static("", id="update-log-body")
-            with Horizontal(id="update-actions"):
-                yield Button("Restart Now", id="btn-restart-now", variant="primary")
-                yield Button("Later", id="btn-restart-later")
+            yield OptionList(id="update-actions-list")
             with Horizontal(id="modal-footer"):
                 yield Static("[dim]esc closes the window - the update keeps running[/]",
                             id="modal-footer-left")
@@ -100,6 +104,13 @@ class UpdateProgressModal(ModalScreen[bool]):
     def finish(self, summary: str) -> None:
         self.done = True
         self.summary = summary
+        timer = getattr(self, "_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._timer = None
         self.refresh_rows()
 
     # -------------------------------------------------------------- rendering
@@ -121,15 +132,27 @@ class UpdateProgressModal(ModalScreen[bool]):
             step_text = f"[b #3fb950]✔  {self.summary or 'Update completed!'}[/]"
             percent = 100
             try:
-                actions = self.query_one("#update-actions")
-                if not actions.has_class("visible"):
-                    actions.add_class("visible")
-                    self.query_one("#btn-restart-now", Button).focus()
+                ol = self.query_one("#update-actions-list", OptionList)
+                if not ol.has_class("visible"):
+                    r1 = "  [bold #3fb950]●[/]  [bold white]Restart Now[/]" + (" " * 26) + "[dim]Relaunch app to apply changes[/dim]"
+                    r2 = "  [dim]○[/]  [bold white]Later[/]" + (" " * 31) + "[dim]Continue current session (esc)[/dim]"
+                    t1 = Text.from_markup(r1)
+                    t1.no_wrap = True
+                    t1.overflow = "ellipsis"
+                    t2 = Text.from_markup(r2)
+                    t2.no_wrap = True
+                    t2.overflow = "ellipsis"
+                    ol.clear_options()
+                    ol.add_option(Option(t1, id="restart"))
+                    ol.add_option(Option(t2, id="later"))
+                    ol.add_class("visible")
+                    ol.highlighted = 0
+                    ol.focus()
             except Exception:
                 pass
             try:
                 self.query_one("#modal-footer-left", Static).update(
-                    "[dim]Enter restarts now · esc closes window[/]"
+                    "[dim]enter: Select action  ·  ↑/↓: Navigate  ·  esc: Close[/dim]"
                 )
             except Exception:
                 pass
@@ -179,16 +202,51 @@ class UpdateProgressModal(ModalScreen[bool]):
             lines.append(f"[b #3fb950]{self.summary}[/]")
             if self.restart_required:
                 lines.append("")
-                lines.append("[dim #8b949e]Restart CMDAI CODE to run the updated version:[/dim]")
+                lines.append("[dim #8b949e]Select an action below:[/dim]")
         try:
             self.query_one("#update-log-body", Static).update("\n".join(lines))
         except Exception:
             pass
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-restart-now":
+    def action_cursor_up(self) -> None:
+        if self.done:
+            try:
+                ol = self.query_one("#update-actions-list", OptionList)
+                if ol.highlighted is not None and ol.highlighted > 0:
+                    ol.highlighted -= 1
+                elif ol.highlighted is None and ol.option_count > 0:
+                    ol.highlighted = 0
+            except Exception:
+                pass
+
+    def action_cursor_down(self) -> None:
+        if self.done:
+            try:
+                ol = self.query_one("#update-actions-list", OptionList)
+                if ol.highlighted is not None and ol.highlighted < ol.option_count - 1:
+                    ol.highlighted += 1
+                elif ol.highlighted is None and ol.option_count > 0:
+                    ol.highlighted = 0
+            except Exception:
+                pass
+
+    def action_select_action(self) -> None:
+        if not self.done:
+            return
+        try:
+            ol = self.query_one("#update-actions-list", OptionList)
+            if ol.highlighted == 0:
+                self.action_restart_now()
+            else:
+                self.dismiss(self.done)
+        except Exception:
+            pass
+
+    @on(OptionList.OptionSelected, "#update-actions-list")
+    def on_action_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id == "restart" or event.option_index == 0:
             self.action_restart_now()
-        elif event.button.id == "btn-restart-later":
+        else:
             self.dismiss(self.done)
 
     def action_restart_now(self) -> None:
