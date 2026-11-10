@@ -31,6 +31,7 @@ def build_launcher_scripts(project_root: str) -> Dict[str, str]:
     main_cmd = (
         "@echo off\n"
         "rem CMDAI CODE global launcher (generated). Regen via: cmdai --install-launcher\n"
+        'if not defined CMDAI_CODE_ROOT if exist "D:\\CMDAI CODE\\cmdai.py" set "CMDAI_CODE_ROOT=D:\\CMDAI CODE"\n'
         f'if not defined CMDAI_CODE_ROOT set "CMDAI_CODE_ROOT={project_root}"\n'
         'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" set "CMDAI_CODE_ROOT=%USERPROFILE%\\CMDAI-CODE"\n'
         'if not exist "%CMDAI_CODE_ROOT%\\cmdai.py" (\n'

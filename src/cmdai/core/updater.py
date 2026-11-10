@@ -25,10 +25,206 @@ returning a failure would tell the user the update did not land when it did.
 import os
 import subprocess
 import sys
+import time
+import threading
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Dict, Any
 
 REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
+
+_ANSI_INITIALIZED = False
+
+
+def _init_ansi() -> None:
+    """Enables ANSI escape sequences in Windows console if needed."""
+    global _ANSI_INITIALIZED
+    if _ANSI_INITIALIZED:
+        return
+    _ANSI_INITIALIZED = True
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        except Exception:
+            pass
+
+
+def render_installer_banner(percent: int) -> str:
+    """Renders the CC logo with a block progress bar for Textual / Rich UI."""
+    pct = max(0, min(100, int(percent)))
+    total_blocks = 16
+    filled = int((pct * total_blocks) / 100)
+    empty = total_blocks - filled
+    bar_str = f"[#58a6ff]{'▓' * filled}[/][#484f58]{'░' * empty}[/]  [bold #ffffff]{pct:>3}%[/]"
+    return (
+        f" [bold #ffffff]█████╗    █████╗[/]\n"
+        f"[bold #ffffff]██╔═══╝   ██╔═══╝[/]\n"
+        f"[bold #ffffff]██║       ██║[/]        {bar_str}\n"
+        f"[bold #ffffff]╚█████╗   ╚█████╗[/]\n"
+        f" [bold #ffffff]╚════╝    ╚════╝[/]"
+    )
+
+
+def render_cli_banner(percent: int, status_text: str = "") -> str:
+    """Renders the CC logo with a block progress bar for ANSI terminal CLI."""
+    pct = max(0, min(100, int(percent)))
+    total_blocks = 16
+    filled = int((pct * total_blocks) / 100)
+    empty = total_blocks - filled
+    bar_str = f"\x1b[94m{'▓' * filled}\x1b[90m{'░' * empty}\x1b[0m  \x1b[97m{pct:>3}%\x1b[0m"
+    lbl = f"  \x1b[36m{status_text}\x1b[0m" if status_text else ""
+    return (
+        f" \x1b[97m█████╗    █████╗\x1b[0m\n"
+        f"\x1b[97m██╔═══╝   ██╔═══╝\x1b[0m\n"
+        f"\x1b[97m██║       ██║\x1b[0m        {bar_str}{lbl}\n"
+        f"\x1b[97m╚█████╗   ╚█████╗\x1b[0m\n"
+        f" \x1b[97m╚════╝    ╚════╝\x1b[0m\n"
+    )
+
+
+def resolve_app_root(candidate: Optional[str] = None) -> str:
+    """Finds the root directory containing the valid CMDAI CODE git repository."""
+    candidates: List[str] = []
+    if candidate and os.path.exists(candidate):
+        candidates.append(candidate)
+    env_root = os.environ.get("CMDAI_CODE_ROOT")
+    if env_root and os.path.exists(env_root):
+        candidates.append(env_root)
+
+    core_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    candidates.append(core_root)
+
+    candidates.extend([
+        r"D:\CMDAI CODE",
+        os.path.join(os.path.expanduser("~"), "CMDAI-CODE"),
+        r"E:\CMDAI CODE",
+        r"E:\CMDAI-CODE",
+    ])
+
+    for c in candidates:
+        if c and os.path.isdir(c) and os.path.isdir(os.path.join(c, ".git")):
+            return os.path.abspath(c)
+
+    for c in candidates:
+        if c and os.path.isdir(c) and os.path.isfile(os.path.join(c, "cmdai.py")):
+            return os.path.abspath(c)
+
+    return os.path.abspath(candidate or os.getcwd())
+
+
+def _ensure_git_repo(app_root: str, repo_url: str = REPO_URL) -> bool:
+    """Ensures app_root has a valid git repository, initializing or auto-repairing if needed."""
+    if os.path.isdir(os.path.join(app_root, ".git")):
+        return True
+
+    for cand in [r"D:\CMDAI CODE", os.path.join(os.path.expanduser("~"), "CMDAI-CODE"), r"E:\CMDAI CODE"]:
+        cand_git = os.path.join(cand, ".git")
+        if cand != app_root and os.path.isdir(cand_git):
+            try:
+                import shutil
+                shutil.copytree(cand_git, os.path.join(app_root, ".git"))
+                return True
+            except Exception:
+                pass
+
+    try:
+        subprocess.run(["git", "init"], cwd=app_root, check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", repo_url], cwd=app_root, capture_output=True)
+        subprocess.run(["git", "fetch", "origin", "main"], cwd=app_root, check=True, capture_output=True)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=app_root, capture_output=True)
+        subprocess.run(["git", "branch", "--set-upstream-to=origin/main", "main"], cwd=app_root, capture_output=True)
+        return True
+    except Exception:
+        return False
+
+
+class CliCCReporter:
+    """Renders update progress in terminal with CC logo and animated block progress bar."""
+
+    def __init__(self):
+        _init_ansi()
+        self._rendered_once = False
+        self._step_index = 0
+        self._lock = threading.Lock()
+
+    def _repaint(self, pct: int, label: str):
+        with self._lock:
+            banner = render_cli_banner(pct, label)
+            if not self._rendered_once:
+                sys.stdout.write("\n" + banner)
+                sys.stdout.flush()
+                self._rendered_once = True
+            else:
+                sys.stdout.write("\x1b[5A\r" + banner)
+                sys.stdout.flush()
+
+    def step(self, label: str, work_fn: Callable[[], Tuple[str, str]],
+             min_time: float = 1.0, timeout: float = 300.0,
+             header: str = "", gap: int = 0) -> Tuple[str, str]:
+        self._step_index += 1
+        if self._step_index == 1:
+            start_p, end_p = 10, 45
+        elif self._step_index == 2:
+            start_p, end_p = 45, 80
+        elif self._step_index == 3:
+            start_p, end_p = 80, 95
+        else:
+            start_p, end_p = 95, 99
+
+        result: Dict[str, str] = {}
+
+        def _work():
+            try:
+                st, det = work_fn()
+            except Exception as e:
+                st, det = "FAIL", str(e)
+            result["status"] = st
+            result["detail"] = det
+
+        thread = threading.Thread(target=_work, daemon=True)
+        thread.start()
+
+        start_time = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - start_time
+            progress = min(1.0, elapsed / max(min_time, 0.1))
+            cur_p = int(start_p + (end_p - start_p) * progress)
+            self._repaint(cur_p, label)
+
+            if "status" in result and elapsed >= min_time:
+                break
+            if elapsed >= timeout:
+                result["status"] = "TIMEOUT"
+                result["detail"] = f"timed out after {int(timeout)}s"
+                break
+            time.sleep(0.06)
+
+        st = result.get("status", "FAIL")
+        det = result.get("detail", "")
+        if st == "OK":
+            self._repaint(end_p, f"{label} (OK)")
+        else:
+            self._repaint(cur_p, f"{label} (FAIL)")
+        return st, det
+
+    def message(self, text: str) -> None:
+        with self._lock:
+            sys.stdout.write(f"\n  \x1b[33m[!]\x1b[0m {text}\n")
+            sys.stdout.flush()
+
+    def finish(self, text: str) -> None:
+        with self._lock:
+            banner = render_cli_banner(100, "Done")
+            if self._rendered_once:
+                sys.stdout.write("\x1b[5A\r" + banner)
+            else:
+                sys.stdout.write("\n" + banner)
+            sys.stdout.write(f"\n  \x1b[32m[✔]\x1b[0m \x1b[1;97m{text}\x1b[0m\n\n")
+            sys.stdout.flush()
 
 # Noise pip emits on a machine that has seen a few broken dist-info
 # directories. Kept out of the failure report so the real error is visible.
@@ -217,10 +413,15 @@ def run_update(
         from . import releases as releases_module  # noqa: PLC0415
 
     result = UpdateResult(ok=False)
+    app_root = resolve_app_root(app_root)
 
     if not _git_available():
         reporter.message("[!] Error: Git is not installed or not found in system PATH.")
         reporter.message(f"[!] You can re-clone manually: git clone {repo_url}")
+        return result
+
+    if not _ensure_git_repo(app_root, repo_url=repo_url):
+        reporter.message(f"[!] Error: Not a git repository: {app_root}")
         return result
 
     _ensure_safe_directory(app_root)
@@ -298,3 +499,14 @@ def run_update(
             pass
 
     return result
+
+
+def run_cli_update(app_root: Optional[str] = None) -> int:
+    """CLI entry point for cmdai update / cmdai code update with CC banner & progress animation."""
+    from .releases import write_pending_notice
+
+    resolved = resolve_app_root(app_root)
+    reporter = CliCCReporter()
+    result = run_update(resolved, reporter=reporter, on_updated=write_pending_notice)
+    return 0 if result.ok else 1
+

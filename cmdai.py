@@ -16,13 +16,6 @@ else:
 from cmdai.core.launcher import install_global_launcher
 from cmdai.core.settings import get_settings
 
-if "dev" in os.path.basename(APP_ROOT).lower() or os.environ.get("CMDAI_DEV") == "1":
-    try:
-        import cmdai_opencode.patch
-        cmdai_opencode.patch.install(APP_ROOT)
-    except Exception:
-        pass
-
 from cmdai.tui.app import CMDAICodeTUI
 
 
@@ -49,43 +42,13 @@ def setup_crash_logger():
 
 
 def handle_update():
-    """Updates CMDAI CODE from GitHub repository without modifying user's personal config."""
-    import subprocess
-    print("\n" + "=" * 65)
-    print("  ⌬  CMDAI CODE — GitHub Repository Update")
-    print("=" * 65 + "\n")
-
+    """Updates CMDAI CODE from GitHub repository with CC branding and animated progress bar."""
     try:
-        subprocess.check_output(["git", "--version"], stderr=subprocess.DEVNULL)
-    except Exception:
-        print("[!] Error: Git is not installed or not found in system PATH.")
-        return 1
-
-    print("[*] Pulling latest changes from repository...")
-    try:
-        res = subprocess.run(["git", "pull"], cwd=APP_ROOT, text=True, capture_output=True)
-        if res.stdout:
-            print(res.stdout.strip())
-        if res.stderr:
-            print(res.stderr.strip())
-        if res.returncode != 0:
-            print("[!] Update failed.")
-            return res.returncode
+        from cmdai.core.updater import run_cli_update
+        return run_cli_update(APP_ROOT)
     except Exception as e:
-        print(f"[!] Error while pulling update: {e}")
+        print(f"\n[!] Update error: {e}")
         return 1
-
-    req_path = os.path.join(APP_ROOT, "requirements.txt")
-    if os.path.exists(req_path):
-        print("[*] Synchronizing Python packages...")
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path, "--quiet"], cwd=APP_ROOT)
-            print("[✔] Dependencies are up to date.")
-        except Exception:
-            pass
-
-    print("\n[✔] Success: CMDAI CODE has been successfully updated!\n")
-    return 0
 
 
 def handle_add_local_model():

@@ -745,25 +745,6 @@ def stream_chat_completion(
         level = normalize_level(cap.default_level) or "medium"
     reasoning_level = level
 
-    if provider_id in ("opencode", "opencode_zen", "opencode_local", "local_opencode") and not api_key:
-        try:
-            from cmdai_opencode import provider as plugin_provider
-            return plugin_provider.stream_completion(
-                model_id,
-                messages,
-                generation_params=generation_params,
-                on_token=on_token,
-                on_thinking=on_thinking,
-                is_aborted=is_aborted,
-                on_tool=on_tool,
-                on_usage=on_usage,
-            )
-        except Exception as e:
-            err_msg = f"⚠ OpenCode Local Error: {e}"
-            if on_token:
-                on_token(err_msg)
-            return err_msg, ""
-
     if provider_id == "opencode_zen":
         provider_id = "opencode"
     info = PROVIDERS_CATALOG.get(provider_id)

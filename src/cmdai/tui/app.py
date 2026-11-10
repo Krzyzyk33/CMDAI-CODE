@@ -1575,11 +1575,6 @@ class CMDAICodeTUI(App):
         except Exception:
             pass
         try:
-            from cmdai_opencode.bridge import stop_bridge
-            stop_bridge()
-        except Exception:
-            pass
-        try:
             sys.stdout.write("\x1b]111\x07")
             sys.stdout.flush()
         except Exception:
@@ -1592,8 +1587,6 @@ class CMDAICodeTUI(App):
         self._flush_live_turn_to_session()
         try:
             self.abort_requested = True
-            from cmdai_opencode.bridge import stop_bridge
-            stop_bridge()
         except Exception:
             pass
 
@@ -2994,7 +2987,7 @@ class CMDAICodeTUI(App):
         codes on stdout land inside the rendered frame.
         """
         from ..core.releases import write_pending_notice
-        from ..core.updater import run_update
+        from ..core.updater import run_update, resolve_app_root
         from .modals.update import TuiReporter, UpdateProgressModal
 
         if getattr(self, "_update_running", False):
@@ -3004,7 +2997,7 @@ class CMDAICodeTUI(App):
             self.notify("Finish the current turn before updating.", severity="warning", timeout=3.0)
             return
 
-        app_root = getattr(self.settings, "base_dir", None) or os.getcwd()
+        app_root = resolve_app_root(getattr(self.settings, "base_dir", None))
         modal = UpdateProgressModal()
         self._update_running = True
         self.push_screen(modal, lambda _: None)
@@ -4226,12 +4219,7 @@ class CMDAICodeTUI(App):
 
         self.session_manager = SessionManager(project_dir=self.workdir)
 
-        try:
-            from cmdai_opencode.bridge import get_bridge
-            get_bridge(self.workdir)
-        except Exception:
-            pass
-
+        
         if getattr(self, "agent_ctx", None):
             self.agent_ctx.workdir = self.workdir
             self.agent_ctx.current_cwd = self.workdir

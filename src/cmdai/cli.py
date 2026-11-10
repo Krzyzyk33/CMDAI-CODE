@@ -38,12 +38,6 @@ from cmdai.core.settings import get_settings
 if APP_ROOT not in sys.path:
     sys.path.insert(0, APP_ROOT)
 
-try:
-    import cmdai_opencode.patch
-    cmdai_opencode.patch.install(APP_ROOT)
-except Exception:
-    pass
-
 from cmdai.tui.app import CMDAICodeTUI
 
 
@@ -169,13 +163,10 @@ class _CliReporter:
 
 
 def handle_update():
-    """Updates CMDAI CODE from GitHub repository without modifying user's personal config."""
-    from cmdai.core.releases import write_pending_notice
-    from cmdai.core.updater import run_update
+    """Updates CMDAI CODE from GitHub repository with CC branding and animated progress bar."""
+    from cmdai.core.updater import run_cli_update
 
-    result = run_update(APP_ROOT, reporter=_CliReporter(),
-                        on_updated=write_pending_notice)
-    return 0 if result.ok else 1
+    return run_cli_update(APP_ROOT)
 
 
 def handle_mcp(argv: List[str]):
