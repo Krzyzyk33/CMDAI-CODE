@@ -134,8 +134,8 @@ class UpdateProgressModal(ModalScreen[bool]):
             try:
                 ol = self.query_one("#update-actions-list", OptionList)
                 if not ol.has_class("visible"):
-                    r1 = "  [bold #3fb950]●[/]  [bold white]Restart Now[/]" + (" " * 26) + "[dim]Relaunch app to apply changes[/dim]"
-                    r2 = "  [dim]○[/]  [bold white]Later[/]" + (" " * 31) + "[dim]Continue current session (esc)[/dim]"
+                    r1 = "  [bold #58a6ff]●[/]  [bold white]Restart Now[/]" + (" " * 16) + "[dim]Relaunch to apply changes[/dim]"
+                    r2 = "  [dim #8b949e]○[/]  [bold white]Later[/]" + (" " * 22) + "[dim]Continue current session (esc)[/dim]"
                     t1 = Text.from_markup(r1)
                     t1.no_wrap = True
                     t1.overflow = "ellipsis"

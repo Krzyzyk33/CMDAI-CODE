@@ -1115,7 +1115,7 @@ Input .input--cursor {
 
 /* Update: steps run in the window, esc only closes it. */
 #modal-dialog.update-dialog {
-    width: 76;
+    width: 78;
     height: auto;
     max-height: 80%;
 }
