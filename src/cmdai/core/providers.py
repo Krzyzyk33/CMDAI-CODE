@@ -533,11 +533,13 @@ def _merge_catalog_facts(provider_id: str, models: List[Dict[str, Any]]) -> List
 def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, Any]]:
     if provider_id == "opencode_zen":
         provider_id = "opencode"
+    if provider_id in ("opencode_local", "local_opencode"):
+        provider_id = "local_gguf"
     info = PROVIDERS_CATALOG.get(provider_id)
     if not info:
         return []
 
-    if provider_id == "local_gguf":
+    if provider_id in ("local_gguf", "opencode_local", "local_opencode"):
         from .model_paths import list_gguf_files, resolve_models_dir
         models_dir = resolve_models_dir("")
         if not os.path.isdir(models_dir):
@@ -747,6 +749,8 @@ def stream_chat_completion(
 
     if provider_id == "opencode_zen":
         provider_id = "opencode"
+    if provider_id in ("opencode_local", "local_opencode"):
+        provider_id = "local_gguf"
     info = PROVIDERS_CATALOG.get(provider_id)
     if not info:
         return f"Unknown provider: {provider_id}", ""

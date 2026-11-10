@@ -4,7 +4,7 @@ import sys
 import traceback
 from typing import Any, Dict, List
 
-REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
+REPO_URL = "https://github.com/DevP10TR/CMDAI-CODE.git"
 FIXED_ROOT_NAME = "CMDAI-CODE"
 
 

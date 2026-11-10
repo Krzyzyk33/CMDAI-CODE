@@ -17,7 +17,7 @@ COMMANDS_DOC: Dict[str, str] = {
     "/thinking": "Show or set thinking level (/thinking low/medium/high/off)",
     "/sessions": "Browse, reopen or delete auto-saved conversations",
     "/bg": "Background tasks & running subagents manager (Ctrl+B)",
-    "/plan": "Minimalist task checklist and autonomous plan manager",
+    "/todo": "Project tasks & TODO checklist manager",
     "/diff": "Review working changes in a modal (read-only, opens commit)",
     "/editor": "Open terminal code editor in a new window",
     "/revert": "Revert file modifications from current turn",
@@ -152,11 +152,11 @@ SHORTCUTS_DOC: Dict[str, Dict[str, str]] = {
 }
 
 HELP_CATEGORIES: List[Tuple[str, List[str]]] = [
-    ("Chat & Sessions", ["/new", "/help", "/export", "/summarize", "/sessions", "/stats"]),
-    ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/test", "/review", "/plan", "/tasks", "/bg", "/implement", "/debug", "/index", "/mode"]),
-    ("Context & Files", ["/cd", "/add", "/drop", "/context"]),
+    ("Chat & Sessions", ["/new", "/help", "/sessions", "/summarize", "/stats"]),
+    ("Code Agent & Git", ["/editor", "/git", "/diff", "/commit", "/todo", "/bg", "/mode"]),
+    ("Context & Files", ["/cd", "/add", "/drop", "/ctx"]),
     ("Model & Reasoning", ["/models", "/modelinfo", "/params", "/system", "/thinking"]),
-    ("Configuration & Engine", ["/settings", "/loader", "/update", "/updatesettings", "/changelog", "/mcp", "/quit"]),
+    ("Configuration & Engine", ["/settings", "/loader", "/update", "/updatesettings", "/changelog", "/mcp", "/exit"]),
     ("Keyboard Shortcuts", list(SHORTCUTS_DOC.keys())),
 ]
 

@@ -3,7 +3,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-REPO = "Krzyzyk33/CMDAI-CODE"
+REPO = "DevP10TR/CMDAI-CODE"
 API_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=50"
 MIN_TAG = (1, 0, 0, "")
 
@@ -16,7 +16,7 @@ BUNDLED_RELEASE = {
     "tag": "v1.0.0",
     "name": "CMDAI CODE v1.0.0",
     "published_at": "2026-11-08",
-    "url": "https://github.com/Krzyzyk33/CMDAI-CODE/releases/tag/v1.0.0",
+    "url": "https://github.com/DevP10TR/CMDAI-CODE/releases/tag/v1.0.0",
     "body": """### Autonomous coding assistant. Combines local GGUF models (llama.cpp) with multi-provider cloud AI and the MCP protocol.
 
 ---

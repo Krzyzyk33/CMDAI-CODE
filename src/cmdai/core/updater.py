@@ -30,7 +30,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple, Dict, Any
 
-REPO_URL = "https://github.com/Krzyzyk33/CMDAI-CODE.git"
+REPO_URL = "https://github.com/DevP10TR/CMDAI-CODE.git"
 
 _ANSI_INITIALIZED = False
 

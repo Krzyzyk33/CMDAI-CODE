@@ -9,7 +9,7 @@ description = "CMDAI CODE - autonomous terminal coding agent for Windows"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Custom Non-Commercial / Personal Use License" }
-authors = [{ name = "Krzyzyk33" }]
+authors = [{ name = "DevP10TR" }]
 dependencies = [
   "textual>=0.70.0",
   "rich>=13.0.0",
@@ -23,7 +23,7 @@ dependencies = [
 cmdai = "cmdai.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Krzyzyk33/CMDAI-CODE"
+Homepage = "https://github.com/DevP10TR/CMDAI-CODE"
 
 [tool.setuptools.packages.find]
 where = ["src"]

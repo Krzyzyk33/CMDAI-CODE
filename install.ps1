@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Local
 )
 
@@ -108,7 +108,7 @@ if ($Local) {
     Render-Progress -Percent 20
 
     # Download main branch ZIP
-    $zipUrl = "https://github.com/Krzyzyk33/CMDAI-CODE/archive/refs/heads/main.zip"
+    $zipUrl = "https://github.com/DevP10TR/CMDAI-CODE/archive/refs/heads/main.zip"
     $zipFile = Join-Path $env:TEMP "cmdai-main.zip"
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

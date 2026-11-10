@@ -322,6 +322,8 @@ class CMDAICodeTUI(App):
         self._last_escape_time: float = 0.0
 
         self.current_provider: str = self.settings.config.get("default_provider", "openrouter")
+        if self.current_provider in ("opencode_local", "local_opencode"):
+            self.current_provider = "local_gguf"
         self.current_model_id: str = self.settings.config.get("default_model", "")
         if self.current_provider == "local_gguf" and (not self.current_model_id or self.current_model_id == "default"):
             from ..core.providers import fetch_remote_models
@@ -2187,10 +2189,10 @@ class CMDAICodeTUI(App):
             cmd = prompt.split(maxsplit=1)[0].lower()
             modal_cmds = (
                 "/models", "/system", "/sessions", "/stats", "/modelinfo",
-                "/settings", "/quit", "/new", "/params", "/help", "/loader",
-                "/clear", "/reset", "/exit", "/tools", "/status",
-                "/diff", "/changes", "/commit", "/ci", "/plan", "/tasks", "/bg",
-                "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
+                "/settings", "/new", "/params", "/help", "/loader",
+                "/exit", "/tools", "/status",
+                "/diff", "/commit", "/todo", "/bg",
+                "/ctx", "/add", "/mode", "/thinking",
                 "/cd", "/changelog", "/update", "/updatesettings", "/mcp"
             )
             if cmd in modal_cmds:
@@ -2253,6 +2255,7 @@ class CMDAICodeTUI(App):
             "/revert": self._cmd_revert,
             "/diff": self._cmd_diff,
             "/editor": self._cmd_editor,
+            "/todo": self._cmd_plan,
             "/plan": self._cmd_plan,
             "/bg": self._cmd_background_tasks,
             "/add": self._cmd_add,
@@ -2352,10 +2355,10 @@ class CMDAICodeTUI(App):
         if not cmd:
             return
         modal_cmds = ("/models", "/system", "/sessions", "/stats", "/modelinfo",
-                      "/quit", "/new", "/params", "/help", "/loader", "/settings",
-                      "/tools", "/status", "/diff", "/changes", "/commit", "/ci",
-                      "/plan", "/tasks", "/bg", "/context", "/ctx", "/export", "/add", "/mode", "/thinking",
-                      "/changelog", "/update", "/updatesettings", "/mcp")
+                      "/new", "/params", "/help", "/loader", "/settings",
+                      "/tools", "/status", "/diff", "/commit",
+                      "/todo", "/bg", "/ctx", "/add", "/mode", "/thinking",
+                      "/changelog", "/update", "/updatesettings", "/mcp", "/exit")
         if not self.in_chat_mode and cmd not in modal_cmds:
             self._switch_to_chat()
         self._dispatch_command(cmd)
