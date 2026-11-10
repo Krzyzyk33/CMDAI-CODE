@@ -1160,6 +1160,45 @@ Input .input--cursor {
     color: #e6edf3;
 }
 
+#update-actions {
+    width: 100%;
+    height: auto;
+    align: right middle;
+    margin: 1 0 0 0;
+    display: none;
+}
+
+#update-actions.visible {
+    display: block;
+}
+
+#update-actions Button {
+    margin-left: 1;
+    height: 3;
+    min-width: 15;
+    border: none;
+}
+
+#btn-restart-now {
+    background: #238636;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#btn-restart-now:hover, #btn-restart-now:focus {
+    background: #2ea043;
+}
+
+#btn-restart-later {
+    background: #21262d;
+    color: #c9d1d9;
+}
+
+#btn-restart-later:hover, #btn-restart-later:focus {
+    background: #30363d;
+    color: #ffffff;
+}
+
 /* Agent tools: flat list like /help, click opens a stacked window. */
 #modal-dialog.tools-dialog {
     width: 76;

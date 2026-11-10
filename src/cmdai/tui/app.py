@@ -1583,6 +1583,29 @@ class CMDAICodeTUI(App):
             self.http_server.stop()
         self.exit()
 
+    def action_restart_app(self) -> None:
+        """Saves current state and immediately restarts CMDAI CODE."""
+        self._flush_live_turn_to_session()
+        try:
+            self.abort_requested = True
+            if self._current_assistant_card:
+                self._current_assistant_card.abort()
+        except Exception:
+            pass
+        try:
+            sys.stdout.write("\x1b]111\x07")
+            sys.stdout.flush()
+        except Exception:
+            pass
+        if self.http_server:
+            try:
+                self.http_server.stop()
+            except Exception:
+                pass
+        import subprocess
+        subprocess.Popen([sys.executable] + sys.argv)
+        self.exit(0)
+
     def on_unmount(self) -> None:
         self._flush_live_turn_to_session()
         try:

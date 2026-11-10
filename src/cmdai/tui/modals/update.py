@@ -15,7 +15,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll, Center
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import Static, Button
 
 GLYPHS = ["⌬", "✻"]
 FLIP = 0.35
@@ -67,6 +67,9 @@ class UpdateProgressModal(ModalScreen[bool]):
             yield Static("Preparing...", id="update-step")
             with VerticalScroll(id="update-log"):
                 yield Static("", id="update-log-body")
+            with Horizontal(id="update-actions"):
+                yield Button("Restart Now", id="btn-restart-now", variant="primary")
+                yield Button("Later", id="btn-restart-later")
             with Horizontal(id="modal-footer"):
                 yield Static("[dim]esc closes the window - the update keeps running[/]",
                             id="modal-footer-left")
@@ -113,11 +116,26 @@ class UpdateProgressModal(ModalScreen[bool]):
         current = self._current_row()
         elapsed = time.monotonic() - self._started
         glyph = GLYPHS[int(elapsed / FLIP) % 2] if current else "⌬"
-        step_text = f"{glyph}  {current}" if current else "..."
-        percent = 15
+
         if self.done:
+            step_text = f"[b #3fb950]✔  {self.summary or 'Update completed!'}[/]"
             percent = 100
+            try:
+                actions = self.query_one("#update-actions")
+                if not actions.has_class("visible"):
+                    actions.add_class("visible")
+                    self.query_one("#btn-restart-now", Button).focus()
+            except Exception:
+                pass
+            try:
+                self.query_one("#modal-footer-left", Static).update(
+                    "[dim]Enter restarts now · esc closes window[/]"
+                )
+            except Exception:
+                pass
         else:
+            step_text = f"{glyph}  {current}" if current else f"{glyph}  Preparing update..."
+            percent = 15
             labels = [r["label"].lower() for r in self._rows]
             if any("refresh" in l or "version" in l for l in labels):
                 percent = 90
@@ -161,11 +179,29 @@ class UpdateProgressModal(ModalScreen[bool]):
             lines.append(f"[b #3fb950]{self.summary}[/]")
             if self.restart_required:
                 lines.append("")
-                lines.append("[b #d29922]Restart CMDAI CODE to run the new code.[/]")
+                lines.append("[dim #8b949e]Restart CMDAI CODE to run the updated version:[/dim]")
         try:
             self.query_one("#update-log-body", Static).update("\n".join(lines))
         except Exception:
             pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-restart-now":
+            self.action_restart_now()
+        elif event.button.id == "btn-restart-later":
+            self.dismiss(self.done)
+
+    def action_restart_now(self) -> None:
+        """Restarts CMDAI CODE immediately."""
+        self.dismiss(True)
+        if hasattr(self.app, "action_restart_app"):
+            self.app.action_restart_app()
+        elif hasattr(self.app, "restart_app"):
+            self.app.restart_app()
+        else:
+            import subprocess
+            subprocess.Popen([sys.executable] + sys.argv)
+            self.app.exit(0)
 
     def on_mount(self) -> None:
         self.refresh_rows()
