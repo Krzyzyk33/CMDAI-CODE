@@ -21,6 +21,22 @@ GLYPHS = ["⌬", "✻"]
 FLIP = 0.35
 
 
+def render_installer_banner(percent: int) -> str:
+    """Renders the CC logo with a block progress bar for Textual / Rich UI."""
+    pct = max(0, min(100, int(percent)))
+    total_blocks = 16
+    filled = int((pct * total_blocks) / 100)
+    empty = total_blocks - filled
+    bar_str = f"[#58a6ff]{'▓' * filled}[/][#484f58]{'░' * empty}[/]  [bold #ffffff]{pct:>3}%[/]"
+    return (
+        f" [bold #ffffff]█████╗    █████╗[/]\n"
+        f"[bold #ffffff]██╔═══╝   ██╔═══╝[/]\n"
+        f"[bold #ffffff]██║       ██║[/]        {bar_str}\n"
+        f"[bold #ffffff]╚█████╗   ╚█████╗[/]\n"
+        f" [bold #ffffff]╚════╝    ╚════╝[/]"
+    )
+
+
 class UpdateProgressModal(ModalScreen[bool]):
     """Steps of an update, with a running line and a finished summary.
 
