@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll, Center
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
@@ -62,7 +62,8 @@ class UpdateProgressModal(ModalScreen[bool]):
             with Horizontal(id="modal-header"):
                 yield Static("Update CMDAI CODE", id="modal-title")
                 yield Static("[dim]esc[/]", id="modal-esc")
-            yield Static(render_installer_banner(10), id="update-banner")
+            with Center(id="update-banner-container"):
+                yield Static(render_installer_banner(10), id="update-banner")
             yield Static("Preparing...", id="update-step")
             with VerticalScroll(id="update-log"):
                 yield Static("", id="update-log-body")

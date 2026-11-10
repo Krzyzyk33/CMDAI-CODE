@@ -1120,12 +1120,16 @@ Input .input--cursor {
     max-height: 80%;
 }
 
-#update-banner {
+#update-banner-container {
     width: 100%;
     height: 5;
     margin: 1 0 0 0;
-    content-align: center middle;
-    text-align: center;
+    align: center middle;
+}
+
+#update-banner {
+    width: auto;
+    height: 5;
 }
 
 #modal-dialog.update-dialog #update-step {
