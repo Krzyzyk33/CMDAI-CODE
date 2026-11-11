@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -29,6 +30,27 @@ from .tools import (
     tool_bugs,
     tool_code_search,
 )
+
+
+_HALLUCINATED_TURN_RE = re.compile(
+    r'(?:^|\n)\s*(?:</?ASSISTANT\s*>|<USER\s*>(?=\s*(?:\n|<tool_response\b))|<tool_response(?:\s+name=[^>]*)?>)',
+    re.IGNORECASE,
+)
+
+
+def _truncate_hallucinated_turns(text: str) -> str:
+    """Cut off model output at the first hallucinated turn or tool_response delimiter."""
+    if not text:
+        return ""
+    m = _HALLUCINATED_TURN_RE.search(text)
+    if not m:
+        return text
+    prefix = text[:m.start()]
+    open_writes = len(re.findall(r'<tool:(?:write|edit)\b[^>]*>', prefix, re.IGNORECASE))
+    close_writes = len(re.findall(r'</tool:(?:write|edit)\s*>', prefix, re.IGNORECASE))
+    if open_writes <= close_writes:
+        return prefix
+    return text
 
 
 def _parse_json_body(body: str, tool_name: str) -> Dict[str, Any]:
@@ -409,6 +431,9 @@ class AgentRunner:
         if permission == PERM_READ:
             return True, ""
 
+        if str(getattr(self.ctx, "mode", "auto") or "auto").lower().strip() == "auto":
+            return True, ""
+
         if permission == PERM_DESTRUCTIVE:
             # Asked every time, and answering yes does not grant anything:
             # deleting something cannot be undone, so no standing consent.
@@ -625,13 +650,79 @@ class AgentRunner:
         if not text:
             return []
 
+        text = _truncate_hallucinated_turns(text)
+
+        def _inside_inline_code(pos: int) -> bool:
+            """True when `pos` sits inside an inline `...` span on the same line."""
+            line_start = text.rfind("\n", 0, pos) + 1
+            line_end = text.find("\n", pos)
+            if line_end == -1:
+                line_end = len(text)
+            line = text[line_start:line_end]
+            rel = pos - line_start
+            # Skip triple-backtick fences here; JSON extractor handles fenced blocks.
+            if "```" in line:
+                return False
+            before = line[:rel]
+            after = line[rel:]
+            return (before.count("`") % 2 == 1) and ("`" in after)
+
         def _parse_attrs(attrs_str: str) -> Dict[str, str]:
             if not attrs_str:
                 return {}
-            matches = re.findall(r'(\w+)=(?:["\'](.*?)["\']|([^\s>]+))', attrs_str, re.DOTALL)
-            attrs = {}
-            for k, v1, v2 in matches:
-                attrs[k.lower()] = v1 if (v1 is not None and v1 != "") else v2
+            attrs: Dict[str, str] = {}
+            s = attrs_str.strip()
+            i = 0
+            n = len(s)
+            key_re = re.compile(r'(\w+)\s*=\s*')
+            next_key_re = re.compile(r'\s+\w+\s*=')
+            while i < n:
+                while i < n and s[i].isspace():
+                    i += 1
+                if i >= n:
+                    break
+                km = key_re.match(s, i)
+                if not km:
+                    i += 1
+                    continue
+                key = km.group(1).lower()
+                i = km.end()
+                if i >= n:
+                    attrs[key] = ""
+                    break
+                q = s[i]
+                if q in ('"', "'"):
+                    i += 1
+                    start_val = i
+                    # Find closing quote followed by end-of-attrs or ` next_key=`.
+                    end_val = -1
+                    search_pos = start_val
+                    while search_pos < n:
+                        q_idx = s.find(q, search_pos)
+                        if q_idx == -1:
+                            break
+                        rest = s[q_idx + 1:]
+                        if not rest.strip() or next_key_re.match(rest):
+                            end_val = q_idx
+                            i = q_idx + 1
+                            break
+                        search_pos = q_idx + 1
+                    if end_val == -1:
+                        q_idx = s.find(q, start_val)
+                        if q_idx != -1:
+                            end_val = q_idx
+                            i = q_idx + 1
+                        else:
+                            end_val = n
+                            i = n
+                    attrs[key] = html.unescape(s[start_val:end_val])
+                else:
+                    m_bare = re.match(r'([^\s>]+)', s[i:])
+                    if m_bare:
+                        attrs[key] = html.unescape(m_bare.group(1))
+                        i += len(m_bare.group(1))
+                    else:
+                        i += 1
             return attrs
 
         def _normalize_attrs(t_name: str, a_dict: Dict[str, str], b_text: str = "") -> None:
@@ -715,6 +806,7 @@ class AgentRunner:
             "replace_file_content": "edit", "edit_file": "edit", "patch_file": "edit",
             "read_file": "read", "view_file": "read", "cat": "read",
             "list_directory": "ls", "list_dir": "ls",
+            "grep": "search", "rg": "search", "ripgrep": "search", "find_in_files": "search",
             "run_command": "command", "execute_command": "command", "bash": "command", "sh": "command", "terminal": "command", "cmd": "command",
             "shell": "command", "exec": "command", "powershell": "command", "pwsh": "command", "run_shell_command": "command", "shell_command": "command",
             "web_search": "web", "search_web": "web", "fetch_web_page": "webfetch", "read_url_content": "webfetch", "read_browser_page": "webfetch",
@@ -727,6 +819,8 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in gemma_pattern.finditer(text):
+            if _inside_inline_code(match.start()):
+                continue
             tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = match.group(2) or ""
             body = (match.group(3) or "").strip()
@@ -739,6 +833,8 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in body_pattern.finditer(text):
+            if _inside_inline_code(match.start()):
+                continue
             tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
@@ -753,18 +849,27 @@ class AgentRunner:
             re.DOTALL | re.IGNORECASE,
         )
         for match in unclosed_body_pattern.finditer(text):
+            if _inside_inline_code(match.start()):
+                continue
             tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
             attrs_str = (match.group(2) or "").rstrip("/").strip()
             body = match.group(3).strip()
-            if body:
+            # Ignore stray placeholder mentions at end of prose such as "<tool:command>).".
+            if body and (attrs_str or not re.fullmatch(r'[\s\)\.,;:\'"`>]+', body)):
                 attrs = _parse_attrs(attrs_str)
                 _normalize_attrs(tool_name, attrs, body)
                 raw_matches.append((match.start(), match.end(), tool_name, attrs))
 
-        single_tag_pattern = re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*/?>', re.DOTALL | re.IGNORECASE)
+        single_tag_pattern = re.compile(r'<tool:(\w+)(?:\s+([^>]*?))?\s*(/?)>', re.DOTALL | re.IGNORECASE)
         for match in single_tag_pattern.finditer(text):
+            if _inside_inline_code(match.start()):
+                continue
+            attrs_str = (match.group(2) or "").strip()
+            is_self_closing = (match.group(3) == "/")
+            # Bare non-self-closing tags without attributes (e.g. "np. <tool:write>, <tool:ls>") are prose mentions, not tool calls.
+            if not is_self_closing and not attrs_str:
+                continue
             tool_name = _NORM_NAMES.get(match.group(1).lower(), match.group(1).lower())
-            attrs_str = match.group(2) or ""
             attrs = _parse_attrs(attrs_str)
             _normalize_attrs(tool_name, attrs, "")
             raw_matches.append((match.start(), match.end(), tool_name, attrs))
@@ -904,14 +1009,23 @@ class AgentRunner:
         """Evaluate granular permission: returns 'allow', 'ask', or 'deny'."""
         import fnmatch
         name = tool_name.lower().strip()
-        if mode == "plan" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+        mode_low = str(mode or "auto").lower().strip()
+        if mode_low == "plan" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
             return "deny"
+
+        def _resolve_decision(dec: str) -> str:
+            d = str(dec or "").lower().strip()
+            if d not in ("allow", "ask", "deny"):
+                d = "ask"
+            if mode_low == "auto" and d == "ask":
+                return "allow"
+            return d
 
         perms = getattr(self, "permissions", None)
         if not perms or not isinstance(perms, dict):
-            if mode == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+            if mode_low == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
                 return "ask"
-            if mode == "code" and name in ("command", "shell", "bash", "cmd"):
+            if mode_low == "code" and name in ("command", "shell", "bash", "cmd"):
                 return "ask"
             return "allow"
 
@@ -920,15 +1034,14 @@ class AgentRunner:
             rule = perms.get("command") or perms.get("bash")
 
         if rule is None:
-            if mode == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
+            if mode_low == "ask" and name in ("write", "edit", "command", "shell", "bash", "cmd"):
                 return "ask"
-            if mode == "code" and name in ("command", "shell", "bash", "cmd"):
+            if mode_low == "code" and name in ("command", "shell", "bash", "cmd"):
                 return "ask"
             return "allow"
 
         if isinstance(rule, str):
-            val = rule.lower().strip()
-            return val if val in ("allow", "ask", "deny") else "ask"
+            return _resolve_decision(rule)
 
         if isinstance(rule, dict):
             target = ""
@@ -941,8 +1054,8 @@ class AgentRunner:
                 if fnmatch.fnmatch(target, pattern):
                     d = str(decision).lower().strip()
                     if d in ("allow", "ask", "deny"):
-                        return d
-            return "ask"
+                        return _resolve_decision(d)
+            return _resolve_decision("ask")
 
         return "allow"
 
@@ -1232,9 +1345,10 @@ class AgentRunner:
                     self.on_tool_finish("glob", pattern, res)
                 return res
 
-            elif name == "search":
-                query = args.get("query", "")
-                path = args.get("path", ".")
+            elif name in ("search", "grep", "rg", "ripgrep", "find_in_files"):
+                query = args.get("query") or args.get("pattern") or args.get("regex") or ""
+                path = args.get("path") or args.get("dir") or "."
+                literal = str(args.get("literal", "")).lower() in ("true", "1", "yes")
                 if not query:
                     err_res = {
                         "success": False,
@@ -1249,7 +1363,7 @@ class AgentRunner:
                     return err_res
                 if notify and self.on_tool_start:
                     self.on_tool_start("search", query)
-                res = tool_search(ctx, query, path)
+                res = tool_search(ctx, query, path, literal=literal)
                 if notify and self.on_tool_finish:
                     self.on_tool_finish("search", query, res)
                 return res
@@ -1692,7 +1806,14 @@ class AgentRunner:
     def strip_xml_tool_calls(self, text: str) -> str:
         if not text:
             return ""
-        clean = text
+        clean = _truncate_hallucinated_turns(text)
+        # Protect inline code mentions like `<tool:write>` from being stripped as real calls.
+        inline_spans: List[str] = []
+        def _stash_inline(m: re.Match) -> str:
+            token = f"\x00INL{len(inline_spans)}\x00"
+            inline_spans.append(m.group(0))
+            return token
+        clean = re.sub(r'`[^`\n]*<tool:[^`\n]*`', _stash_inline, clean, flags=re.IGNORECASE)
         try:
             dec = json.JSONDecoder()
             scan_pos = 0
@@ -1759,17 +1880,25 @@ class AgentRunner:
         clean = re.sub(r'<task(?:\s+[^>]*?)?\s*/>', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'<task(?:\s+[^>]*?)?>.*?</task>', '', clean, flags=re.DOTALL | re.IGNORECASE)
         clean = re.sub(r'<tool_call(?:\s+[^>]*?)?(?:\s*/>|>.*?</tool_call>)', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<tool:\w+[^>]*>.*$', '', clean, flags=re.DOTALL | re.IGNORECASE)
+        clean = re.sub(
+            r'<tool_response(?:\s+[^>]*?)?>[\s\S]*?(?:</tool_response\s*>|</toolIO\s*>|</IO\s*>|</ANTI\s*>|$)',
+            '',
+            clean,
+            flags=re.IGNORECASE,
+        )
+        clean = re.sub(r'<tool:\w+(?:\s+[^>]*=\s*[^>]*>|\s*>\s*\n)[\s\S]*$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'<\|tool_call.*$', '', clean, flags=re.DOTALL | re.IGNORECASE)
         clean = re.sub(r'<tool_call.*$', '', clean, flags=re.DOTALL | re.IGNORECASE)
-        clean = re.sub(r'<(?:tool:?\w*|\|tool_call\w*|tool_call\w*)[^>]*$', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'<(?:tool:?\w*|\|tool_call\w*|tool_call\w*|tool_response\w*)[^>]*$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?tool:\w+[^>]*>', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?\|?tool_call[^>]*>', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'<subagent[^>]*$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'<task[^>]*$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?subagent[^>]*>', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'</?task[^>]*>', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'</?tool_response[^>]*>', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'</?(?:tool_response|ASSISTANT|USER|ANTI|IO|toolIO|antml)[^>]*>', '', clean, flags=re.IGNORECASE)
+        for idx, orig in enumerate(inline_spans):
+            clean = clean.replace(f"\x00INL{idx}\x00", orig)
         return clean.strip()
 
     def format_tool_result_for_llm(self, tool_name: str, res: Dict[str, Any]) -> str:

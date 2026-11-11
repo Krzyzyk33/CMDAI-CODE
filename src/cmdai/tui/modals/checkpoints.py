@@ -49,15 +49,15 @@ CheckpointsModal {
     background: rgba(9, 13, 19, 0.85);
 }
 
-/* Fullscreen, frameless - shared by the TUI and the editor. */
+/* Centered dialog overlay - shared by the TUI and the editor. */
 #checkpoints-dialog {
-    width: 100%;
-    height: 100%;
-    max-width: 100%;
-    max-height: 100%;
+    width: 90%;
+    height: 78%;
+    max-width: 110;
+    max-height: 36;
     background: #0d1117;
-    border: none;
-    padding: 2 4;
+    border: solid #30363d;
+    padding: 1 2;
 }
 
 #checkpoints-header {

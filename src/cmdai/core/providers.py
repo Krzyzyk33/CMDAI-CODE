@@ -24,15 +24,27 @@ TOOL_COMPLETE_PATTERNS = re.compile(
     r'(?:'
     r'<tool:(?!write\b|edit\b|command\b)\w+[^>]*?/>'
     r'|<tool:(?:write|edit|command)\b[^>]*?\b(?:content|code|new|cmd|command)=[^>]*?/>'
-    r'|</tool:\w+>'
+    r'|</tool:\w+\s*>'
     r'|</(?:subagent|task)>'
     r'|<tool_call>[^>]*?/>'
     r'|</tool_call>'
     r'|<\|tool_call>[^>]*?/>'
-    r'|<tool:(?:ls|read|glob|search|code_search|bugs)[^>]*?>'
+    r'|<tool:(?:ls|read|glob|search|grep|code_search|bugs)\s+[^>]*=[^>]*>'
     r')',
     re.IGNORECASE
 )
+
+HALLUCINATED_TURN_STOP_RE = re.compile(
+    r'(?:^|\n)\s*(?:</?ASSISTANT\s*>|<USER\s*>(?=\s*(?:\n|<tool_response\b))|<tool_response(?:\s+name=[^>]*)?>)',
+    re.IGNORECASE,
+)
+
+
+def is_stream_tool_or_turn_complete(text: str) -> bool:
+    """True when streamed model output completed a tool tag or hallucinated a turn break."""
+    if not text:
+        return False
+    return bool(TOOL_COMPLETE_PATTERNS.search(text) or HALLUCINATED_TURN_STOP_RE.search(text))
 
 
 @dataclass
@@ -49,6 +61,21 @@ class ProviderInfo:
     auth_hint: str = ""
 
 
+def resolve_provider_base_url(provider_id: str, default_url: str = "") -> str:
+    """Resolve base URL honoring env vars and user-configured provider_urls."""
+    url = str(default_url or "").strip().rstrip("/")
+    try:
+        from .settings import get_settings
+        url = get_settings().get_provider_base_url(provider_id, default_url)
+    except Exception:
+        pass
+    if provider_id == "localllmapi" and url:
+        # Allow entering either http://host:1000 or http://host:1000/v1
+        if not url.endswith("/v1") and url.count("/") <= 2:
+            url = f"{url}/v1"
+    return url.rstrip("/")
+
+
 PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
     "local_gguf": ProviderInfo(
         id="local_gguf",
@@ -58,6 +85,16 @@ PROVIDERS_CATALOG: Dict[str, ProviderInfo] = {
         provider_type="local",
         default_models=[],
         supports_remote_fetch=True,
+    ),
+    "localllmapi": ProviderInfo(
+        id="localllmapi",
+        name="LocalLLMAPI (API Server)",
+        base_url="http://127.0.0.1:1000/v1",
+        key_url="http://127.0.0.1:1000",
+        provider_type="cloud",
+        default_models=[],
+        supports_remote_fetch=True,
+        models_endpoint="/models",
     ),
     "opencode": ProviderInfo(
         id="opencode",
@@ -562,7 +599,14 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                 })
         return found
 
-    if not api_key and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf"):
+    is_custom_prov = False
+    try:
+        from .settings import get_settings
+        is_custom_prov = provider_id in get_settings().get_custom_providers()
+    except Exception:
+        is_custom_prov = False
+
+    if not api_key and not is_custom_prov and provider_id not in ("openrouter", "ollama", "lmstudio", "vllm", "local_gguf", "localllmapi"):
         # No key, so the provider will not tell us anything. The catalogue still
         # can, and a card with a real list beats a card that says "key required"
         # while the list is sitting there.
@@ -571,7 +615,8 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
     if requests is None:
         return catalog_models(provider_id)
 
-    url = f"{info.base_url}{info.models_endpoint}"
+    base_url = resolve_provider_base_url(provider_id, info.base_url)
+    url = f"{base_url}{info.models_endpoint}"
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "CMDAI-CODE/1.0",
@@ -582,6 +627,8 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
 
     try:
         resp = requests.get(url, headers=headers, timeout=6.0)
+        if resp.status_code == 404 and not base_url.endswith("/v1") and info.models_endpoint == "/models":
+            resp = requests.get(f"{base_url}/v1{info.models_endpoint}", headers=headers, timeout=6.0)
         if resp.status_code == 200:
             data = resp.json()
 
@@ -616,10 +663,11 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         continue
                     name = item.get("name", mid)
 
-                    from .resource_limits import extract_model_context_length
+                    from .resource_limits import extract_model_context_length, record_live_context_limit
+                    existing_cap = get_model_capability(mid, provider_id=provider_id)
                     ctx_len = extract_model_context_length(item)
-                    if ctx_len <= 0 and getattr(cap, "context_limit", 0) > 0:
-                        ctx_len = int(cap.context_limit)
+                    if ctx_len <= 0 and getattr(existing_cap, "context_limit", 0) > 0:
+                        ctx_len = int(existing_cap.context_limit)
 
                     # The provider's own answer first. `supported_parameters`
                     # naming `reasoning` is better than anything we could look
@@ -635,12 +683,12 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                     )
                     from .capabilities import extract_vision_from_payload, register_model_capability
                     vis_flag = extract_vision_from_payload(item)
-                    if reported or vis_flag is not None:
+                    if reported or vis_flag is not None or (provider_id == "localllmapi" and ctx_len > 0):
                         register_model_capability(
                             mid,
                             provider_id=provider_id,
-                            thinking=reported,
-                            param_style="reasoning_effort" if reported else "none",
+                            thinking=reported if (reported or provider_id != "localllmapi") else existing_cap.thinking,
+                            param_style=("reasoning_effort" if reported else existing_cap.param_style),
                             vision=vis_flag,
                             context_limit=ctx_len,
                         )
@@ -658,12 +706,17 @@ def fetch_remote_models(provider_id: str, api_key: str = "") -> List[Dict[str, A
                         badge_parts.append("FREE")
                     if ctx_str:
                         badge_parts.append(ctx_str)
+                    if provider_id == "localllmapi" and item.get("engine"):
+                        badge_parts.append(str(item["engine"]).upper())
                     if cap.thinking:
                         badge_parts.append("reasoning")
 
                     if ctx_len > 0:
-                        from .resource_limits import save_model_metadata
-                        save_model_metadata(mid, provider_id, ctx_len)
+                        if provider_id == "localllmapi":
+                            record_live_context_limit(provider_id, mid, ctx_len)
+                        else:
+                            from .resource_limits import save_model_metadata
+                            save_model_metadata(mid, provider_id, ctx_len)
 
                     res.append({
                         "id": mid,
@@ -787,10 +840,13 @@ def stream_chat_completion(
             pass
 
     if requests is None:
-        yield ("Error: Python 'requests' package is not installed. Run: pip install requests", None, None)
-        return
+        err_msg = "Error: Python 'requests' package is not installed. Run: pip install requests"
+        if on_token:
+            on_token(err_msg)
+        return err_msg, ""
 
-    url = f"{info.base_url}/chat/completions"
+    base_url = resolve_provider_base_url(provider_id, info.base_url)
+    url = f"{base_url}/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "CMDAI-CODE/1.0",
@@ -871,16 +927,48 @@ def stream_chat_completion(
         # `param_style == "stream_only"` falls through on purpose: the model
         # reasons on its own and there is no parameter to configure.
 
+    captured_usage: Dict[str, Any] = {}
     try:
-        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60.0)
-        if resp.status_code in (400, 422) and any(k in payload for k in ("stream_options", "thinking", "reasoning_effort", "reasoning", "chat_template_kwargs")):
-            # Some endpoints reject stream_options or custom reasoning fields; retry cleanly
+        from .resource_limits import record_live_context_limit
+
+        def _capture_ctx_headers(r) -> None:
+            try:
+                raw_hdr = r.headers.get("X-LocalLLM-Max-Context")
+                if raw_hdr and str(raw_hdr).strip().isdigit():
+                    hdr_max = int(str(raw_hdr).strip())
+                    if hdr_max > 0:
+                        captured_usage["max_context_tokens"] = hdr_max
+                        record_live_context_limit(provider_id, model_id, hdr_max)
+                raw_act = r.headers.get("X-LocalLLM-Active-Context")
+                if raw_act and str(raw_act).strip().isdigit():
+                    captured_usage["active_n_ctx"] = int(str(raw_act).strip())
+            except Exception:
+                pass
+
+        is_local_http = provider_id == "localllmapi" or base_url.startswith(
+            ("http://127.0.0.1", "http://localhost", "http://192.168.", "http://10.", "http://172.")
+        )
+        req_timeout = (10.0, 600.0) if is_local_http else (15.0, 300.0)
+        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=req_timeout)
+        _capture_ctx_headers(resp)
+        is_ctx_err = resp.status_code == 400 and "context_length_exceeded" in (resp.text or "")
+        if not is_ctx_err and (
+            resp.status_code in (400, 422) or (provider_id == "localllmapi" and resp.status_code == 500)
+        ) and any(
+            k in payload for k in ("stream_options", "thinking", "reasoning_effort", "reasoning", "chat_template_kwargs", "tools", "tool_choice")
+        ):
+            # Some endpoints (or GGUF templates in llama-cpp) reject stream_options,
+            # custom reasoning fields, or OpenAI tools; retry cleanly without them.
             payload.pop("stream_options", None)
             payload.pop("thinking", None)
             payload.pop("reasoning_effort", None)
             payload.pop("reasoning", None)
             payload.pop("chat_template_kwargs", None)
-            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=60.0)
+            if provider_id == "localllmapi" or (resp.status_code in (400, 422) and "tool" in (resp.text or "").lower()):
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
+            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=req_timeout)
+            _capture_ctx_headers(resp)
         if resp.status_code != 200:
             err_text = resp.text
             clean_err = ""
@@ -890,6 +978,10 @@ def stream_chat_completion(
                     err_obj = err_json.get("error")
                     if isinstance(err_obj, dict):
                         clean_err = err_obj.get("message") or str(err_obj)
+                        err_max_ctx = err_obj.get("max_context_tokens")
+                        if isinstance(err_max_ctx, (int, float)) and int(err_max_ctx) > 0:
+                            captured_usage["max_context_tokens"] = int(err_max_ctx)
+                            record_live_context_limit(provider_id, model_id, int(err_max_ctx))
                     elif isinstance(err_obj, str):
                         clean_err = err_obj
                     elif "message" in err_json:
@@ -902,8 +994,6 @@ def stream_chat_completion(
             if on_token:
                 on_token(err_msg)
             return err_msg, ""
-
-        captured_usage: Dict[str, Any] = {}
 
         for line in resp.iter_lines():
             if is_aborted and is_aborted():
@@ -923,7 +1013,7 @@ def stream_chat_completion(
             try:
                 chunk = json.loads(data_str)
 
-                # 1. Capture usage metadata if provided by endpoint (OpenAI, OpenRouter, Groq, Ollama, etc.)
+                # 1. Capture usage metadata if provided by endpoint (OpenAI, OpenRouter, Groq, Ollama, LocalLLMAPI, etc.)
                 raw_usage = chunk.get("usage") or chunk.get("x_groq", {}).get("usage")
                 if not raw_usage and ("prompt_eval_count" in chunk or "eval_count" in chunk):
                     raw_usage = {
@@ -942,6 +1032,7 @@ def stream_chat_completion(
                     p_tok = raw_usage.get("prompt_tokens") or raw_usage.get("input_tokens")
                     c_tok = raw_usage.get("completion_tokens") or raw_usage.get("output_tokens")
                     t_tok = raw_usage.get("total_tokens")
+                    m_tok = raw_usage.get("max_context_tokens")
                     if p_tok is not None:
                         captured_usage["prompt_tokens"] = int(p_tok)
                     if c_tok is not None:
@@ -950,6 +1041,11 @@ def stream_chat_completion(
                         captured_usage["total_tokens"] = int(t_tok)
                     elif p_tok is not None and c_tok is not None:
                         captured_usage["total_tokens"] = int(p_tok) + int(c_tok)
+                    if isinstance(m_tok, (int, float)) and int(m_tok) > 0:
+                        captured_usage["max_context_tokens"] = int(m_tok)
+                        record_live_context_limit(provider_id, model_id, int(m_tok))
+                    if isinstance(raw_usage.get("active_n_ctx"), (int, float)):
+                        captured_usage["active_n_ctx"] = int(raw_usage["active_n_ctx"])
 
                 delta = {}
                 choices = chunk.get("choices")
@@ -1022,7 +1118,7 @@ def stream_chat_completion(
                 full_text.append(content_delta)
                 if on_token:
                     on_token(content_delta)
-                if not tools and TOOL_COMPLETE_PATTERNS.search("".join(full_text)):
+                if is_stream_tool_or_turn_complete("".join(full_text)):
                     break
 
             except Exception:

@@ -22,6 +22,13 @@ class ApiKeyModal(ModalScreen[bool]):
         self.info = PROVIDERS_CATALOG.get(provider_id)
         self.settings = get_settings()
 
+    @property
+    def _has_editable_url(self) -> bool:
+        return (
+            self.provider_id == "localllmapi"
+            or self.provider_id in self.settings.get_custom_providers()
+        )
+
     def compose(self) -> ComposeResult:
         provider_name = self.info.name if self.info else self.provider_id
         key_url = self.info.key_url if self.info else ""
@@ -42,6 +49,16 @@ class ApiKeyModal(ModalScreen[bool]):
                 id="api-key-input",
             )
 
+            if self._has_editable_url:
+                default_url = self.info.base_url if self.info else "http://127.0.0.1:1000/v1"
+                current_url = self.settings.get_provider_base_url(self.provider_id, default_url)
+                yield Static("\n[dim]Server URL (localhost or LAN IP, e.g. http://192.168.1.50:1000/v1):[/dim]")
+                yield Input(
+                    value=current_url,
+                    placeholder=default_url,
+                    id="api-url-input",
+                )
+
             with Horizontal(id="modal-footer"):
                 yield Static("[enter: Save & Fetch Models]")
 
@@ -55,10 +72,28 @@ class ApiKeyModal(ModalScreen[bool]):
         inp = self.query_one("#api-key-input", Input)
         new_key = inp.value.strip()
         self.settings.set_api_key(self.provider_id, new_key)
+        if self._has_editable_url:
+            try:
+                url_inp = self.query_one("#api-url-input", Input)
+                self.settings.set_provider_base_url(self.provider_id, url_inp.value.strip())
+            except Exception:
+                pass
+            try:
+                from ...core.resource_limits import _LIVE_CONTEXT_LIMITS
+                prefix = f"{self.provider_id}:"
+                for k in list(_LIVE_CONTEXT_LIMITS.keys()):
+                    if k.startswith(prefix):
+                        _LIVE_CONTEXT_LIMITS.pop(k, None)
+            except Exception:
+                pass
         if self.provider_id == "opencode":
             self.settings.set_api_key("opencode_zen", new_key)
         self.dismiss(True)
 
     @on(Input.Submitted, "#api-key-input")
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.action_save()
+
+    @on(Input.Submitted, "#api-url-input")
+    def on_url_submitted(self, event: Input.Submitted) -> None:
         self.action_save()

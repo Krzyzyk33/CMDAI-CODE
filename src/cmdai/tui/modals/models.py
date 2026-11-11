@@ -212,9 +212,10 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
     # ---------------------------------------------------------- fetching
 
     def refresh_all(self) -> None:
+        custom_provs = self.settings.get_custom_providers()
         for pid in PROVIDERS_CATALOG:
             key = self.settings.get_api_key(pid)
-            if key or pid in KEYLESS:
+            if key or pid in KEYLESS or pid == "localllmapi" or pid in custom_provs:
                 self.fetch_provider_models(pid, key)
 
     def _fetch_one(self, pid: str) -> None:
@@ -291,6 +292,8 @@ class ModelSelectModal(ModalScreen[Tuple[str, str]]):
                 parts.append("local")
             elif key:
                 parts.append("key set")
+            elif pid not in KEYLESS:
+                parts.append("key required")
             when = self.fetched_at.get(pid)
             if when and (time.time() - when) > 300:
                 parts.append(_age_text(when))
@@ -464,7 +467,12 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
             yield OptionList(id="modal-list")
 
             with Horizontal(id="modal-footer"):
-                yield Static("enter: Select  ·  ctrl+a: Add  ·  F5: Refresh  ·  esc: Back")
+                hint = (
+                    "enter: Select  ·  ctrl+a: Add  ·  F5: Refresh  ·  esc: Back"
+                    if self.provider_id in LOCAL_PROVIDERS
+                    else "enter: Select  ·  ctrl+d: Key / URL  ·  ctrl+a: Add  ·  F5: Refresh  ·  esc: Back"
+                )
+                yield Static(hint)
                 yield Static("", id="modal-footer-right")
 
     def on_mount(self) -> None:
@@ -659,7 +667,18 @@ class ModelListModal(ModalScreen[Optional[Tuple[str, str]]]):
     def action_activate(self) -> None:
         kind, data = self._current()
         if kind == "model":
-            self.dismiss((self.provider_id, str(data.get("id") or "")))
+            model_id = str(data.get("id") or "")
+            if self.provider_id not in LOCAL_PROVIDERS and not self.settings.get_api_key(self.provider_id):
+                def _after_key(saved: bool) -> None:
+                    if saved and self.settings.get_api_key(self.provider_id):
+                        self.dismiss((self.provider_id, model_id))
+                    elif saved:
+                        self.notify("API key cannot be empty.", timeout=3.0)
+
+                self.notify("API key required — configure key & server URL first.", timeout=3.0)
+                self.app.push_screen(ApiKeyModal(self.provider_id), _after_key)
+                return
+            self.dismiss((self.provider_id, model_id))
         elif kind == "add":
             self.action_add_model()
 

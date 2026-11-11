@@ -24,7 +24,7 @@ class AskModal(ModalScreen[Any]):
     }
     #ask-modal-dialog {
         dock: bottom;
-        margin: 0 2 0 2;
+        margin: 0 1 0 2;
         width: 1fr;
         max-width: 100%;
         height: auto;
@@ -43,6 +43,7 @@ class AskModal(ModalScreen[Any]):
     #ask-options {
         background: transparent;
         border: none !important;
+        width: 100%;
         height: auto;
         max-height: 8;
         padding: 0;
@@ -169,7 +170,19 @@ class AskModal(ModalScreen[Any]):
     def _align_to_input(self) -> None:
         """Cover the input card: the panel's bottom edge is the screen bottom."""
         try:
-            self.query_one("#ask-modal-dialog").styles.margin = (0, 2, 0, 2)
+            dlg = self.query_one("#ask-modal-dialog")
+            margin = (0, 1, 0, 2)
+            try:
+                card = self.app.query_one("#input-card")
+                reg = getattr(card, "region", None)
+                sw = int(getattr(self.app.size, "width", 0) or 0)
+                if reg and reg.width > 0 and sw > 0:
+                    left_m = max(0, int(reg.x))
+                    right_m = max(0, sw - int(reg.right))
+                    margin = (0, right_m, 0, left_m)
+            except Exception:
+                pass
+            dlg.styles.margin = margin
         except Exception:
             pass
 

@@ -201,6 +201,7 @@ EFFORT_BUDGET_FIELDS: Dict[str, str] = {
     # sglang ignore it if they are not configured for it. OpenCode sends it to
     # local servers the same way.
     "local_gguf": "reasoning_budget_tokens",
+    "localllmapi": "reasoning_budget_tokens",
     "lmstudio": "reasoning_budget_tokens",
     "vllm": "reasoning_budget_tokens",
     "ollama": "reasoning_budget_tokens",
@@ -228,7 +229,7 @@ def effort_budget_field(provider_id: str) -> str:
 # spend 32k of thinking and still have an answer, and `max` at 128k on a local
 # server is a request it can only answer by ignoring it. So for these the levels
 # are a percentage of the context, and the absolute numbers are derived from it.
-LOCAL_BUDGET_PROVIDERS = frozenset({"local_gguf", "lmstudio", "vllm", "ollama"})
+LOCAL_BUDGET_PROVIDERS = frozenset({"local_gguf", "localllmapi", "lmstudio", "vllm", "ollama"})
 
 # Providers a plugin has declared to be running on this machine, as opposed to
 # the four the core ships with. A provider that cannot be reached from a data
@@ -1146,7 +1147,9 @@ def get_model_capability(
             _MEM_CACHE[cache_key] = cap
             return cap
 
-    if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)) or model_id.endswith(".gguf"):
+    if provider_id == "local_gguf" or (
+        not provider_id and ((model_path and os.path.exists(model_path)) or model_id.endswith(".gguf"))
+    ):
         actual_path = model_path
         if not actual_path or not os.path.exists(actual_path):
             # Was a six-entry candidate list including D:\\, E:\\ and

@@ -1,6 +1,8 @@
 import copy
 import json
 import os
+import re
+import time
 from typing import Any, Dict, List, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -161,6 +163,28 @@ class SettingsManager:
         self.config["api_keys"][provider_id] = key.strip()
         return self.save_config()
 
+    def get_provider_base_url(self, provider_id: str, default_url: str = "") -> str:
+        env_key = f"{str(provider_id or '').upper()}_BASE_URL"
+        env_val = os.environ.get(env_key)
+        if env_val and env_val.strip():
+            return env_val.strip().rstrip("/")
+        urls = self.config.get("provider_urls", {})
+        if isinstance(urls, dict):
+            saved = str(urls.get(provider_id) or "").strip()
+            if saved:
+                return saved.rstrip("/")
+        return str(default_url or "").strip().rstrip("/")
+
+    def set_provider_base_url(self, provider_id: str, url: str) -> bool:
+        if "provider_urls" not in self.config or not isinstance(self.config["provider_urls"], dict):
+            self.config["provider_urls"] = {}
+        clean = str(url or "").strip().rstrip("/")
+        if clean:
+            self.config["provider_urls"][provider_id] = clean
+        else:
+            self.config["provider_urls"].pop(provider_id, None)
+        return self.save_config()
+
     def get(self, key: str, default: Any = None) -> Any:
         return self.config.get(key, default)
 
@@ -218,6 +242,8 @@ class SettingsManager:
         }
         if api_key.strip():
             self.set_api_key(provider_id, api_key.strip())
+        if url_clean:
+            self.set_provider_base_url(provider_id, url_clean)
         if default_model.strip():
             self.add_custom_model(provider_id, default_model.strip())
         self.save_config()

@@ -946,7 +946,7 @@ Input .input--cursor {
 /* Changelog: the list fills the window, a release opens in a stacked window. */
 #modal-dialog.releases-dialog {
     height: auto;
-    max-height: 85%;
+    max-height: 75%;
 }
 
 #modal-dialog.releases-dialog #modal-list {
@@ -977,9 +977,9 @@ Input .input--cursor {
 /* Sessions dialog: wide enough for title, relative time, token badge, model and dir */
 #modal-dialog.sessions-dialog {
     width: 98;
-    max-width: 96%;
+    max-width: 94%;
     height: auto;
-    max-height: 85%;
+    max-height: 75%;
 }
 
 #modal-dialog.sessions-dialog #modal-list {
@@ -990,9 +990,10 @@ Input .input--cursor {
 
 /* MCP servers: rows stay one line, prose goes in the line at the bottom. */
 #modal-dialog.mcp-dialog {
-    width: 96;
+    width: 94;
+    max-width: 94%;
     height: auto;
-    max-height: 80%;
+    max-height: 75%;
 }
 
 #modal-dialog.mcp-dialog #modal-list {
@@ -1301,10 +1302,10 @@ OptionList > .option-list--option-selected {
    6. SPLIT EDITOR-STYLE MODALS (Diff & Commit)
    ═════════════════════════════════════════════════════════════ */
 #modal-dialog.diff-modal-dialog {
-    width: 96%;
-    max-width: 140;
-    height: 85%;
-    max-height: 90%;
+    width: 90%;
+    max-width: 116;
+    height: 76%;
+    max-height: 38;
     background: #0d1117;
     border: none;
     padding: 1 2;
@@ -1520,10 +1521,10 @@ OptionList:focus {
    8. CONTEXT INSPECTOR & WORKSPACE PICKER MODAL
    ═════════════════════════════════════════════════════════════ */
 #modal-dialog.context-modal-dialog {
-    width: 94%;
-    max-width: 124;
-    height: 84%;
-    max-height: 88%;
+    width: 88%;
+    max-width: 102;
+    height: 28;
+    max-height: 75%;
     background: #0d1117;
     border: none;
     padding: 1 2;
@@ -1536,7 +1537,7 @@ OptionList:focus {
 }
 
 #context-info-sidebar {
-    width: 48;
+    width: 42;
     height: 100%;
     background: #161b22;
     border-right: solid #30363d;

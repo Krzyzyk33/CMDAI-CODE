@@ -13,37 +13,58 @@ MIN_TAG = (1, 0, 0, "")
 # from GitHub at runtime, so this holds exactly one release, not a changelog.
 # --- BUNDLED_RELEASE_BEGIN (managed by tools/gen_bundled_release.py) ---
 BUNDLED_RELEASE = {
-    "tag": "v1.0.0",
-    "name": "CMDAI CODE v1.0.0",
-    "published_at": "2026-11-08",
-    "url": "https://github.com/DevP10TR/CMDAI-CODE/releases/tag/v1.0.0",
-    "body": """### Autonomous coding assistant. Combines local GGUF models (llama.cpp) with multi-provider cloud AI and the MCP protocol.
+    "tag": "v1.0.1",
+    "name": "CMDAI CODE v1.0.1",
+    "published_at": "2026-11-09",
+    "url": "https://github.com/DevP10TR/CMDAI-CODE/releases/tag/v1.0.1",
+    "body": """# CMDAI CODE: Timeline Navigation, Session Tabs & Full Persistence 🚀
+
+This release introduces major TUI workflow enhancements designed to make multi-turn agent interactions faster, smoother, and completely resilient to state loss.
 
 ---
 
-### Highlights
+## 🌟 Highlights
 
-#### 1. ⚡ Advanced Local GGUF (llama.cpp) Handling
-- Full tool-calling loop parity with API models: eliminated the premature “Done” with empty responses on retries or failed tool steps. Local models now receive consistent feedback and continue until the task is fully resolved.
-- Automatic **Synthesis Pass**: after tool execution the model always produces a clean, complete Markdown final answer for the user.
-- Smart path suggestions: when `read` is called on a non-existent file it automatically suggests real files present in the working directory.
-- Dynamic context limits in `/modelinfo`: accurate detection of context windows (e.g. 32k for Qwen2.5-Coder family) and safe RAM budgeting (70 % headroom rule).
+### ⏱️ Interactive Timeline Navigation Rail
+* **Dedicated Navigation Rail:** A clean, vertical timeline dock on the left side of the chat featuring interactive dots for every turn in the conversation.
+* **Instant Jump:** Click any dot to smoothly scroll directly to that specific user prompt and agent response.
+* **Smart Hover Previews (Tooltips):** Hovering over a dot reveals an informative preview tooltip showing the prompt summary, turn number, and exact timestamp.
+* **Zero Dot Overlap:** Tooltips now anchor smartly to the right of the rail (`x=3` into the chat area), so **the hovered dot and all dots above and below remain 100% visible**.
 
-#### 2. 🎨 Unified TUI & New Animations
-- **Command** tool: all terminal commands now surface under a single clean name (`Command`) instead of mixed `shell` / `terminal` / `bash` labels.
-- **Summarizing fixed**: new two-phase context-compression animation (`⌬ ↔ ✻`) with a live timer and full expand/collapse support (same as the Thinking block).
-- New `/ctx` alias for quick context info (alongside `/context`).
-- Working-directory sync: 100 % consistency between `workdir` and `current_cwd` — `ls`, `read`, `write` and `edit` always operate on the correct directory.
+### 📑 Session Tabs Bar
+* **Browser-Style Tabs:** A persistent tab bar at the top of the screen allows seamless switching between multiple active sessions with a single click.
+* **Tab Management:** Easily open new sessions (`+`) or close existing ones (`×`) without losing conversation history.
+* **Smart Tab Replacement:** Submitting a prompt from an empty initial session reuses the current tab instead of cluttering your workspace with duplicate empty sessions.
 
-#### 3. 🌐 New AI Providers & Background Subagents
-- Custom OpenAI-compatible endpoints in `/models` (Ctrl+A): easily add any compatible provider (e.g. Groq, Together AI, vLLM, DeepInfra).
-- Background subagents (`/bg` / Ctrl+B): delegate research or verification tasks to subagents that run in the background with live progress view.
+### 🛡️ Full Plan & Approval Persistence (Approval Bar & TODOs)
+* **No More Disappearing State:** Fixed an issue where the file edit approval bar (`● EDIT: 2 files [Approve] [Remove]`) and the TODO preview bar would vanish after 3 seconds upon session load.
+* **Background Task Protection:** Background task completions (e.g., long-running PowerShell commands) no longer dismiss the pending approval bar or prematurely trigger automatic generations.
+* **Instant `/diff` Inspection:** Clicking `click to inspect` on the approval bar opens the diff editor immediately, even right after reloading an archived session.
 
-#### 4. 📦 One-Command Installation
-- All installation methods work
-- More in `README.md`
+### 📅 Accurate Session Dates (No More False "Today")
+* Introduced strict `last_written_ts` tracking.
+* A session is moved to "Today" **only when you actually send a new message or the agent generates new code**. Merely opening, viewing, or switching sessions preserves their original timestamps.
 
-And more under the hood improvements, polish and stability fixes.""",
+### 👁️ Dynamic Multimodal Detection (Vision & Screenshots)
+* Dynamic detection replaces static model lists, automatically identifying vision capabilities across modern models
+* The `<tool:vision>` tool is enabled and guarded dynamically so text-only models won't attempt unhandled vision calls.
+
+---
+
+## 🛠️ Detailed Changelog
+
+### 🚀 Features & Architecture
+* **`src/cmdai/tui/widgets.py`**: Added `TimelineRail`, `TimelineDot`, and `SessionTabsBar` components with click and hover interactions.
+* **`src/cmdai/tui/styles.py`**: Added styling for the timeline rail, session tabs, and `-timeline-tooltip` offset classes.
+* **`src/cmdai/core/sessions.py`**: Extended session persistence with `todo_list`, `pending_approval`, and non-bumping timestamp guards.
+
+### 🐛 Bug Fixes & Improvements
+* **`src/cmdai/tui/app.py`**:
+  * Positioned timeline tooltips to the right of the rail to prevent obstructing adjacent dots.
+  * Guarded `_tick_meta_spinner` against clearing the approval bar while user action is pending.
+  * Rebuilt `_replay_transcript` to reconstruct active TODO queues and code-mode turn edits on reload.
+  * Added fallback file resolution in `_open_diff_window` for pending approval targets.
+* **`src/cmdai/core/capabilities.py`**: Added dynamic multimodal detection heuristics for API and local LLM backends.""",
 }
 # --- BUNDLED_RELEASE_END ---
 
@@ -53,6 +74,36 @@ def get_bundled_release() -> Dict[str, Any]:
     if not BUNDLED_RELEASE.get("tag"):
         return {}
     return dict(BUNDLED_RELEASE)
+
+
+def resolve_release_for_version(
+    version: str = "",
+    cached: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Return release notes matching `version` from cache before falling back to bundled."""
+    target_norm = (version or "").strip().lstrip("vV").lower()
+    pool = cached if cached is not None else load_cache()
+    if target_norm:
+        for entry in pool or []:
+            if not isinstance(entry, dict):
+                continue
+            tag_norm = str(entry.get("tag") or "").strip().lstrip("vV").lower()
+            if tag_norm == target_norm and str(entry.get("body") or "").strip():
+                return dict(entry)
+    bundled = get_bundled_release()
+    if target_norm and bundled:
+        b_norm = str(bundled.get("tag") or "").strip().lstrip("vV").lower()
+        if b_norm == target_norm:
+            return bundled
+    for entry in pool or []:
+        if not isinstance(entry, dict):
+            continue
+        tag_norm = str(entry.get("tag") or "").strip().lstrip("vV").lower()
+        if target_norm and tag_norm == target_norm:
+            return dict(entry)
+    if bundled:
+        return bundled
+    return resolve_newest(pool)
 
 
 def is_newer(tag_a: str, tag_b: str) -> bool:

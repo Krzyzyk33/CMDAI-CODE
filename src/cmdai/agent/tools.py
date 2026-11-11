@@ -406,45 +406,90 @@ def tool_ls(ctx: AgentContext, path: str = ".") -> Dict[str, Any]:
 
 def tool_glob(ctx: AgentContext, pattern: str = "*", dir: str = ".") -> Dict[str, Any]:
     full_dir = ctx.resolve_path(dir)
+    if not os.path.exists(full_dir):
+        return {"success": False, "error": f"Directory not found: {dir}", "matches": [], "count": 0}
+    if not os.path.isdir(full_dir):
+        return {"success": False, "error": f"Not a directory: {dir}", "matches": [], "count": 0}
     search_pattern = os.path.join(full_dir, pattern)
+    ignored = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", ".cmdai_code_project", ".gemini"}
     try:
         matches = py_glob.glob(search_pattern, recursive=True)
-        rel_matches = [ctx.rel_path(m) for m in matches[:100]]
-        return {
+        rel_matches = []
+        for m in matches:
+            rel = ctx.rel_path(m)
+            parts = set(rel.replace("\\", "/").split("/"))
+            if parts & ignored:
+                continue
+            rel_matches.append(rel)
+            if len(rel_matches) >= 100:
+                break
+        res: Dict[str, Any] = {
             "success": True,
             "pattern": pattern,
             "matches": rel_matches,
             "count": len(rel_matches),
         }
+        if not rel_matches:
+            res["note"] = "No matching workspace files found."
+        return res
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-def tool_search(ctx: AgentContext, query: str, path: str = ".") -> Dict[str, Any]:
+def tool_search(
+    ctx: AgentContext,
+    query: str,
+    path: str = ".",
+    literal: bool = False,
+) -> Dict[str, Any]:
     full_path = ctx.resolve_path(path)
-    results = []
+    if not os.path.exists(full_path):
+        return {"success": False, "error": f"Path not found: {path}"}
+
+    compiled_re = None
+    if not literal and query:
+        try:
+            compiled_re = re.compile(query)
+        except re.error:
+            compiled_re = None
+
+    def _line_matches(line_str: str) -> bool:
+        if query in line_str:
+            return True
+        if compiled_re is not None and compiled_re.search(line_str):
+            return True
+        return False
+
+    def _scan_file(file_path: str, acc: List[Dict[str, Any]]) -> None:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as file_obj:
+                for line_num, line in enumerate(file_obj, 1):
+                    if _line_matches(line):
+                        acc.append({
+                            "file": ctx.rel_path(file_path),
+                            "line": line_num,
+                            "content": line.strip(),
+                        })
+                        if len(acc) >= 50:
+                            break
+        except Exception:
+            pass
+
+    results: List[Dict[str, Any]] = []
     try:
-        for root, _, files in os.walk(full_path):
-            if any(ign in root for ign in [".git", "node_modules", ".venv", "__pycache__"]):
-                continue
-            for f in files:
-                f_path = os.path.join(root, f)
-                try:
-                    with open(f_path, "r", encoding="utf-8", errors="ignore") as file_obj:
-                        for line_num, line in enumerate(file_obj, 1):
-                            if query in line:
-                                results.append({
-                                    "file": ctx.rel_path(f_path),
-                                    "line": line_num,
-                                    "content": line.strip(),
-                                })
-                                if len(results) >= 50:
-                                    break
-                except Exception:
-                    continue
+        if os.path.isfile(full_path):
+            _scan_file(full_path, results)
+        else:
+            ignored = {".git", "node_modules", ".venv", "__pycache__", ".cmdai_code_project"}
+            for root, dirs, files in os.walk(full_path):
+                dirs[:] = [d for d in dirs if d not in ignored]
+                for f in files:
+                    _scan_file(os.path.join(root, f), results)
+                    if len(results) >= 50:
+                        break
                 if len(results) >= 50:
                     break
-        return {"success": True, "query": query, "results": results}
+        return {"success": True, "query": query, "path": ctx.rel_path(full_path), "results": results}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

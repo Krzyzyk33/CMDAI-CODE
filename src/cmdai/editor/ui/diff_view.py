@@ -12,11 +12,25 @@ from rich.table import Table
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, Static
+from textual.widgets import Static
 
 from cmdai.core.project_scope import compute_single_file_diff
+from .clickable import MouseActivatable
+
+
+class DiffActionBtn(MouseActivatable, Static):
+    """Compact 1-row clickable action button without Textual Button tall borders."""
+
+    class Clicked(Message):
+        def __init__(self, btn_id: str) -> None:
+            super().__init__()
+            self.btn_id = btn_id
+
+    def on_activate(self) -> None:
+        self.post_message(self.Clicked(self.id or ""))
 
 
 DIFF_VIEW_CSS = """
@@ -35,25 +49,33 @@ EditorFileDiffPane.hidden {
     height: 3;
     width: 100%;
     background: #121721;
-    border-bottom: tall #21262d;
-    padding: 0 2;
+    border-bottom: solid #21262d;
+    padding: 1 2 0 2;
     align: left middle;
 }
 
 #editor-diff-title {
     width: 1fr;
     height: 1;
+    margin-right: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
     content-align: left middle;
 }
 
 .diff-action-btn {
+    width: auto;
     height: 1;
-    min-width: 14;
+    min-width: 0;
     margin-left: 1;
     border: none;
     background: #1f2937;
     color: #c9d1d9;
     padding: 0 1;
+    text-style: bold;
+    text-wrap: nowrap;
+    content-align: center middle;
 }
 
 .diff-action-btn:hover {
@@ -68,6 +90,7 @@ EditorFileDiffPane.hidden {
 
 #btn-diff-edit:hover {
     background: #388bfd;
+    color: #ffffff;
 }
 
 #btn-diff-revert {
@@ -99,6 +122,18 @@ EditorFileDiffPane.hidden {
 class EditorFileDiffPane(Vertical):
     """In-editor single-file diff viewer (Unified + Side-by-Side modes)."""
 
+    can_focus = True
+
+    BINDINGS = [
+        Binding("v", "toggle_mode", "Split / Unified", show=False),
+        Binding("r", "revert_file", "Revert File", show=False),
+        Binding("e", "edit_file", "Edit File", show=False),
+        Binding("up", "scroll_up", "Scroll Up", show=False),
+        Binding("down", "scroll_down", "Scroll Down", show=False),
+        Binding("pageup", "page_up", "Page Up", show=False),
+        Binding("pagedown", "page_down", "Page Down", show=False),
+    ]
+
     DEFAULT_CSS = DIFF_VIEW_CSS
 
     class SwitchToEdit(Message):
@@ -122,9 +157,9 @@ class EditorFileDiffPane(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="editor-diff-header"):
             yield Static("", id="editor-diff-title")
-            yield Button("Unified / Split (V)", id="btn-diff-mode", classes="diff-action-btn")
-            yield Button("Revert File (R)", id="btn-diff-revert", classes="diff-action-btn")
-            yield Button("Edit File (E)", id="btn-diff-edit", classes="diff-action-btn")
+            yield DiffActionBtn("Split (V)", id="btn-diff-mode", classes="diff-action-btn")
+            yield DiffActionBtn("Revert (R)", id="btn-diff-revert", classes="diff-action-btn")
+            yield DiffActionBtn("Edit (E)", id="btn-diff-edit", classes="diff-action-btn")
         with VerticalScroll(id="editor-diff-scroll"):
             yield Static("", id="editor-diff-body")
 
@@ -148,28 +183,35 @@ class EditorFileDiffPane(Vertical):
         if not data:
             return
 
-        rel = data.get("relpath", "")
-        status = data.get("status", "M")
-        adds = data.get("added", 0)
-        dels = data.get("deleted", 0)
+        rel = str(data.get("relpath", ""))
+        status = str(data.get("status", "M"))
+        adds = int(data.get("added", 0) or 0)
+        dels = int(data.get("deleted", 0) or 0)
 
-        status_badge = {
-            "M": "[bold #d29922]MODIFIED[/]",
-            "A": "[bold #3fb950]NEW FILE[/]",
-            "D": "[bold #f85149]DELETED[/]",
-            "CLEAN": "[bold #58a6ff]CLEAN (HEAD)[/]",
-        }.get(status, f"[bold #8b949e]{status}[/]")
-
+        status_map = {
+            "M": ("MODIFIED", "bold #d29922"),
+            "A": ("NEW FILE", "bold #3fb950"),
+            "D": ("DELETED", "bold #f85149"),
+            "CLEAN": ("CLEAN (HEAD)", "bold #58a6ff"),
+        }
+        badge_label, badge_style = status_map.get(status, (status, "bold #8b949e"))
         mode_label = "SPLIT VIEW" if self.view_mode == "split" else "UNIFIED"
-        header_markup = (
-            f"[bold #58a6ff]⌬ DIFF[/] [bold #e6edf3]{rel}[/]   "
-            f"{status_badge}   "
-            f"[bold #3fb950]+{adds}[/] [bold #f85149]-{dels}[/]   "
-            f"[dim]│ {mode_label}[/]"
-        )
+
+        header = Text(no_wrap=True, overflow="ellipsis")
+        header.append("⌬ DIFF ", style="bold #58a6ff")
+        header.append(rel, style="bold #e6edf3")
+        header.append("  ")
+        header.append(badge_label, style=badge_style)
+        header.append("  ")
+        header.append(f"+{adds}", style="bold #3fb950")
+        header.append(" ")
+        header.append(f"-{dels}", style="bold #f85149")
+        header.append(f"  │ {mode_label}", style="dim #8b949e")
 
         try:
-            self.query_one("#editor-diff-title", Static).update(header_markup)
+            self.query_one("#editor-diff-title", Static).update(header)
+            mode_btn = self.query_one("#btn-diff-mode", DiffActionBtn)
+            mode_btn.update("Unified (V)" if self.view_mode == "split" else "Split (V)")
             body = self.query_one("#editor-diff-body", Static)
             if self.view_mode == "split":
                 body.update(self._build_split_renderable(data))
@@ -278,17 +320,48 @@ class EditorFileDiffPane(Vertical):
                     )
         return table
 
-    @on(Button.Pressed, "#btn-diff-mode")
-    def _on_mode_btn(self) -> None:
+    def action_toggle_mode(self) -> None:
         self.toggle_view_mode()
 
-    @on(Button.Pressed, "#btn-diff-edit")
-    def _on_edit_btn(self) -> None:
+    def action_edit_file(self) -> None:
         if self.current_file:
             self.post_message(self.SwitchToEdit(self.current_file))
 
-    @on(Button.Pressed, "#btn-diff-revert")
-    def _on_revert_btn(self) -> None:
+    def action_revert_file(self) -> None:
         if self.current_file and self._last_diff_data:
             orig = str(self._last_diff_data.get("original_text", ""))
             self.post_message(self.RevertRequested(self.current_file, orig))
+
+    def action_scroll_up(self) -> None:
+        try:
+            self.query_one("#editor-diff-scroll", VerticalScroll).scroll_relative(y=-3, animate=False)
+        except Exception:
+            pass
+
+    def action_scroll_down(self) -> None:
+        try:
+            self.query_one("#editor-diff-scroll", VerticalScroll).scroll_relative(y=3, animate=False)
+        except Exception:
+            pass
+
+    def action_page_up(self) -> None:
+        try:
+            self.query_one("#editor-diff-scroll", VerticalScroll).scroll_page_up(animate=False)
+        except Exception:
+            pass
+
+    def action_page_down(self) -> None:
+        try:
+            self.query_one("#editor-diff-scroll", VerticalScroll).scroll_page_down(animate=False)
+        except Exception:
+            pass
+
+    @on(DiffActionBtn.Clicked)
+    def _on_diff_action_clicked(self, event: DiffActionBtn.Clicked) -> None:
+        event.stop()
+        if event.btn_id == "btn-diff-mode":
+            self.action_toggle_mode()
+        elif event.btn_id == "btn-diff-edit":
+            self.action_edit_file()
+        elif event.btn_id == "btn-diff-revert":
+            self.action_revert_file()

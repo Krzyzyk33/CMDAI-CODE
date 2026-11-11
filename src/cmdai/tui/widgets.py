@@ -504,6 +504,7 @@ class AssistantTurnCard(Vertical):
         self.tool_blocks: List[ToolBlock] = []
         self._pending_mounts: List[Any] = []
         self._last_finalized_text: str = ""
+        self._keep_generating_on_mount: bool = False
 
         self._spinner_idx = 0
         self._spinner_timer = None
@@ -545,7 +546,10 @@ class AssistantTurnCard(Vertical):
                 pass
         if self.raw_text:
             self._render_body(self.raw_text)
-            self.finish(0.0)
+            if getattr(self, "_keep_generating_on_mount", False):
+                self._start_spinner()
+            else:
+                self.finish(0.0)
         else:
             self._start_spinner()
 
@@ -668,6 +672,22 @@ class AssistantTurnCard(Vertical):
             self.start_thinking()
         if self.thinking_block:
             self.thinking_block.append_chunk(chunk)
+
+    def sync_thinking(self, full_text: str) -> None:
+        """Set full thinking text idempotently across tab switches."""
+        if not full_text:
+            return
+        self.has_thinking = True
+        if self.loading_block and not self.loading_block.is_finished:
+            self.loading_block.finish()
+        if self.thinking_block is None:
+            self.start_thinking()
+        if self.thinking_block:
+            self.thinking_block.thinking_text = full_text
+            self.thinking_block.elapsed = time.time() - self.thinking_block.start_time
+            self.thinking_block.update_header(live=not self.thinking_block.is_finished)
+            if self.thinking_block.is_expanded:
+                self.thinking_block._update_body()
 
     def finish_thinking(self) -> None:
         if self.thinking_block:

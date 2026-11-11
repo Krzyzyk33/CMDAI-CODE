@@ -56,6 +56,31 @@ def save_model_metadata(model_id: str, provider_id: str, context_length: int) ->
 
 
 _GGUF_META_CACHE: Dict[str, Dict[str, Any]] = {}
+_LIVE_CONTEXT_LIMITS: Dict[str, Tuple[int, float]] = {}
+
+
+def record_live_context_limit(provider_id: str, model_id: str, context_length: int) -> None:
+    """Store live max context reported directly by an API server (e.g. LocalLLMAPI)."""
+    import time
+
+    if int(context_length or 0) <= 0:
+        return
+    key = f"{provider_id}:{model_id}".lower()
+    _LIVE_CONTEXT_LIMITS[key] = (int(context_length), time.time())
+    save_model_metadata(model_id, provider_id, int(context_length))
+
+
+def get_live_context_limit(provider_id: str, model_id: str, max_age: float = 30.0) -> int:
+    import time
+
+    key = f"{provider_id}:{model_id}".lower()
+    entry = _LIVE_CONTEXT_LIMITS.get(key)
+    if not entry:
+        return 0
+    val, ts = entry
+    if max_age > 0 and (time.time() - ts) > max_age:
+        return 0
+    return int(val) if val > 0 else 0
 
 
 def _gguf_field_text(field) -> str:
@@ -336,6 +361,7 @@ def extract_model_context_length(item: Dict[str, Any]) -> int:
     if not isinstance(item, dict):
         return 0
     for k in (
+        "max_usable_context",
         "context_length",
         "context_window",
         "max_model_len",
@@ -481,7 +507,9 @@ def resolve_context_limit(
     so a model whose genuine window is 32,768 is never mislabelled as an unknown
     fallback.
     """
-    if provider_id == "local_gguf" or (model_path and os.path.exists(model_path)) or str(model_id or "").lower().endswith(".gguf"):
+    if provider_id == "local_gguf" or (
+        not provider_id and ((model_path and os.path.exists(model_path)) or str(model_id or "").lower().endswith(".gguf"))
+    ):
         path = ""
         if model_path and os.path.exists(model_path) and os.path.isfile(model_path):
             path = os.path.abspath(model_path)
@@ -508,6 +536,58 @@ def resolve_context_limit(
         is_known = not bool(meta.get("estimated", True))
         return dynamic_limit, is_known, ("gguf" if is_known else "gguf_fallback")
 
+    # LocalLLMAPI (and custom HTTP servers) compute dynamic safe context on the server;
+    # prefer freshly reported server limit (headers/SSE or live /v1/models) before stale cache.
+    live_lim = get_live_context_limit(provider_id, model_id, max_age=30.0)
+    if live_lim > 0:
+        return live_lim, True, "provider_api"
+
+    is_custom_server = False
+    try:
+        from .settings import get_settings
+        is_custom_server = provider_id in get_settings().get_custom_providers()
+    except Exception:
+        is_custom_server = False
+
+    if provider_id == "localllmapi" or is_custom_server:
+        try:
+            import requests
+            from .providers import PROVIDERS_CATALOG, resolve_provider_base_url
+
+            pinfo = PROVIDERS_CATALOG.get(provider_id)
+            if pinfo:
+                if not api_key:
+                    try:
+                        from .settings import get_settings
+                        api_key = get_settings().get_api_key(provider_id)
+                    except Exception:
+                        api_key = ""
+                base_url = resolve_provider_base_url(provider_id, pinfo.base_url)
+                headers = {"Accept": "application/json"}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                m_url = base_url.rstrip("/") + (pinfo.models_endpoint or "/models")
+                p_resp = requests.get(m_url, headers=headers, timeout=1.5)
+                if p_resp.status_code == 200:
+                    p_data = p_resp.json()
+                    items = p_data.get("data") if isinstance(p_data, dict) else None
+                    if isinstance(items, list):
+                        matched_limit = 0
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            imid = str(item.get("id") or "").strip()
+                            clen = extract_model_context_length(item)
+                            if imid and clen > 0:
+                                save_model_metadata(imid, provider_id, clen)
+                                if imid.lower() == str(model_id or "").strip().lower():
+                                    matched_limit = clen
+                        if matched_limit > 0:
+                            record_live_context_limit(provider_id, model_id, matched_limit)
+                            return matched_limit, True, "provider_api"
+        except Exception:
+            pass
+
     cache = load_model_metadata_cache()
     cached_limit = _lookup_in_metadata_cache(cache, provider_id, model_id)
     if cached_limit:
@@ -521,7 +601,7 @@ def resolve_context_limit(
     # Try querying the active provider's own `/models` endpoint (including user-added custom_providers)
     try:
         import requests
-        from .providers import PROVIDERS_CATALOG, load_custom_providers
+        from .providers import PROVIDERS_CATALOG, load_custom_providers, resolve_provider_base_url
         load_custom_providers()
         pinfo = PROVIDERS_CATALOG.get(provider_id)
         if pinfo and pinfo.base_url and pinfo.supports_remote_fetch and provider_id != "openrouter":
@@ -534,7 +614,8 @@ def resolve_context_limit(
             headers = {"Accept": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            m_url = pinfo.base_url.rstrip("/") + (pinfo.models_endpoint or "/models")
+            base_url = resolve_provider_base_url(provider_id, pinfo.base_url)
+            m_url = base_url.rstrip("/") + (pinfo.models_endpoint or "/models")
             p_resp = requests.get(m_url, headers=headers, timeout=2.5)
             if p_resp.status_code == 200:
                 p_data = p_resp.json()
@@ -715,6 +796,36 @@ def build_summarization_payload(
     ]
 
 
+def is_summarization_error_text(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return True
+    low = s.lower()
+    if low.startswith((
+        "error:",
+        "[error:",
+        "api error",
+        "⚠ api error",
+        "model error:",
+        "provider error:",
+        "connection error:",
+        "execution error",
+        "failed to load model:",
+        "worker communication error:",
+        "model worker process unavailable",
+    )):
+        return True
+    return any(err_kw in low for err_kw in (
+        "exceed context window",
+        "400 bad request",
+        "rate limit reached",
+        "free usage limit reached",
+        "quota exceeded",
+        "[http 4",
+        "[http 5",
+    ))
+
+
 def format_compacted_handoff(
     raw_summary: str = "",
     last_modified_files: Optional[List[str]] = None,
@@ -723,10 +834,7 @@ def format_compacted_handoff(
 ) -> str:
     import re
     summary = (raw_summary or kwargs.get("summary_text", "")).strip()
-    is_err = any(err_kw in summary.lower() for err_kw in [
-        "error:", "exceed context window", "status code", "rate limit", "token limit", "api error", "400 bad request"
-    ])
-    if is_err or not summary:
+    if is_summarization_error_text(summary):
         if lang == "pl":
             summary = "Poprzedni stan sesji i kluczowe modyfikacje kodu zostały zachowane."
         else:

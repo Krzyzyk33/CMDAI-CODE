@@ -21,6 +21,7 @@ TOOL_COMPLETE_PATTERNS = re.compile(
 )
 
 try:
+    import llama_cpp
     from llama_cpp import Llama, llama_log_set
     def _null_log(level, text, user_data):
         pass
@@ -30,7 +31,21 @@ try:
     except Exception:
         pass
 except Exception:
+    llama_cpp = None
     Llama = None
+
+
+def _gpu_offload_supported() -> Optional[bool]:
+    if not llama_cpp:
+        return None
+    for owner in (llama_cpp, getattr(llama_cpp, "llama_cpp", None)):
+        fn = getattr(owner, "llama_supports_gpu_offload", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                pass
+    return None
 
 
 class ModelWorker:
@@ -38,6 +53,9 @@ class ModelWorker:
         self.llm = None
         self.current_model_path = None
         self.current_model_id = None
+        self.current_loader = None
+        self.requested_loader = None
+        self.current_n_ctx = 0
         self.abort_requested = False
         self.msg_queue = queue.Queue()
         self._listener_thread = None
@@ -62,56 +80,105 @@ class ModelWorker:
         if not path:
             return {"status": "error", "error": f"Model not found: {model_filename}"}
 
-        if self.llm is not None and self.current_model_path == path:
-            return {"status": "ok", "elapsed": 0.0, "cached": True}
+        norm_loader = (loader_type or "cpu").strip().lower()
+        target_ctx = int(n_ctx or 8192)
+        if (
+            self.llm is not None
+            and self.current_model_path == path
+            and self.requested_loader == norm_loader
+            and (self.current_n_ctx == target_ctx or not self.current_n_ctx)
+        ):
+            return {
+                "status": "ok",
+                "elapsed": 0.0,
+                "cached": True,
+                "n_ctx": self.current_n_ctx or target_ctx,
+                "loader": self.current_loader or norm_loader,
+                "requested_loader": norm_loader,
+            }
 
         t0 = time.time()
-        n_gpu = -1 if loader_type.lower() in ("vulkan", "cuda") else 0
+        gpu_offload = _gpu_offload_supported()
+        warning = ""
+        if norm_loader in ("vulkan", "cuda"):
+            if gpu_offload is False:
+                n_gpu = 0
+                effective_loader = "cpu"
+                warning = f"{norm_loader.upper()} requested, but installed llama-cpp-python has no GPU offload support; running on CPU."
+            else:
+                n_gpu = -1
+                effective_loader = norm_loader
+        elif norm_loader == "cpu":
+            n_gpu = 0
+            effective_loader = "cpu"
+        else:
+            n_gpu = 0
+            effective_loader = "cpu"
+            warning = f"Loader '{norm_loader}' is not supported by llama-cpp-python; using CPU."
+
+        def _create_llama(ctx_len: int, gpu_layers: int):
+            try:
+                return Llama(
+                    model_path=path,
+                    n_ctx=ctx_len,
+                    n_gpu_layers=gpu_layers,
+                    flash_attn=True,
+                    verbose=False,
+                ), ctx_len
+            except Exception:
+                if ctx_len > 8192:
+                    fallback_ctx = 8192
+                    return Llama(
+                        model_path=path,
+                        n_ctx=fallback_ctx,
+                        n_gpu_layers=gpu_layers,
+                        flash_attn=True,
+                        verbose=False,
+                    ), fallback_ctx
+                raise
+
         try:
             if self.llm is not None:
                 del self.llm
                 self.llm = None
 
-            target_ctx = int(n_ctx or 8192)
-            try:
-                self.llm = Llama(
-                    model_path=path,
-                    n_ctx=target_ctx,
-                    n_gpu_layers=n_gpu,
-                    flash_attn=True,
-                    verbose=False,
-                )
-            except Exception:
-                if target_ctx > 8192:
-                    target_ctx = 8192
-                    self.llm = Llama(
-                        model_path=path,
-                        n_ctx=target_ctx,
-                        n_gpu_layers=n_gpu,
-                        flash_attn=True,
-                        verbose=False,
-                    )
-                else:
-                    raise
+            self.llm, actual_ctx = _create_llama(target_ctx, n_gpu)
             self.current_model_path = path
             self.current_model_id = model_filename
+            self.current_loader = effective_loader
+            self.requested_loader = norm_loader
+            self.current_n_ctx = actual_ctx
             elapsed = time.time() - t0
-            return {"status": "ok", "elapsed": elapsed, "n_ctx": target_ctx}
+            return {
+                "status": "ok",
+                "elapsed": elapsed,
+                "n_ctx": actual_ctx,
+                "loader": effective_loader,
+                "requested_loader": norm_loader,
+                "n_gpu_layers": n_gpu,
+                "gpu_offload": gpu_offload,
+                "warning": warning,
+            }
         except Exception as e:
             if n_gpu != 0:
                 try:
-                    target_ctx = 8192 if int(n_ctx or 8192) > 8192 else int(n_ctx or 8192)
-                    self.llm = Llama(
-                        model_path=path,
-                        n_ctx=target_ctx,
-                        n_gpu_layers=0,
-                        flash_attn=True,
-                        verbose=False,
-                    )
+                    self.llm, actual_ctx = _create_llama(target_ctx, 0)
                     self.current_model_path = path
                     self.current_model_id = model_filename
+                    self.current_loader = "cpu"
+                    self.requested_loader = norm_loader
+                    self.current_n_ctx = actual_ctx
                     elapsed = time.time() - t0
-                    return {"status": "ok", "elapsed": elapsed, "n_ctx": target_ctx}
+                    return {
+                        "status": "ok",
+                        "elapsed": elapsed,
+                        "n_ctx": actual_ctx,
+                        "loader": "cpu",
+                        "requested_loader": norm_loader,
+                        "n_gpu_layers": 0,
+                        "gpu_offload": gpu_offload,
+                        "warning": f"{norm_loader.upper()} initialization failed ({e}); fell back to CPU.",
+                    }
                 except Exception as e2:
                     return {"status": "error", "error": str(e2)}
             return {"status": "error", "error": str(e)}
@@ -341,6 +408,9 @@ class ModelWorker:
                     self.llm = None
                 self.current_model_path = None
                 self.current_model_id = None
+                self.current_loader = None
+                self.requested_loader = None
+                self.current_n_ctx = 0
                 sys.stdout.write(json.dumps({"status": "unloaded"}) + "\n")
                 sys.stdout.flush()
             elif action == "exit":
