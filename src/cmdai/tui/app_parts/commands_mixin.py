@@ -132,7 +132,8 @@ class CommandsMixin:
                 "/exit", "/tools", "/status",
                 "/diff", "/commit", "/todo", "/bg",
                 "/ctx", "/add", "/mode", "/thinking",
-                "/cd", "/changelog", "/update", "/updatesettings", "/mcp"
+                "/cd", "/changelog", "/update", "/updatesettings", "/mcp",
+                "/custom", "/map"
             )
             if cmd in modal_cmds:
                 pass
@@ -212,20 +213,48 @@ class CommandsMixin:
             "/settings": self._cmd_settings,
             "/summarize": self._cmd_summarize,
             "/ctx": self._cmd_context,
+            "/map": self._cmd_map,
             "/stats": self._cmd_stats,
             "/changelog": self._cmd_releases,
             "/update": self._cmd_update,
             "/updatesettings": self._cmd_update_settings,
             "/mcp": self._cmd_mcp,
+            "/custom": self._cmd_custom,
             "/loader": self._cmd_loader,
             "/exit": self._cmd_quit,
         }
         handler = handlers.get(cmd)
         if handler is None:
+            from ...core.custom_extensions import get_custom_command_body
+            custom_prompt = get_custom_command_body(self.workdir, cmd, arg)
+            if custom_prompt:
+                self._handle_submit(custom_prompt, from_hero=(not self.in_chat_mode))
+                return True
             self.notify(f"Unknown command: {cmd} — type /help for the list", title="Command", severity="warning", timeout=3.0)
             return True
         handler(arg)
         return True
+
+    def _cmd_custom(self, arg: str = "") -> None:
+        from ..modals.custom_commands import CustomCommandsModal
+        self.push_screen(CustomCommandsModal(self.workdir), self._on_custom_modal_closed)
+
+    def _cmd_map(self, arg: str = "") -> None:
+        target = os.path.join(self.workdir, arg.strip()) if arg.strip() else self.workdir
+        map_script = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "map_app.py"))
+        try:
+            self._spawn_terminal_window(map_script, "CMDAI CODE Mind Map", target)
+        except Exception as e:
+            self.notify(f"Failed to launch Mind Map: {e}", severity="error")
+
+    def _on_custom_modal_closed(self, result: Any) -> None:
+        if isinstance(result, dict) and result.get("action") == "ai_generate":
+            from ...core.custom_extensions import build_ai_extension_prompt
+            prompt = build_ai_extension_prompt(
+                kind=str(result.get("kind", "command")),
+                description=str(result.get("description", "")),
+            )
+            self._handle_submit(prompt, from_hero=(not self.in_chat_mode))
 
 
     def _cmd_quit(self, arg: str = "") -> None:

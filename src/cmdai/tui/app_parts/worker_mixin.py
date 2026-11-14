@@ -93,6 +93,25 @@ LOGO_HERO = _LOGO_HERO
 
 
 
+def _match_agents_to_calls(
+    calls: List[Dict[str, Any]],
+    agents: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Pair each <tool:subagent> call with the result it produced."""
+    remaining = list(agents or [])
+    paired: List[Dict[str, Any]] = []
+    for call in (calls or []):
+        role = str((call or {}).get("name") or (call or {}).get("role") or "").strip()
+        match: Dict[str, Any] = {}
+        for i, agent in enumerate(remaining):
+            if str(agent.get("role", "")).strip() == role:
+                match = agent
+                del remaining[i]
+                break
+        paired.append(match)
+    return paired
+
+
 class WorkerMixin:
     """Mixin for CMDAICodeTUI."""
 

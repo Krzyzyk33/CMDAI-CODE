@@ -1255,6 +1255,14 @@ class AgentRunner:
                 if notify and self.on_tool_start:
                     self.on_tool_start("edit", path)
                 res = tool_edit(ctx, path, old, new)
+                if isinstance(res, dict) and res.get("success", True):
+                    try:
+                        from ..core.custom_extensions import run_post_tool_hooks
+                        hook_res = run_post_tool_hooks(getattr(ctx, "workdir", self.workdir), "edit", args)
+                        if hook_res:
+                            res["hook_results"] = hook_res
+                    except Exception:
+                        pass
                 if notify and self.on_tool_finish:
                     self.on_tool_finish("edit", path, res)
                 return res
@@ -1322,6 +1330,14 @@ class AgentRunner:
                 if notify and self.on_tool_start:
                     self.on_tool_start("write", path)
                 res = tool_write(ctx, path, content)
+                if isinstance(res, dict) and res.get("success", True):
+                    try:
+                        from ..core.custom_extensions import run_post_tool_hooks
+                        hook_res = run_post_tool_hooks(getattr(ctx, "workdir", self.workdir), "write", args)
+                        if hook_res:
+                            res["hook_results"] = hook_res
+                    except Exception:
+                        pass
                 if notify and self.on_tool_finish:
                     self.on_tool_finish("write", path, res)
                 return res
@@ -2258,10 +2274,19 @@ def get_agent_system_prompt(workdir: str = ".", mode: str = "auto", vision: bool
         directives_block = _FULL_DIRECTIVES_BLOCK
 
     project_rules = load_project_instructions(workdir)
+    repo_map_section = ""
+    try:
+        from ..indexer.repo_map import build_repo_map
+        rmap = build_repo_map(abs_work, max_tokens=700, max_files=80)
+        if rmap:
+            repo_map_section = f"\n\n### REPOSITORY AST MAP (STATIC OVERVIEW)\n```text\n{rmap}\n```"
+    except Exception:
+        repo_map_section = ""
     return (
         f"\n\n### AUTONOMOUS CODE AGENT ({mode_clean.upper()} MODE) IN WORKSPACE: `{abs_work}`\n"
         f"{mode_section}\n\n"
         f"{tools_block}"
         f"{directives_block}"
         f"{project_rules}"
+        f"{repo_map_section}"
     )

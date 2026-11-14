@@ -475,3 +475,54 @@ class SubagentOrchestrator:
                         status="failed",
                     ))
         return results
+
+    def run_concurrent_worktrees(
+        self,
+        tasks: List[SubagentTask],
+        repo_dir: str,
+        tool_executor_for_workdir: Callable[[str, str], Callable[[str, Dict[str, str]], Dict[str, Any]]],
+        on_progress: Optional[Callable[[SubagentProgress], None]] = None,
+        model_call: Optional[Callable[[List[Dict[str, Any]], SubagentTask], str]] = None,
+        max_turns: int = 25,
+        cleanup_clean: bool = True,
+    ) -> List[SubagentResult]:
+        """Run concurrent subagents, each isolated in its own git worktree."""
+        from .worktree import create_worktree, is_git_repo, remove_worktree, worktree_changed_files
+
+        if not is_git_repo(repo_dir):
+            return self.run_concurrent(
+                tasks=tasks,
+                on_progress=on_progress,
+                model_call=model_call,
+                max_turns=max_turns,
+                tool_executor_factory=lambda role: tool_executor_for_workdir(role, repo_dir),
+            )
+
+        worktrees: Dict[str, Any] = {}
+        try:
+            for t in tasks:
+                worktrees[t.role] = create_worktree(repo_dir, t.role)
+
+            results = self.run_concurrent(
+                tasks=tasks,
+                on_progress=on_progress,
+                model_call=model_call,
+                max_turns=max_turns,
+                tool_executor_factory=lambda role: tool_executor_for_workdir(role, worktrees[role].path),
+            )
+            for res in results:
+                wt = worktrees.get(res.role)
+                if wt is not None:
+                    changed = worktree_changed_files(wt)
+                    if changed:
+                        res.findings.append(f"Worktree ({wt.branch}) modified: {', '.join(changed)}")
+                    elif cleanup_clean:
+                        remove_worktree(wt, delete_branch=True)
+            return results
+        except Exception:
+            for wt in worktrees.values():
+                try:
+                    remove_worktree(wt, delete_branch=True)
+                except Exception:
+                    pass
+            raise

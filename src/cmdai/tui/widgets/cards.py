@@ -1872,7 +1872,10 @@ class ToolBlock(Vertical):
             is_cmd_or_subagent = bool(self.subagent_role) or tl in (
                 "command", "terminal", "shell", "bash", "cmd", "run_command", "sh", "exec", "subagent"
             )
-            if self.tool_running and is_cmd_or_subagent and elapsed >= 1.5 and not getattr(self, "is_backgrounded", False):
+            is_subagent = bool(self.subagent_role) or tl in ("subagent", "task")
+            is_local_prov = str(getattr(getattr(self, "app", None), "current_provider", "") or "").lower() in ("local_gguf", "localllmapi")
+            can_bg = is_cmd_or_subagent and not (is_subagent and is_local_prov)
+            if self.tool_running and can_bg and elapsed >= 1.5 and not getattr(self, "is_backgrounded", False):
                 if self.bg_hint_widget.styles.display != "block":
                     from rich.text import Text
                     self.bg_hint_widget.update(Text("\n  [Ctrl+B] send to background", style="dim #8b949e"))

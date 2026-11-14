@@ -1016,8 +1016,9 @@ class UIMixin:
 
 
     def action_send_to_background(self) -> None:
-        if self.agent_runner:
-            self.agent_runner.request_background()
+        prov = str(getattr(self, "current_provider", "") or "").lower()
+        is_local = prov in ("local_gguf", "localllmapi")
+        target_block = None
         try:
             card = self._current_assistant_card
             if card is not None:
@@ -1025,18 +1026,35 @@ class UIMixin:
                 for b in reversed(blocks):
                     if getattr(b, "tool_running", False) and not getattr(b, "is_backgrounded", False):
                         tl = (getattr(b, "tool_name", "") or "").lower()
-                        if getattr(b, "subagent_role", "") or tl in (
-                            "command", "terminal", "shell", "bash", "cmd", "run_command", "sh", "exec", "subagent", "task"
+                        is_sub = bool(getattr(b, "subagent_role", "")) or tl in ("subagent", "task")
+                        if is_sub and is_local:
+                            self.notify(
+                                "Subagents cannot be moved to background with a local model (commands still can).",
+                                title="Background Task",
+                                severity="warning",
+                                timeout=3.5,
+                            )
+                            return
+                        if is_sub or tl in (
+                            "command", "terminal", "shell", "bash", "cmd", "run_command", "sh", "exec"
                         ):
-                            b.is_backgrounded = True
-                            b.mark_backgrounded()
-                            sid = getattr(b, "subagent_id", "")
-                            if sid:
-                                from ...agent.tasks import BackgroundTaskManager
-                                BackgroundTaskManager.get_instance().mark_subagent_background(sid)
+                            target_block = b
                             break
         except Exception:
             pass
+
+        if self.agent_runner:
+            self.agent_runner.request_background()
+        if target_block is not None:
+            try:
+                target_block.is_backgrounded = True
+                target_block.mark_backgrounded()
+                sid = getattr(target_block, "subagent_id", "")
+                if sid:
+                    from ...agent.tasks import BackgroundTaskManager
+                    BackgroundTaskManager.get_instance().mark_subagent_background(sid)
+            except Exception:
+                pass
         try:
             self.notify(
                 "Task moved to background.\nType /bg to open task manager.",
@@ -1417,12 +1435,20 @@ class UIMixin:
         if val.startswith("/"):
             self._hint_kind = "command"
             v = val.lower()
+            all_docs = dict(COMMANDS_DOC)
+            try:
+                from ...core.custom_extensions import list_custom_commands
+                for cc in list_custom_commands(self.workdir):
+                    all_docs.setdefault(cc["name"], f"[custom] {cc['description']}")
+            except Exception:
+                pass
             matches = []
-            for c, _desc in COMMANDS_DOC.items():
+            for c, _desc in all_docs.items():
                 cl = c.lower()
                 if cl.startswith(v) or (len(v) > 1 and v[1:] in cl[1:]):
                     matches.append(c)
             self._hint_matches = matches
+            self._custom_hint_docs = all_docs
         elif mention is not None:
             self._hint_kind = "file"
             self._hint_matches = self._match_workspace_files(mention)
@@ -1435,7 +1461,8 @@ class UIMixin:
         if self._hint_kind == "file":
             lines = [f"[b #58a6ff]{path}[/]  [dim]file[/]" for path in self._hint_matches]
         else:
-            lines = [f"[b #58a6ff]{cmd}[/]  [dim]{COMMANDS_DOC.get(cmd, '')}[/]"
+            docs_map = getattr(self, "_custom_hint_docs", None) or COMMANDS_DOC
+            lines = [f"[b #58a6ff]{cmd}[/]  [dim]{docs_map.get(cmd, '')}[/]"
                      for cmd in self._hint_matches]
         container_map = {
             "hero-prompt-input": "#hero-cmd-hints",

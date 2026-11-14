@@ -757,6 +757,32 @@ class StreamResult(tuple):
         return obj
 
 
+def apply_prompt_cache_hints(
+    provider_id: str,
+    base_url: str,
+    payload: Dict[str, Any],
+    is_local_http: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Attach prefix-caching hints for local llama.cpp servers and cloud APIs."""
+    local = is_local_http
+    if local is None:
+        local = provider_id == "localllmapi" or str(base_url or "").startswith(
+            ("http://127.0.0.1", "http://localhost", "http://192.168.", "http://10.", "http://172.")
+        )
+    if local:
+        payload.setdefault("cache_prompt", True)
+    elif provider_id == "anthropic":
+        msgs = payload.get("messages")
+        if isinstance(msgs, list) and msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
+            content = msgs[0].get("content")
+            if isinstance(content, str) and content.strip():
+                msgs[0] = {
+                    "role": "system",
+                    "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
+                }
+    return payload
+
+
 def stream_chat_completion(
     provider_id: str,
     model_id: str,
@@ -948,6 +974,7 @@ def stream_chat_completion(
         is_local_http = provider_id == "localllmapi" or base_url.startswith(
             ("http://127.0.0.1", "http://localhost", "http://192.168.", "http://10.", "http://172.")
         )
+        apply_prompt_cache_hints(provider_id, base_url, payload, is_local_http=is_local_http)
         req_timeout = (10.0, 600.0) if is_local_http else (15.0, 300.0)
         resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=req_timeout)
         _capture_ctx_headers(resp)
@@ -964,6 +991,7 @@ def stream_chat_completion(
             payload.pop("reasoning_effort", None)
             payload.pop("reasoning", None)
             payload.pop("chat_template_kwargs", None)
+            payload.pop("cache_prompt", None)
             if provider_id == "localllmapi" or (resp.status_code in (400, 422) and "tool" in (resp.text or "").lower()):
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)

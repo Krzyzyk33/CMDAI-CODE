@@ -336,6 +336,9 @@ def main():
     parser.add_argument("--workdir", default="", help="Target project working directory")
     parser.add_argument("--provider", default="", help="LLM Provider ID")
     parser.add_argument("--model", default="", help="Model ID")
+    parser.add_argument("-p", "--prompt", default="", help="Run a single headless prompt and exit")
+    parser.add_argument("--continue", dest="continue_session", action="store_true", help="Continue the latest session")
+    parser.add_argument("--output-format", default="text", choices=["text", "json"], help="Headless output format")
     parser.add_argument("--install-launcher", action="store_true", help="Install global Windows PATH launcher")
     parser.add_argument("-h", "--help", action="store_true", help="Show help message")
     args, unknown = parser.parse_known_args()
@@ -349,7 +352,11 @@ def main():
     except Exception:
         pass
 
-    if args.help or args.command in ("help", "-h", "--help"):
+    if (
+        args.help
+        or args.command in ("help", "-h", "--help")
+        or (args.command == "code" and args.path in ("help", "-h", "--help"))
+    ):
         print_usage = True
     else:
         print_usage = False
@@ -359,6 +366,12 @@ def main():
 
     if args.command in ("addlocal", "add-model", "code-addlocal") or "code addlocal" in args_joined:
         sys.exit(handle_add_local_model())
+
+    if args.command == "map" or (len(sys.argv) > 1 and sys.argv[1].lower() == "map"):
+        from cmdai.tui.map_app import CMDAIMapApp
+        target_dir = args.path or args.workdir or os.getcwd()
+        CMDAIMapApp(workdir=os.path.abspath(target_dir)).run()
+        return
 
     if args.command == "editor" or (len(sys.argv) > 1 and sys.argv[1].lower() == "editor"):
         try:
@@ -384,26 +397,37 @@ def main():
 
     if print_usage or (args.command and args.command not in ("code", "app", "")):
         print("""
-  \x1b[36m██████╗███╗   ███╗██████╗  █████╗ ██╗   \x1b[97m██████╗ ██████╗ ██████╗ ███████╗\x1b[0m
- \x1b[36m██╔════╝████╗ ████║██╔══██╗██╔══██╗██║  \x1b[97m██╔════╝██╔═══██╗██╔══██╗██╔════╝\x1b[0m
- \x1b[36m██║     ██╔████╔██║██║  ██║███████║██║  \x1b[97m██║     ██║   ██║██║  ██║█████╗  \x1b[0m
- \x1b[36m██║     ██║╚██╔╝██║██║  ██║██╔══██║██║  \x1b[97m██║     ██║   ██║██║  ██║██╔══╝  \x1b[0m
- \x1b[36m╚██████╗██║ ╚═╝ ██║██████╔╝██║  ██║██║  \x1b[97m╚██████╗╚██████╔╝██████╔╝███████╗\x1b[0m
-  \x1b[36m╚═════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝   \x1b[97m╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝\x1b[0m
+  \x1b[97m██████╗███╗   ███╗██████╗  █████╗ ██╗   ██████╗ ██████╗ ██████╗ ███████╗
+ ██╔════╝████╗ ████║██╔══██╗██╔══██╗██║  ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+ ██║     ██╔████╔██║██║  ██║███████║██║  ██║     ██║   ██║██║  ██║█████╗  
+ ██║     ██║╚██╔╝██║██║  ██║██╔══██║██║  ██║     ██║   ██║██║  ██║██╔══╝  
+ ╚██████╗██║ ╚═╝ ██║██████╔╝██║  ██║██║  ╚██████╗╚██████╔╝██████╔╝███████╗
+  ╚═════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝\x1b[0m
 
-\x1b[1mUżycie / Usage:\x1b[0m
-  cmdai code [katalog]      Uruchomienie asystenta terminalowego CMDAI CODE
-  cmdai mcp [komenda]       Zarządzanie serwerami MCP (list, add, remove, test)
-  cmdai update              Aktualizacja z repozytorium GitHub
-  cmdai addlocal            Dodanie lokalnego modelu GGUF
-  cmdai editor [plik]       Wbudowany edytor kodu
-  cmdai --install-launcher  Instalacja globalnego launchera Windows
+\x1b[1mUsage:\x1b[0m
+  cmdai code [dir]                 Launch the CMDAI CODE terminal assistant
+  cmdai code help                  Show full CLI help without starting TUI
+  cmdai mcp [command]              Manage MCP servers (list, add, remove, test)
+  cmdai update                     Update from the GitHub repository
+  cmdai addlocal                   Add a local GGUF model
+  cmdai editor [file]              Built-in code editor
+  cmdai map [dir]                  Interactive AST Mind Map & dependency graph
+  cmdai --install-launcher         Install global Windows PATH launcher
 
-\x1b[1mOpcje / Options:\x1b[0m
-  --workdir <ścieżka>       Katalog roboczy projektu
-  --provider <nazwa>        ID dostawcy LLM
-  --model <nazwa>           Nazwa lub ID modelu
-  -h, --help                Pomoc
+\x1b[1mHeadless CLI Mode (no TUI):\x1b[0m
+  cmdai -p "find bugs in auth.py"             Run a single prompt and exit
+  cmdai -p "continue" --continue              Continue latest session in workdir
+  git diff | cmdai -p "review changes"        Read context from stdin pipe
+  cmdai -p "analyze" --output-format json     Emit structured JSON output
+
+\x1b[1mOptions:\x1b[0m
+  --workdir <path>                 Project working directory
+  --provider <name>                LLM provider ID
+  --model <name>                   Model name or ID
+  -p, --prompt <text>              Headless mode (run prompt without TUI and exit)
+  --continue                       Continue the latest session
+  --output-format <fmt>            Headless output format: text or json
+  -h, --help                       Show help message
 """)
         return
 
@@ -418,6 +442,26 @@ def main():
         os.chdir(workdir)
     except Exception:
         pass
+
+    stdin_text = ""
+    try:
+        if sys.stdin is not None and not sys.stdin.isatty():
+            stdin_text = sys.stdin.read()
+    except Exception:
+        stdin_text = ""
+
+    if args.prompt or stdin_text.strip():
+        from cmdai.core.headless import combine_prompt_and_stdin, print_headless_result, run_headless
+        combined_prompt = combine_prompt_and_stdin(args.prompt, stdin_text)
+        res = run_headless(
+            prompt=combined_prompt,
+            workdir=workdir,
+            provider=args.provider,
+            model=args.model,
+            continue_session=args.continue_session,
+            output_format=args.output_format,
+        )
+        sys.exit(print_headless_result(res, output_format=args.output_format))
     try:
         sys.stdout.write("\x1b[2J\x1b[3J\x1b[H\x1b]11;#000000\x07")
         sys.stdout.flush()
